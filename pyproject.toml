@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qbalance"
+version = "0.1.0"
+description = "Balancing workflow library for quantum compilation/mitigation benchmarking with Qiskit."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Soumyadip Sarkar" }]
+keywords = ["quantum", "qiskit", "transpiler", "error-mitigation", "benchmarking", "workflow"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+  "numpy>=1.22",
+  "pydantic>=2.5",
+  "typer>=0.9",
+  "rich>=13.7",
+  "platformdirs>=4.0",
+  "qiskit>=2.0",
+]
+
+[project.optional-dependencies]
+aer = ["qiskit-aer>=0.14"]
+runtime = ["qiskit-ibm-runtime>=0.24"]
+mitigation = ["mthree>=3.0.0"]
+cutting = ["qiskit-addon-cutting>=0.7.0"]
+report = ["jinja2>=3.1", "matplotlib>=3.7", "pandas>=2.0"]
+dev = ["pytest>=7.4", "ruff>=0.5", "mypy>=1.7", "types-PyYAML"]
+all = [
+  "qiskit-aer>=0.14",
+  "qiskit-ibm-runtime>=0.24",
+  "mthree>=3.0.0",
+  "qiskit-addon-cutting>=0.7.0",
+  "jinja2>=3.1",
+  "matplotlib>=3.7",
+  "pandas>=2.0",
+  "pytest>=7.4",
+  "ruff>=0.5",
+  "mypy>=1.7",
+  "types-PyYAML",
+]
+
+[project.scripts]
+qbalance = "qbalance.cli:app"
+
+[project.entry-points."qbalance.backends"]
+"fake" = "qbalance.backends.fake:resolve"
+"aer" = "qbalance.backends.aer:resolve"
+
+[project.entry-points."qbalance.objectives"]
+"default" = "qbalance.objectives:default_objective"
+
+[project.entry-points."qbalance.reports"]
+"markdown" = "qbalance.reports.markdown:render_markdown"
+"html" = "qbalance.reports.html:render_html"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
