@@ -1,6 +1,23 @@
-# qbalance
+<h1 align="center">
+qBalance
+</h1>
+<h3 align="center">
+A workflow toolkit for balancing quantum compilation, suppression, and mitigation choices over a dataset of quantum circuits.
+</h3>
 
-`qbalance` is a workflow toolkit for balancing quantum compilation, suppression, and mitigation choices over a dataset of quantum circuits.
+---
+
+<div align="center">
+
+[![Current Release](https://img.shields.io/github/release/neuralsorcerer/qbalance.svg)](https://github.com/neuralsorcerer/qbalance/releases)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Test Linux](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml?query=branch%3Amain)
+[![Test Windows](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml?query=branch%3Amain)
+[![Test MacOS](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml?query=branch%3Amain)
+[![Lints](https://github.com/neuralsorcerer/qbalance/actions/workflows/lint.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/lint.yml?query=branch%3Amain)
+[![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
+
+</div>
 
 At a high level, it provides a reproducible pipeline to:
 
@@ -28,7 +45,7 @@ qbalance provides a single workflow that keeps these trade-offs explicit and rep
 
 ## Core capabilities
 
-- **Dataset IO**: save/load datasets using a JSON index and QPY artifacts.
+- **Dataset IO**: save/load datasets using a JSON index and QPY artifacts with record-level metadata.
 - **Backend resolution**: plugin-based backend specification (`fake:*`, `aer:*`, custom).
 - **Strategy model**: immutable `StrategySpec` with compile/suppression/mitigation controls.
 - **Search modes**:
@@ -461,13 +478,27 @@ python -m qbalance plugins list
 
 ---
 
+## Correctness and complexity notes
+
+For a dataset with $N$ circuits and $S$ strategy candidates per circuit:
+
+- **Grid search** evaluates up to $N\times S$ candidates.
+- **Bandit search** also compiles/evaluates up to $N\times S$ candidates in the worst case, but may discover strong candidates earlier due to adaptive ordering.
+- **Pareto filtering** in practice is close to linear in small fronts, with a quadratic worst-case bound on the number of unique objective vectors.
+
+If a compile cache hit occurs, effective transpilation cost is reduced from repeated compile cost $T_{compile}$ to key lookup + deserialization overhead.
+
+
 ## Development
 
 ```bash
 # Install editable package with all extras
 pip install -e ".[all]"
 
-# Run tests
+# Install hooks once
+pre-commit install
+
+# Run tests with warnings promoted to errors
 pytest -q -W error
 
 # Run formatting/lint/type hooks
