@@ -16,6 +16,8 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 [![Test MacOS](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml?query=branch%3Amain)
 [![Lints](https://github.com/neuralsorcerer/qbalance/actions/workflows/lint.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/lint.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2605.02966-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2605.02966)
+[![DOI:48550/arXiv.2605.02966](https://img.shields.io/badge/DOI-10.48550/arXiv.2605.02966-blue.svg)](https://doi.org/10.48550/arXiv.2605.02966)
 
 </div>
 
@@ -506,6 +508,22 @@ pre-commit run --all-files
 ```
 
 ---
+
+## Citation
+
+If you use qbalance in your work and wish to refer to it, please use the following BibTeX entry.
+
+```bibtex
+@misc{sarkar2026qbalancereproduciblemultiobjectiveworkflow,
+      title={QBalance: A Reproducible Multi-Objective Workflow for Quantum Compilation, Noise Suppression, and Error-Mitigation Strategy Selection}, 
+      author={Soumyadip Sarkar},
+      year={2026},
+      eprint={2605.02966},
+      archivePrefix={arXiv},
+      primaryClass={quant-ph},
+      url={https://arxiv.org/abs/2605.02966}, 
+}
+```
 
 ## License
 

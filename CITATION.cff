@@ -1,0 +1,20 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: >-
+  QBalance: A Reproducible Multi-Objective Workflow for Quantum Compilation, Noise Suppression, and Error-Mitigation Strategy Selection
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Soumyadip
+    family-names: Sarkar
+    orcid: 'https://orcid.org/0000-0002-2377-9147'
+identifiers:
+  - type: doi
+    value: 10.48550/arXiv.2605.02966
+repository-code: 'https://github.com/neuralsorcerer/qbalance'
+repository: 'https://arxiv.org/abs/2605.02966'
+license: MIT
