@@ -13,6 +13,7 @@ import numpy as np
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
+from qbalance.utils import instruction_parts
 
 log = get_logger(__name__)
 
@@ -120,6 +121,36 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
     return pm
 
 
+def _bit_index(circuit: Any, bit: Any) -> int:
+    """Return a stable bit index for Qiskit bit objects and lightweight stubs."""
+    finder = getattr(circuit, "find_bit", None)
+    if callable(finder):
+        try:
+            return int(finder(bit).index)
+        except Exception:
+            pass
+
+    index = getattr(bit, "index", None)
+    if index is not None:
+        return int(index)
+
+    private_index = getattr(bit, "_index", None)
+    if private_index is not None:
+        return int(private_index)
+
+    raise AttributeError("Unable to determine bit index")
+
+
+def _is_terminal_measurement(data: list[Any], index: int) -> bool:
+    """Return true when no later operation can depend on an uncorrected result."""
+    terminal_safe_ops = {"barrier", "delay", "measure"}
+    for later_entry in data[index + 1 :]:
+        later_inst, _, _ = instruction_parts(later_entry)
+        if getattr(later_inst, "name", "") not in terminal_safe_ops:
+            return False
+    return True
+
+
 def apply_measurement_twirling(
     circuit: Any, seed: Optional[int] = None
 ) -> Tuple[Any, Dict[int, int]]:
@@ -143,20 +174,50 @@ def apply_measurement_twirling(
         ) from e
 
     rng = np.random.default_rng(seed)
-    qc = circuit.copy()
     flip_map: Dict[int, int] = {}
 
-    # scan measurements; if mid-circuit measurement, we flip before each measurement
-    for inst, qargs, cargs in list(qc.data):
+    # Measurement twirling is only semantics-preserving for the terminal
+    # measurement block when correction is represented as a final count-key
+    # permutation. Mid-circuit measurements may feed classical control flow or
+    # define the post-measurement quantum state, so this lightweight transform
+    # intentionally leaves them unchanged.
+    copy_empty_like = getattr(circuit, "copy_empty_like", None)
+    if callable(copy_empty_like):
+        qc = copy_empty_like()
+        data = list(circuit.data)
+        for index, entry in enumerate(data):
+            inst, qargs, cargs = instruction_parts(entry)
+            should_twirl = (
+                getattr(inst, "name", "") == "measure"
+                and len(qargs) == 1
+                and len(cargs) == 1
+                and _is_terminal_measurement(data, index)
+            )
+            if should_twirl:
+                cb = _bit_index(circuit, cargs[0])
+                flip = int(rng.integers(0, 2))
+                if flip == 1:
+                    qc.x(qargs[0])
+                    flip_map[cb] = flip_map.get(cb, 0) ^ 1
+            qc.append(inst, qargs, cargs)
+        return qc, flip_map
+
+    # Lightweight circuit stubs used by tests may not support reconstruction.
+    # Preserve compatibility by falling back to in-place-style copy behavior.
+    qc = circuit.copy()
+    data = list(qc.data)
+    for index, entry in enumerate(data):
+        inst, qargs, cargs = instruction_parts(entry)
         if (
             getattr(inst, "name", "") == "measure"
             and len(qargs) == 1
             and len(cargs) == 1
+            and _is_terminal_measurement(data, index)
         ):
-            cb = cargs[0].index
+            cb = _bit_index(qc, cargs[0])
             flip = int(rng.integers(0, 2))
             if flip == 1:
-                qb = qargs[0].index
+                qb = _bit_index(qc, qargs[0])
                 qc.x(qb)
                 flip_map[cb] = flip_map.get(cb, 0) ^ 1
     return qc, flip_map

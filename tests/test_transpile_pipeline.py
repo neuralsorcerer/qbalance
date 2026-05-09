@@ -139,3 +139,42 @@ def test_noise_layout_suppression_and_pipeline(monkeypatch):
     )
     assert out is not None
     assert met["estimated_error"] == 0.123
+
+
+def test_measurement_twirling_inserts_flip_before_measurement(monkeypatch):
+    from qiskit import QuantumCircuit
+
+    monkeypatch.setattr(
+        suppression.np.random,
+        "default_rng",
+        lambda seed=None: types.SimpleNamespace(integers=lambda a, b: 1),
+    )
+
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+
+    twirled, flip_map = suppression.apply_measurement_twirling(qc, seed=123)
+
+    assert flip_map == {0: 1}
+    assert [inst.operation.name for inst in twirled.data] == ["h", "x", "measure"]
+
+
+def test_measurement_twirling_skips_nonterminal_measurements(monkeypatch):
+    from qiskit import QuantumCircuit
+
+    monkeypatch.setattr(
+        suppression.np.random,
+        "default_rng",
+        lambda seed=None: types.SimpleNamespace(integers=lambda a, b: 1),
+    )
+
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+    qc.x(0)
+
+    twirled, flip_map = suppression.apply_measurement_twirling(qc, seed=123)
+
+    assert flip_map == {}
+    assert [inst.operation.name for inst in twirled.data] == ["h", "measure", "x"]

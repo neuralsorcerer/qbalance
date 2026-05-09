@@ -70,3 +70,59 @@ def test_mthree_and_zne(monkeypatch):
         zne.zne_extrapolate_counts([1.0], [{"0": 1}], degree=True)
     with pytest.raises(ValueError):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"0": 0}, {"0": 1}])
+
+
+def test_fold_global_preserves_terminal_measurements():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1, name="measured")
+    qc.h(0)
+    qc.measure(0, 0)
+
+    folded = zne.fold_global(qc, 3.0)
+
+    assert [inst.operation.name for inst in folded.data] == [
+        "h",
+        "h",
+        "h",
+        "measure",
+    ]
+    assert folded.num_clbits == 1
+
+
+def test_fold_global_rejects_invalid_scale_and_nonterminal_measurement():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+
+    for bad_scale in (0.5, float("nan"), float("inf"), True, "bad"):
+        with pytest.raises(ValueError):
+            zne.fold_global(qc, bad_scale)  # type: ignore[arg-type]
+
+    measured = QuantumCircuit(1, 1)
+    measured.h(0)
+    measured.measure(0, 0)
+    measured.x(0)
+
+    with pytest.raises(ValueError):
+        zne.fold_global(measured, 3.0)
+
+
+def test_fold_global_preserves_terminal_barriers_after_measurements():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+    qc.barrier(0)
+
+    folded = zne.fold_global(qc, 3.0)
+
+    assert [inst.operation.name for inst in folded.data] == [
+        "h",
+        "h",
+        "h",
+        "measure",
+        "barrier",
+    ]

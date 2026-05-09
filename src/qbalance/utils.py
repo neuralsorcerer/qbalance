@@ -77,6 +77,30 @@ def load_json(path: Path) -> Dict[str, Any]:
     return cast(Dict[str, Any], data)
 
 
+def instruction_parts(entry: Any) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]]:
+    """Return instruction, qubits, and clbits for Qiskit and tuple-style entries.
+
+    Args:
+        entry: Circuit instruction entry from Qiskit or a lightweight tuple-style stub.
+
+    Returns:
+        Tuple containing the operation object, qubit tuple, and clbit tuple.
+
+    Raises:
+        ValueError: Raised when the entry cannot be interpreted as a circuit instruction.
+    """
+    if hasattr(entry, "operation"):
+        return entry.operation, tuple(entry.qubits), tuple(entry.clbits)
+
+    try:
+        inst, qargs, cargs = entry
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "instruction entry must provide operation, qubits, and clbits"
+        ) from exc
+    return inst, tuple(qargs), tuple(cargs)
+
+
 def default_cache_dir(app: str = "qbalance") -> Path:
     """Return the default cache dir configuration used by qbalance.
 

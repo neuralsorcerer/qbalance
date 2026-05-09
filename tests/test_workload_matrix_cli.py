@@ -808,3 +808,31 @@ def test_choose_pareto_handles_non_mapping_metrics_entries():
         objective=default_objective(),
     )
     assert chosen_spec.optimization_level == 1
+
+
+def test_compile_cache_separates_profile_mode(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_compile(circuit, backend, spec, profile):
+        calls.append(profile)
+        metrics = {"depth": 1}
+        if profile:
+            metrics["pass_profile"] = {"passes": []}
+        return circuit, metrics
+
+    monkeypatch.setattr(wl, "fingerprint_circuit", lambda circuit: "fingerprint")
+    monkeypatch.setattr(wl, "compile_one", fake_compile)
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1)
+    qc.h(0)
+    backend = types.SimpleNamespace(name=lambda: "backend")
+    spec = StrategySpec()
+
+    _, no_profile_metrics = wl._compile_cached(qc, backend, spec, False, tmp_path)
+    _, profile_metrics = wl._compile_cached(qc, backend, spec, True, tmp_path)
+
+    assert calls == [False, True]
+    assert "pass_profile" not in no_profile_metrics
+    assert "pass_profile" in profile_metrics

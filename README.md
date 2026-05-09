@@ -515,13 +515,13 @@ If you use qbalance in your work and wish to refer to it, please use the followi
 
 ```bibtex
 @misc{sarkar2026qbalancereproduciblemultiobjectiveworkflow,
-      title={QBalance: A Reproducible Multi-Objective Workflow for Quantum Compilation, Noise Suppression, and Error-Mitigation Strategy Selection}, 
+      title={QBalance: A Reproducible Multi-Objective Workflow for Quantum Compilation, Noise Suppression, and Error-Mitigation Strategy Selection},
       author={Soumyadip Sarkar},
       year={2026},
       eprint={2605.02966},
       archivePrefix={arXiv},
       primaryClass={quant-ph},
-      url={https://arxiv.org/abs/2605.02966}, 
+      url={https://arxiv.org/abs/2605.02966},
 }
 ```
 

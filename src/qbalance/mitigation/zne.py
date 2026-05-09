@@ -11,8 +11,40 @@ from typing import Any, Dict, Mapping, Sequence
 import numpy as np
 
 from qbalance.logging import get_logger
+from qbalance.utils import instruction_parts
 
 log = get_logger(__name__)
+
+
+def _split_terminal_suffix(
+    circuit: Any,
+) -> tuple[Any, list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]]]:
+    """Return an invertible prefix plus a terminal measurement/barrier suffix."""
+    copy_empty_like = getattr(circuit, "copy_empty_like", None)
+    if not callable(copy_empty_like):
+        return circuit, []
+
+    suffix_seen = False
+    terminal_suffix_ops = {"barrier", "delay", "measure"}
+    unitary = copy_empty_like()
+    suffix: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]] = []
+    for entry in list(getattr(circuit, "data", [])):
+        inst, qargs, cargs = instruction_parts(entry)
+        inst_name = getattr(inst, "name", "")
+        if inst_name == "measure":
+            suffix_seen = True
+
+        if suffix_seen:
+            if inst_name not in terminal_suffix_ops:
+                raise ValueError(
+                    "Global folding supports circuits with measurements only when all measurements are terminal."
+                )
+            suffix.append((inst, qargs, cargs))
+            continue
+
+        unitary.append(inst, qargs, cargs)
+
+    return unitary, suffix
 
 
 def fold_global(circuit: Any, scale: float) -> Any:
@@ -28,21 +60,34 @@ def fold_global(circuit: Any, scale: float) -> Any:
     Raises:
         None.
     """
-    if scale <= 1.0:
+    if isinstance(scale, (bool, np.bool_)):
+        raise ValueError("scale must be a finite real value >= 1.0")
+    try:
+        scale_f = float(scale)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("scale must be a finite real value >= 1.0") from exc
+    if not np.isfinite(scale_f) or scale_f < 1.0:
+        raise ValueError("scale must be a finite real value >= 1.0")
+    if scale_f == 1.0:
         return circuit
 
     # odd integer close to scale
-    k = int(np.ceil(scale))
+    k = int(np.ceil(scale_f))
     if k % 2 == 0:
         k += 1
 
-    qc = circuit.copy()
-    inv = circuit.inverse()
+    base, terminal_suffix = _split_terminal_suffix(circuit)
+    qc = base.copy()
+    inv = base.inverse()
     # construct: U (U^dag U)^{(k-1)/2}
-    out = circuit.copy()
+    out = base.copy()
     reps = (k - 1) // 2
     for _ in range(reps):
         out = out.compose(inv).compose(qc)
+
+    for inst, qargs, cargs in terminal_suffix:
+        out.append(inst, qargs, cargs)
+
     out.name = f"{getattr(circuit,'name','circuit')}_fold{k}"
     return out
 

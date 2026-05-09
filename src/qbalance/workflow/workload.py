@@ -452,7 +452,7 @@ def _compile_cached(
     if callable(backend_name):
         backend_name = backend.name()
     backend_name = str(backend_name or backend.__class__.__name__)
-    key = f"{backend_name}:{fpr}:{spec.model_dump_json()}"
+    key = f"{backend_name}:{fpr}:{spec.model_dump_json()}:profile={profile}"
     import hashlib
 
     key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
