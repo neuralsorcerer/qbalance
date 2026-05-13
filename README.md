@@ -9,6 +9,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 
 <div align="center">
 
+[![Qiskit Ecosystem](https://qisk.it/e-88affdcb)](https://qisk.it/e)
 [![Current Release](https://img.shields.io/github/release/neuralsorcerer/qbalance.svg)](https://github.com/neuralsorcerer/qbalance/releases)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Test Linux](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml?query=branch%3Amain)
