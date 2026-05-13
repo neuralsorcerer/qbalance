@@ -22,6 +22,18 @@ def test_metrics_objective_search_and_runtime_options():
 
     m = extract_circuit_metrics(_Circ())
     assert m["two_qubit_ops"] == 1.0
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(2, 2)
+    qc.t(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    qiskit_metrics = extract_circuit_metrics(qc)
+    assert qiskit_metrics["two_qubit_ops"] == 1.0
+    assert qiskit_metrics["measures"] == 2.0
+    assert qiskit_metrics["t_count"] == 1.0
+
     obj = Objective({"depth": 2.0, "x": 1.0})
     assert obj.score({"depth": 3, "x": "bad"}) == 6.0
     assert default_objective().weights["estimated_error"] == 10.0

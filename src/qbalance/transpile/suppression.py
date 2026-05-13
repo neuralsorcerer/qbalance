@@ -13,7 +13,7 @@ import numpy as np
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
-from qbalance.utils import instruction_parts
+from qbalance.utils import bit_index, instruction_parts
 
 log = get_logger(__name__)
 
@@ -121,26 +121,6 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
     return pm
 
 
-def _bit_index(circuit: Any, bit: Any) -> int:
-    """Return a stable bit index for Qiskit bit objects and lightweight stubs."""
-    finder = getattr(circuit, "find_bit", None)
-    if callable(finder):
-        try:
-            return int(finder(bit).index)
-        except Exception:
-            pass
-
-    index = getattr(bit, "index", None)
-    if index is not None:
-        return int(index)
-
-    private_index = getattr(bit, "_index", None)
-    if private_index is not None:
-        return int(private_index)
-
-    raise AttributeError("Unable to determine bit index")
-
-
 def _is_terminal_measurement(data: list[Any], index: int) -> bool:
     """Return true when no later operation can depend on an uncorrected result."""
     terminal_safe_ops = {"barrier", "delay", "measure"}
@@ -194,7 +174,7 @@ def apply_measurement_twirling(
                 and _is_terminal_measurement(data, index)
             )
             if should_twirl:
-                cb = _bit_index(circuit, cargs[0])
+                cb = bit_index(circuit, cargs[0])
                 flip = int(rng.integers(0, 2))
                 if flip == 1:
                     qc.x(qargs[0])
@@ -214,10 +194,10 @@ def apply_measurement_twirling(
             and len(cargs) == 1
             and _is_terminal_measurement(data, index)
         ):
-            cb = _bit_index(qc, cargs[0])
+            cb = bit_index(qc, cargs[0])
             flip = int(rng.integers(0, 2))
             if flip == 1:
-                qb = _bit_index(qc, qargs[0])
+                qb = bit_index(qc, qargs[0])
                 qc.x(qb)
                 flip_map[cb] = flip_map.get(cb, 0) ^ 1
     return qc, flip_map

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from qbalance.utils import instruction_parts
+
 
 def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
     """Extract circuit metrics used by the qbalance workflow.
@@ -21,12 +23,15 @@ def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
     Raises:
         None.
     """
-    twoq = sum(1 for inst, qargs, _ in circuit.data if len(qargs) == 2)
+    instruction_data = [instruction_parts(entry) for entry in circuit.data]
+    twoq = sum(1 for _, qargs, _ in instruction_data if len(qargs) == 2)
     meas = sum(
-        1 for inst, _, _ in circuit.data if getattr(inst, "name", "") == "measure"
+        1 for inst, _, _ in instruction_data if getattr(inst, "name", "") == "measure"
     )
     t = sum(
-        1 for inst, _, _ in circuit.data if getattr(inst, "name", "") in ("t", "tdg")
+        1
+        for inst, _, _ in instruction_data
+        if getattr(inst, "name", "") in ("t", "tdg")
     )
     return {
         "depth": float(circuit.depth()),

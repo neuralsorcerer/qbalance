@@ -23,6 +23,7 @@ from qbalance.transpile.suppression import (
     apply_pauli_twirling,
     build_dd_pass_manager,
 )
+from qbalance.utils import instruction_parts
 
 log = get_logger(__name__)
 
@@ -164,7 +165,7 @@ def compile_one(
             "size": int(out.size()),
             "width": int(out.num_qubits),
             "two_qubit_ops": int(
-                sum(1 for inst, qargs, _ in out.data if len(qargs) == 2)
+                sum(1 for entry in out.data if len(instruction_parts(entry)[1]) == 2)
             ),
             "dd_applied": bool(dd_applied),
             "measurement_flip_map": flip_map,

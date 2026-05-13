@@ -94,6 +94,92 @@ def test_save_dataset_rejects_existing_directory_without_overwrite(
         save_dataset(dataset_dir, [_DummyCircuit("a")])
 
 
+def test_save_dataset_overwrite_removes_stale_artifacts(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    stale = dataset_dir / "stale.qpy"
+    stale.write_bytes(b"old")
+
+    dataset = save_dataset(dataset_dir, [_DummyCircuit("fresh")], overwrite=True)
+
+    assert dataset.records[0].artifact == "fresh.qpy"
+    assert not stale.exists()
+
+
+def test_save_dataset_overwrite_replaces_file_target(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.write_text("old", encoding="utf-8")
+
+    dataset = save_dataset(dataset_dir, [_DummyCircuit("fresh")], overwrite=True)
+
+    assert dataset_dir.is_dir()
+    assert dataset.records[0].artifact == "fresh.qpy"
+
+
+def test_save_dataset_preserves_existing_dataset_when_new_write_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+    original = save_dataset(dataset_dir, [_DummyCircuit("old")])
+    old_artifact = dataset_dir / original.records[0].artifact
+    old_payload = old_artifact.read_bytes()
+
+    import qiskit
+
+    def failing_dump(circuit, handle):
+        _ = (circuit, handle)
+        raise RuntimeError("dump failed")
+
+    qiskit.qpy.dump = failing_dump
+
+    with pytest.raises(RuntimeError, match="dump failed"):
+        save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
+
+    assert old_artifact.read_bytes() == old_payload
+    assert load_dataset(dataset_dir).records[0].name == "old"
+
+
+def test_save_dataset_restores_existing_dataset_when_commit_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+    original = save_dataset(dataset_dir, [_DummyCircuit("old")])
+    old_artifact = dataset_dir / original.records[0].artifact
+    old_payload = old_artifact.read_bytes()
+
+    import qbalance.dataset as dataset_mod
+
+    real_replace = dataset_mod.os.replace
+    calls = 0
+
+    def flaky_replace(src, dst):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("commit failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dataset_mod.os, "replace", flaky_replace)
+
+    with pytest.raises(OSError, match="commit failed"):
+        save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
+
+    assert old_artifact.read_bytes() == old_payload
+    assert load_dataset(dataset_dir).records[0].name == "old"
+
+
 def test_save_dataset_disambiguates_colliding_names(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):

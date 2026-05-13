@@ -302,7 +302,8 @@ def compile_cmd(
         c, m = compile_one(qc, backend=b, spec=spec, profile=False)
         meta["circuits"][rec.name] = m
         if qpy is not None:
-            with (out / "compiled" / f"{rec.name}.qpy").open("wb") as f:
+            artifact_stem = Path(rec.artifact).stem
+            with (out / "compiled" / f"{artifact_stem}.qpy").open("wb") as f:
                 qpy.dump(c, f)
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     console.print(f"[green]Wrote[/green] {out}")

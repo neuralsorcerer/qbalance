@@ -18,6 +18,7 @@ from qbalance.backends import aer, fake
 from qbalance.backends import resolver as backend_resolver
 from qbalance.errors import OptionalDependencyError, QBalanceError
 from qbalance.utils import (
+    bit_index,
     default_cache_dir,
     dump_json,
     load_json,
@@ -69,6 +70,23 @@ def test_utils_hash_and_json_helpers(tmp_path):
 def test_default_cache_dir_uses_app_name():
 
     assert default_cache_dir("qbalance").name == "qbalance"
+
+
+def test_bit_index_prefers_circuit_find_bit_and_validates_fallbacks():
+
+    bit = types.SimpleNamespace(index=5, _index=6)
+    circuit = types.SimpleNamespace(
+        find_bit=lambda b: types.SimpleNamespace(index=2) if b is bit else None
+    )
+    assert bit_index(circuit, bit) == 2
+
+    fallback_bit = types.SimpleNamespace(_index=3)
+    assert bit_index(types.SimpleNamespace(), fallback_bit) == 3
+
+    with pytest.raises(AttributeError):
+        bit_index(types.SimpleNamespace(), object())
+    with pytest.raises(ValueError):
+        bit_index(types.SimpleNamespace(), types.SimpleNamespace(index=-1))
 
 
 def _install_fake_qiskit_for_cache(monkeypatch):
@@ -192,6 +210,12 @@ def test_fake_backend_resolve_paths(monkeypatch):
 
     with pytest.raises(QBalanceError):
         fake.resolve("fake:generic:not-int")
+    with pytest.raises(QBalanceError, match="at least 2"):
+        fake.resolve("fake:generic:1")
+    with pytest.raises(QBalanceError):
+        fake.resolve("fake:generic:2:extra")
+    with pytest.raises(QBalanceError):
+        fake.resolve("fake::2")
     with pytest.raises(QBalanceError):
         fake.resolve("fake")
     with pytest.raises(QBalanceError):

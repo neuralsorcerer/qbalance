@@ -6,7 +6,10 @@
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
@@ -285,7 +288,6 @@ def save_dataset(
     dataset_dir = Path(dataset_dir)
     if dataset_dir.exists() and not overwrite:
         raise FileExistsError(f"{dataset_dir} exists (use overwrite=True)")
-    dataset_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         from qiskit import qpy
@@ -298,28 +300,60 @@ def save_dataset(
     if len(md) != len(circuits):
         raise ValueError("metadata must have the same length as circuits.")
 
-    records: List[CircuitRecord] = []
-    used_artifacts: set[str] = set()
+    dataset_parent = dataset_dir.parent
+    dataset_parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = f".{dataset_dir.name}.tmp-"
 
-    for i, (qc, m) in enumerate(zip(circuits, md)):
-        raw_name = getattr(qc, "name", None)
-        name = f"circuit_{i}" if raw_name is None else str(raw_name)
-        if not name:
-            name = f"circuit_{i}"
-        safe_stem = _sanitize_artifact_stem(name, fallback=f"circuit_{i}")
-        artifact = _build_unique_artifact(safe_stem, used_artifacts)
-        used_artifacts.add(artifact)
-        out = dataset_dir / artifact
-        with out.open("wb") as f:
-            qpy.dump(qc, f)
-        records.append(
-            CircuitRecord(name=name, artifact=artifact, format="qpy", metadata=m or {})
+    tmp_dir = Path(tempfile.mkdtemp(prefix=tmp_name, dir=dataset_parent))
+    committed = False
+    try:
+        records: List[CircuitRecord] = []
+        used_artifacts: set[str] = set()
+
+        for i, (qc, m) in enumerate(zip(circuits, md)):
+            raw_name = getattr(qc, "name", None)
+            name = f"circuit_{i}" if raw_name is None else str(raw_name)
+            if not name:
+                name = f"circuit_{i}"
+            safe_stem = _sanitize_artifact_stem(name, fallback=f"circuit_{i}")
+            artifact = _build_unique_artifact(safe_stem, used_artifacts)
+            used_artifacts.add(artifact)
+            out = tmp_dir / artifact
+            with out.open("wb") as f:
+                qpy.dump(qc, f)
+            records.append(
+                CircuitRecord(
+                    name=name, artifact=artifact, format="qpy", metadata=m or {}
+                )
+            )
+
+        dump_json(
+            tmp_dir / DATASET_INDEX,
+            {"version": 1, "records": [r.__dict__ for r in records]},
         )
 
-    dump_json(
-        dataset_dir / DATASET_INDEX,
-        {"version": 1, "records": [r.__dict__ for r in records]},
-    )
+        backup_path = Path(f"{tmp_dir}.backup")
+        backed_up = False
+        try:
+            if dataset_dir.exists():
+                os.replace(dataset_dir, backup_path)
+                backed_up = True
+            os.replace(tmp_dir, dataset_dir)
+            committed = True
+        except Exception:
+            if backed_up and not dataset_dir.exists():
+                os.replace(backup_path, dataset_dir)
+            raise
+        finally:
+            if committed and backed_up:
+                if backup_path.is_dir():
+                    shutil.rmtree(backup_path, ignore_errors=True)
+                elif backup_path.exists():
+                    backup_path.unlink()
+    finally:
+        if not committed:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
     return CircuitDataset(dataset_dir, records)
 
 

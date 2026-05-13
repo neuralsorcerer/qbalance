@@ -101,6 +101,42 @@ def instruction_parts(entry: Any) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]
     return inst, tuple(qargs), tuple(cargs)
 
 
+def bit_index(circuit: Any, bit: Any) -> int:
+    """Return a stable bit index for Qiskit bit objects and lightweight stubs.
+
+    Args:
+        circuit: Circuit that owns ``bit`` when available.
+        bit: Qubit or clbit object whose index should be resolved.
+
+    Returns:
+        Zero-based bit index.
+
+    Raises:
+        AttributeError: Raised when no supported index representation is present.
+        ValueError: Raised when the resolved index is negative.
+    """
+    finder = getattr(circuit, "find_bit", None)
+    if callable(finder):
+        try:
+            index = int(finder(bit).index)
+            if index < 0:
+                raise ValueError("bit index must be non-negative")
+            return index
+        except Exception:
+            pass
+
+    for attr in ("index", "_index"):
+        raw_index = getattr(bit, attr, None)
+        if raw_index is None:
+            continue
+        index_int = int(raw_index)
+        if index_int < 0:
+            raise ValueError("bit index must be non-negative")
+        return index_int
+
+    raise AttributeError("Unable to determine bit index")
+
+
 def default_cache_dir(app: str = "qbalance") -> Path:
     """Return the default cache dir configuration used by qbalance.
 

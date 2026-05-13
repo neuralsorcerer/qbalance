@@ -11,6 +11,7 @@ from typing import Any, Optional
 import numpy as np
 
 from qbalance.logging import get_logger
+from qbalance.utils import bit_index, instruction_parts
 
 log = get_logger(__name__)
 
@@ -38,7 +39,7 @@ def _safe_get_qubit_readout_error(backend: Any, q: int) -> Optional[float]:
         qprops = props.qubits[q]
         for item in qprops:
             if getattr(item, "name", None) == "readout_error":
-                return float(item.value)
+                return _coerce_error_rate(item.value)
     except Exception:
         return None
     return None
@@ -64,7 +65,7 @@ def _safe_get_t1(backend: Any, q: int) -> Optional[float]:
         qprops = props.qubits[q]
         for item in qprops:
             if getattr(item, "name", None) == "T1":
-                return float(item.value)
+                return _coerce_finite_float(item.value)
     except Exception:
         return None
     return None
@@ -90,7 +91,7 @@ def _safe_get_t2(backend: Any, q: int) -> Optional[float]:
         qprops = props.qubits[q]
         for item in qprops:
             if getattr(item, "name", None) == "T2":
-                return float(item.value)
+                return _coerce_finite_float(item.value)
     except Exception:
         return None
     return None
@@ -118,9 +119,31 @@ def _safe_get_2q_error(backend: Any, gate: str, q0: int, q1: int) -> Optional[fl
         g = props.gate_error(gate, [q0, q1])
         if g is None:
             return None
-        return float(g)
+        return _coerce_error_rate(g)
     except Exception:
         return None
+
+
+def _coerce_finite_float(value: Any) -> Optional[float]:
+    """Return a finite float, or None when the value is not usable."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not np.isfinite(number):
+        return None
+    return number
+
+
+def _coerce_error_rate(value: Any) -> Optional[float]:
+    """Return a finite probability-like error rate clipped to [0, 1]."""
+    try:
+        rate = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not np.isfinite(rate):
+        return None
+    return float(np.clip(rate, 0.0, 1.0))
 
 
 def estimate_circuit_error(backend: Any, circuit: Any) -> float:
@@ -139,27 +162,30 @@ def estimate_circuit_error(backend: Any, circuit: Any) -> float:
     # 1 - Π(1-e_i) approximation
     total_survival = 1.0
     try:
-        for inst, qargs, _ in circuit.data:
+        for entry in circuit.data:
+            inst, qargs, _ = instruction_parts(entry)
             name = getattr(inst, "name", "").lower()
             if len(qargs) == 2:
-                q0 = qargs[0].index
-                q1 = qargs[1].index
+                q0 = bit_index(circuit, qargs[0])
+                q1 = bit_index(circuit, qargs[1])
                 e = _safe_get_2q_error(backend, name, q0, q1)
                 if e is None:
                     e = 0.01
-                total_survival *= 1.0 - float(e)
+                total_survival *= 1.0 - e
             elif name == "measure" and len(qargs) == 1:
-                q0 = qargs[0].index
+                q0 = bit_index(circuit, qargs[0])
                 e = _safe_get_qubit_readout_error(backend, q0)
                 if e is None:
                     e = 0.02
-                total_survival *= 1.0 - float(e)
-            else:
+                total_survival *= 1.0 - e
+            elif len(qargs) > 0 and name not in {"barrier", "delay"}:
                 # 1q gate errors: best-effort use 0.001
                 total_survival *= 1.0 - 0.001
     except Exception:
         return 1.0
-    return float(max(0.0, 1.0 - total_survival))
+    if not np.isfinite(total_survival):
+        return 1.0
+    return float(np.clip(1.0 - total_survival, 0.0, 1.0))
 
 
 def noise_aware_initial_layout(backend: Any, circuit: Any) -> Optional[Any]:
@@ -186,10 +212,11 @@ def noise_aware_initial_layout(backend: Any, circuit: Any) -> Optional[Any]:
 
     # logical activity: interaction graph degree
     deg = np.zeros(n, dtype=float)
-    for inst, qargs, _ in circuit.data:
+    for entry in circuit.data:
+        _, qargs, _ = instruction_parts(entry)
         if len(qargs) == 2:
-            a = qargs[0].index
-            b = qargs[1].index
+            a = bit_index(circuit, qargs[0])
+            b = bit_index(circuit, qargs[1])
             deg[a] += 1
             deg[b] += 1
     logical_order = list(np.argsort(-deg))  # most active first

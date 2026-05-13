@@ -27,16 +27,20 @@ def resolve(spec: str) -> Any:
         QBalanceError: Raised when input validation fails or a dependent operation cannot be completed.
         OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
     """
-    parts = spec.split(":")
-    if len(parts) < 3:
+    parts = [part.strip() for part in spec.split(":")]
+    if len(parts) < 3 or any(part == "" for part in parts[:3]):
         raise QBalanceError(f"Invalid fake backend spec: {spec!r}")
 
     mode = parts[1]
     if mode == "generic":
+        if len(parts) != 3:
+            raise QBalanceError(f"Invalid generic fake backend spec: {spec!r}")
         try:
             n = int(parts[2])
         except ValueError as e:
             raise QBalanceError(f"Invalid qubit count in {spec!r}") from e
+        if n < 2:
+            raise QBalanceError("fake:generic requires at least 2 qubits")
 
         try:
             from qiskit.providers.fake_provider import GenericBackendV2
@@ -45,9 +49,14 @@ def resolve(spec: str) -> Any:
                 "qiskit is required for fake backends (GenericBackendV2)"
             ) from e
 
-        return GenericBackendV2(num_qubits=n)
+        try:
+            return GenericBackendV2(num_qubits=n)
+        except Exception as e:
+            raise QBalanceError(f"Could not create generic fake backend: {e}") from e
 
     if mode == "ibm":
+        if len(parts) != 3:
+            raise QBalanceError(f"Invalid IBM fake backend spec: {spec!r}")
         name = parts[2]
         try:
             from qiskit.providers.fake_provider import fake_backend

@@ -57,8 +57,8 @@ def test_noise_layout_suppression_and_pipeline(monkeypatch):
     assert layout is not None
 
     circuit_mod = types.ModuleType("qiskit.circuit")
-    circuit_mod.pauli_twirl_2q_gates = (
-        lambda circuit, seed, num_twirls, target: [circuit] * num_twirls
+    circuit_mod.pauli_twirl_2q_gates = lambda circuit, seed, num_twirls, target: (
+        [circuit] * num_twirls
     )
     monkeypatch.setitem(sys.modules, "qiskit.circuit", circuit_mod)
     assert len(suppression.apply_pauli_twirling(_Circ(), num_twirls=2)) == 2
@@ -139,6 +139,51 @@ def test_noise_layout_suppression_and_pipeline(monkeypatch):
     )
     assert out is not None
     assert met["estimated_error"] == 0.123
+
+
+def test_noise_aware_helpers_support_qiskit_bits_without_public_index():
+    from qiskit import QuantumCircuit
+
+    from qbalance.transpile import noise_aware_layout as nal
+
+    class Backend:
+        num_qubits = 2
+
+        @staticmethod
+        def properties():
+            return None
+
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+
+    error = nal.estimate_circuit_error(Backend(), qc)
+    assert 0.0 < error < 1.0
+    assert nal.noise_aware_initial_layout(Backend(), qc) is not None
+
+
+def test_noise_aware_helpers_ignore_nonfinite_calibration_values():
+    class Props:
+        qubits = [
+            [
+                types.SimpleNamespace(name="readout_error", value=float("nan")),
+                types.SimpleNamespace(name="T1", value=float("inf")),
+                types.SimpleNamespace(name="T2", value="bad"),
+            ]
+        ]
+
+        @staticmethod
+        def gate_error(name, pair):
+            _ = (name, pair)
+            return 5.0
+
+    backend = types.SimpleNamespace(properties=lambda: Props())
+
+    assert nal._safe_get_qubit_readout_error(backend, 0) is None
+    assert nal._safe_get_t1(backend, 0) is None
+    assert nal._safe_get_t2(backend, 0) is None
+    assert nal._safe_get_2q_error(backend, "cx", 0, 1) == 1.0
 
 
 def test_measurement_twirling_inserts_flip_before_measurement(monkeypatch):
