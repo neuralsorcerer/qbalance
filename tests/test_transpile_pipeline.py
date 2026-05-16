@@ -9,6 +9,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from qbalance.strategies import StrategySpec
 from qbalance.transpile import noise_aware_layout as nal
 from qbalance.transpile import pipeline, suppression
@@ -223,3 +225,99 @@ def test_measurement_twirling_skips_nonterminal_measurements(monkeypatch):
 
     assert flip_map == {}
     assert [inst.operation.name for inst in twirled.data] == ["h", "measure", "x"]
+
+
+def test_compile_one_dd_with_backendv2_target(caplog):
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=2)
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+
+    _, metrics = pipeline.compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(dynamical_decoupling=True, dd_sequence="XY4"),
+        profile=False,
+    )
+
+    assert metrics["dd_applied"] is True
+    assert "DD insertion failed" not in caplog.text
+
+
+def test_dd_sequence_compatibility_helpers():
+    class XGate:
+        pass
+
+    class YGate:
+        pass
+
+    requested = [XGate(), YGate(), XGate(), YGate()]
+
+    assert suppression._operation_names(
+        types.SimpleNamespace(operation_names=["X", " cx "])
+    ) == {
+        "x",
+        "cx",
+    }
+    assert suppression._operation_names(
+        types.SimpleNamespace(operation_names=lambda: ["measure", "Delay"])
+    ) == {"measure", "delay"}
+
+    backend = types.SimpleNamespace(
+        configuration=lambda: types.SimpleNamespace(basis_gates=["X", "SX"])
+    )
+    assert suppression._backend_basis_gates(backend) == {"x", "sx"}
+    assert suppression._backend_basis_gates(object()) == set()
+
+    compatible = suppression._compatible_dd_sequence(requested, {"x", "sx"})
+    assert [suppression._gate_name(gate) for gate in compatible] == ["x", "x"]
+
+    unchanged = suppression._compatible_dd_sequence(requested, {"x", "y"})
+    assert unchanged is requested
+
+
+def test_build_dd_pass_manager_without_basis_skips_translator(monkeypatch):
+    class PassRecorder:
+        def __init__(self):
+            self.steps = []
+
+        def append(self, item):
+            self.steps.append(item)
+
+    class NamedPass:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        suppression, "_dd_sequence", lambda name: [types.SimpleNamespace(name="x")]
+    )
+
+    eqlib = types.ModuleType("qiskit.circuit.equivalence_library")
+    eqlib.SessionEquivalenceLibrary = object()
+    monkeypatch.setitem(sys.modules, "qiskit.circuit.equivalence_library", eqlib)
+
+    transpiler = types.ModuleType("qiskit.transpiler")
+    transpiler.PassManager = PassRecorder
+    monkeypatch.setitem(sys.modules, "qiskit.transpiler", transpiler)
+
+    passes = types.ModuleType("qiskit.transpiler.passes")
+    passes.Unroll3qOrMore = NamedPass
+    passes.BasisTranslator = NamedPass
+    passes.ALAPScheduleAnalysis = NamedPass
+    passes.PadDynamicalDecoupling = NamedPass
+    monkeypatch.setitem(sys.modules, "qiskit.transpiler.passes", passes)
+
+    pm = suppression.build_dd_pass_manager(object())
+
+    assert len(pm.steps) == 3
+    assert all(not step.args for step in pm.steps[1:])
+    assert pm.steps[1].kwargs == {"durations": None}
+    assert pm.steps[2].kwargs == {
+        "durations": None,
+        "dd_sequence": [types.SimpleNamespace(name="x")],
+    }

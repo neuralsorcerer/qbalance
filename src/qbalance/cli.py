@@ -108,7 +108,7 @@ def adjust_cmd(
     )
     bw.save(out, overwrite=overwrite)
     console.print("[green]Done[/green]")
-    console.print(bw.summary())
+    console.print(bw.summary(), markup=False)
 
 
 @app.command("matrix")

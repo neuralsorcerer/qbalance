@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from importlib import import_module
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -46,7 +46,7 @@ def apply_pauli_twirling(
     return [out]
 
 
-def _dd_sequence(name: str):
+def _dd_sequence(name: str) -> List[Any]:
     """Internal helper that dd sequence.
 
     Args:
@@ -74,6 +74,91 @@ def _dd_sequence(name: str):
         return [YGate(), YGate()]
     # default
     return [XGate(), YGate(), XGate(), YGate()]
+
+
+def _operation_names(target: Any) -> set[str]:
+    """Return normalized operation names exposed by a transpiler target."""
+    if target is None:
+        return set()
+
+    raw_names = getattr(target, "operation_names", ())
+    if callable(raw_names):
+        raw_names = raw_names()
+
+    names: set[str] = set()
+    for raw_name in raw_names or ():
+        name = str(raw_name).strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _backend_basis_gates(backend: Any) -> set[str]:
+    """Return normalized basis-gate names from BackendV1-style objects."""
+    configuration = getattr(backend, "configuration", None)
+    if not callable(configuration):
+        return set()
+
+    try:
+        raw_basis = getattr(configuration(), "basis_gates", ())
+    except Exception:
+        return set()
+
+    names: set[str] = set()
+    for raw_name in raw_basis or ():
+        name = str(raw_name).strip().lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _gate_name(gate: Any) -> str:
+    """Return a normalized gate name for Qiskit gates and lightweight stubs."""
+    name = getattr(gate, "name", None)
+    if name is None:
+        name = gate.__class__.__name__
+        if name.endswith("Gate"):
+            name = name[:-4]
+    return str(name).strip().lower()
+
+
+def _compatible_dd_sequence(dd_seq: List[Any], supported_ops: set[str]) -> List[Any]:
+    """Return a DD sequence that can be represented by the target basis."""
+    if not supported_ops:
+        return dd_seq
+
+    if all(_gate_name(gate) in supported_ops for gate in dd_seq):
+        return dd_seq
+
+    # Many BackendV2 targets, including GenericBackendV2 and IBM-style bases,
+    # expose X but not Y as a native scheduled instruction.  PadDynamicalDecoupling
+    # validates the DD sequence directly against the target, so choose a fully
+    # supported echo sequence when the requested sequence is unavailable.
+    for fallback_name in ("XX", "YY"):
+        fallback = _dd_sequence(fallback_name)
+        if all(_gate_name(gate) in supported_ops for gate in fallback):
+            return fallback
+
+    return dd_seq
+
+
+def _backend_instruction_durations(backend: Any) -> Any:
+    """Return instruction durations from BackendV1-style objects when available."""
+    durations = getattr(backend, "instruction_durations", None)
+    if callable(durations):
+        try:
+            return durations()
+        except TypeError:
+            return durations
+    return durations
+
+
+def _make_pass(factory: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Instantiate a Qiskit pass, falling back for older positional APIs."""
+    try:
+        return factory(**kwargs)
+    except TypeError:
+        return factory(*args)
 
 
 def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
@@ -105,19 +190,43 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
 
     dd_seq = _dd_sequence(sequence)
 
-    # Qiskit recommends using ALAPScheduleAnalysis + BasisTranslator + PadDynamicalDecoupling
+    # Qiskit recommends scheduling first, then padding idle intervals with the
+    # requested DD sequence.  Modern Qiskit scheduler/padding passes accept a
+    # Target (or InstructionDurations), not a Backend object.  Passing the
+    # Backend positionally makes the scheduler treat it as an iterable duration
+    # table and fails for BackendV2 implementations such as GenericBackendV2.
     target = getattr(backend, "target", None)
     if target is None:
-        # older backends
-        basis = getattr(backend.configuration(), "basis_gates", None) or []
+        # Older backends may only expose a basis-gate list.  Keep translator
+        # behavior when a basis is available; otherwise skip translation rather
+        # than constructing a guaranteed-invalid empty-basis translator.
+        supported_ops = _backend_basis_gates(backend)
+        basis = sorted(supported_ops)
+        dd_seq = _compatible_dd_sequence(dd_seq, supported_ops)
+        durations = _backend_instruction_durations(backend)
+        schedule_pass = _make_pass(ALAPScheduleAnalysis, durations, durations=durations)
+        dd_pass = _make_pass(
+            PadDynamicalDecoupling,
+            durations,
+            dd_seq,
+            durations=durations,
+            dd_sequence=dd_seq,
+        )
     else:
-        basis = list(target.operation_names)
+        supported_ops = _operation_names(target)
+        basis = sorted(supported_ops)
+        dd_seq = _compatible_dd_sequence(dd_seq, supported_ops)
+        schedule_pass = _make_pass(ALAPScheduleAnalysis, target, target=target)
+        dd_pass = _make_pass(
+            PadDynamicalDecoupling, target, dd_seq, target=target, dd_sequence=dd_seq
+        )
 
     pm = PassManager()
     pm.append(Unroll3qOrMore())
-    pm.append(ALAPScheduleAnalysis(backend))
-    pm.append(BasisTranslator(SessionEquivalenceLibrary, basis))
-    pm.append(PadDynamicalDecoupling(backend, dd_seq))
+    if basis:
+        pm.append(BasisTranslator(SessionEquivalenceLibrary, basis))
+    pm.append(schedule_pass)
+    pm.append(dd_pass)
     return pm
 
 
