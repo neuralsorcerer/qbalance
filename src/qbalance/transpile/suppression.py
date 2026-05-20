@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import import_module
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -16,6 +17,30 @@ from qbalance.logging import get_logger
 from qbalance.utils import bit_index, instruction_parts
 
 log = get_logger(__name__)
+
+
+def normalize_measurement_flip_map(flip_map: Any) -> Dict[int, int]:
+    """Return a sanitized clbit-index to XOR-flip map.
+
+    Measurement twirling records flips as integer clbit indices, but the
+    metadata can be serialized through JSON (which stringifies keys) or built by
+    user code.  Keep only non-negative integer indices with odd/truthy flip
+    values and normalize every retained flip to ``1`` because correction is an
+    XOR operation.
+    """
+    if not isinstance(flip_map, Mapping):
+        return {}
+
+    normalized: Dict[int, int] = {}
+    for raw_cb, raw_flip in flip_map.items():
+        try:
+            cb = int(raw_cb)
+            flip = int(raw_flip)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if cb >= 0 and flip % 2:
+            normalized[cb] = 1
+    return normalized
 
 
 def apply_pauli_twirling(
@@ -330,14 +355,24 @@ def apply_measurement_untwirl_counts(
     if not flip_map:
         return counts
 
+    normalized_flip_map = normalize_measurement_flip_map(flip_map)
+    if not normalized_flip_map:
+        return counts
+
     out: Dict[str, int] = {}
     for bitstr, n in counts.items():
         b = list(bitstr)
-        # qiskit bitstrings are little-endian in many contexts; here we interpret index from right
-        for cb, flip in flip_map.items():
+        # Qiskit renders multiple classical registers with spaces in count keys,
+        # while classical-bit indices are over the flattened register.  Count only
+        # actual binary digits when mapping flat little-endian clbit indices back
+        # to display positions so separators are preserved and never flipped.
+        bit_positions = [idx for idx, char in enumerate(b) if char in {"0", "1"}]
+        for cb, flip in normalized_flip_map.items():
             if flip:
-                pos = len(b) - 1 - cb
-                if 0 <= pos < len(b):
+                bit_pos_idx = len(bit_positions) - 1 - cb
+                if 0 <= bit_pos_idx < len(bit_positions):
+                    pos = bit_positions[bit_pos_idx]
                     b[pos] = "1" if b[pos] == "0" else "0"
-        out["".join(b)] = out.get("".join(b), 0) + n
+        corrected = "".join(b)
+        out[corrected] = out.get(corrected, 0) + n
     return out

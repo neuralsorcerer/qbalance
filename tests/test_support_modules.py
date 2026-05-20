@@ -120,10 +120,10 @@ def test_cache_roundtrip_and_helpers(tmp_path, monkeypatch):
     assert cache.load_compiled(entry) is None
     assert cache.fingerprint_circuit("circ") == stable_hash_bytes(b"c:circ")
 
-    cache.save_compiled(entry, "circ", {"m": 1})
+    cache.save_compiled(entry, "circ", {"m": 1, "measurement_flip_map": {0: 1}})
     compiled, meta = cache.load_compiled(entry)
     assert compiled == "c:circ"
-    assert meta == {"m": 1}
+    assert meta == {"m": 1, "measurement_flip_map": {0: 1}}
 
 
 def test_cache_optional_dependency_errors(tmp_path, monkeypatch):

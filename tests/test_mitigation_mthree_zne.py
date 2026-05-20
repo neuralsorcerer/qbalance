@@ -52,6 +52,24 @@ def test_mthree_and_zne(monkeypatch):
         [1.0, 3.0], [{"00": 2, "11": 2}, {"00": 3, "11": 1}]
     )
     assert pytest.approx(sum(out.values())) == 1.0
+    parity_adjusted = zne.zne_extrapolate_counts(
+        [1.0, 2.0, 3.0], [{"00": 10}, {"00": 10}, {"01": 10}], degree=2
+    )
+    assert pytest.approx(sum(parity_adjusted.values())) == 1.0
+    assert any(bitstr.count("1") % 2 == 1 for bitstr in parity_adjusted)
+
+    even_adjusted = zne.zne_extrapolate_counts(
+        [1.0, 2.0, 3.0], [{"1": 10}, {"1": 10}, {"0": 10}], degree=2
+    )
+    assert pytest.approx(sum(even_adjusted.values())) == 1.0
+    assert any(bitstr.count("1") % 2 == 0 for bitstr in even_adjusted)
+
+    spaced = zne.zne_extrapolate_counts(
+        [1.0, 2.0, 3.0], [{"00 0": 10}, {"00 0": 10}, {"00 1": 10}], degree=2
+    )
+    assert "00 1" in spaced
+    assert pytest.approx(sum(spaced.values())) == 1.0
+
     with pytest.raises(ValueError):
         zne.zne_extrapolate_counts([1.0], [{"0": 1}, {"1": 1}])
     with pytest.raises(ValueError):
@@ -70,6 +88,8 @@ def test_mthree_and_zne(monkeypatch):
         zne.zne_extrapolate_counts([1.0], [{"0": 1}], degree=True)
     with pytest.raises(ValueError):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"0": 0}, {"0": 1}])
+    with pytest.raises(ValueError):
+        zne.zne_extrapolate_counts([1.0, 2.0], [{"0x0": 1}, {"0": 1}])
 
 
 def test_fold_global_preserves_terminal_measurements():

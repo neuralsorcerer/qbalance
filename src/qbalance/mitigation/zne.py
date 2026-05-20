@@ -92,6 +92,30 @@ def fold_global(circuit: Any, scale: float) -> Any:
     return out
 
 
+def _bit_positions(bitstr: str) -> list[int]:
+    """Return positions of binary digits in a Qiskit count key."""
+    return [idx for idx, char in enumerate(bitstr) if char in {"0", "1"}]
+
+
+def _parity(bitstr: str) -> int:
+    """Return even/odd parity for binary digits in a Qiskit count key."""
+    return sum(1 for char in bitstr if char == "1") % 2
+
+
+def _synthetic_parity_key(template: str | None, *, odd: bool) -> str:
+    """Create an all-zero/easy-odd key preserving count-key spacing when possible."""
+    if not template:
+        return "1" if odd else "0"
+
+    chars = ["0" if char in {"0", "1"} else char for char in template]
+    positions = _bit_positions(template)
+    if not positions:
+        return "1" if odd else "0"
+    if odd:
+        chars[positions[-1]] = "1"
+    return "".join(chars)
+
+
 def _counts_to_expval_z(counts: Mapping[str, int], *, validate: bool = False) -> float:
     """Internal helper that counts to expval z.
 
@@ -116,7 +140,17 @@ def _counts_to_expval_z(counts: Mapping[str, int], *, validate: bool = False) ->
                 raise ValueError("counts values must be non-negative integers")
             if c < 0:
                 raise ValueError("counts values must be non-negative integers")
-        parity = bitstr.count("1") % 2
+        if validate:
+            if not isinstance(bitstr, str) or not bitstr:
+                raise ValueError("counts keys must be non-empty bitstrings")
+            if not _bit_positions(bitstr):
+                raise ValueError("counts keys must contain at least one binary digit")
+            if any(char not in {"0", "1", " "} for char in bitstr):
+                raise ValueError(
+                    "counts keys must contain only binary digits and spaces"
+                )
+
+        parity = _parity(bitstr)
         shots += int(c)
         s += (1.0 if parity == 0 else -1.0) * c
 
@@ -179,21 +213,35 @@ def zne_extrapolate_counts(
     shots = sum(base.values()) or 1
     probs = {k: v / shots for k, v in base.items()}
 
-    # Adjust parity mass
-    even_mass = sum(p for b, p in probs.items() if b.count("1") % 2 == 0)
+    # Adjust parity mass.  The extrapolated observable constrains the total
+    # even/odd parity probability, so keep the shape within each existing parity
+    # class when possible and create the missing complementary class only when
+    # the reference counts never sampled it.
+    even_mass = sum(p for b, p in probs.items() if _parity(b) == 0)
     odd_mass = 1.0 - even_mass
     # expval = even - odd => target even = (1+exp)/2
     target_even = max(0.0, min(1.0, (1.0 + y0) / 2.0))
-    if even_mass > 0 and odd_mass > 0:
-        scale_even = target_even / even_mass
-        scale_odd = (1.0 - target_even) / odd_mass
-        for b in list(probs.keys()):
-            if b.count("1") % 2 == 0:
-                probs[b] *= scale_even
-            else:
-                probs[b] *= scale_odd
-        # renormalize
-        s = sum(probs.values()) or 1.0
-        probs = {k: float(v / s) for k, v in probs.items()}
+
+    template = next(iter(probs), None)
+    if target_even > 0.0 and even_mass == 0.0:
+        probs[_synthetic_parity_key(template, odd=False)] = 0.0
+    if target_even < 1.0 and odd_mass == 0.0:
+        probs[_synthetic_parity_key(template, odd=True)] = 0.0
+
+    for b in list(probs.keys()):
+        if _parity(b) == 0:
+            probs[b] = (
+                probs[b] * target_even / even_mass if even_mass > 0.0 else target_even
+            )
+        else:
+            probs[b] = (
+                probs[b] * (1.0 - target_even) / odd_mass
+                if odd_mass > 0.0
+                else 1.0 - target_even
+            )
+
+    # renormalize against roundoff and degenerate polynomial outputs.
+    s = sum(probs.values()) or 1.0
+    probs = {k: float(v / s) for k, v in probs.items()}
 
     return probs

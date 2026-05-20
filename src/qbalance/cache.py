@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from qbalance.errors import OptionalDependencyError
+from qbalance.transpile.suppression import normalize_measurement_flip_map
 from qbalance.utils import default_cache_dir, dump_json, load_json, stable_hash_bytes
 
 
@@ -84,6 +85,18 @@ def get_entry(key: str, root: Optional[Path] = None) -> CacheEntry:
     return CacheEntry(key=key, dir=d)
 
 
+def _normalize_cached_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Return cached metadata with JSON-loaded flip-map keys restored."""
+    if "measurement_flip_map" not in meta:
+        return meta
+
+    normalized_meta = dict(meta)
+    normalized_meta["measurement_flip_map"] = normalize_measurement_flip_map(
+        meta.get("measurement_flip_map")
+    )
+    return normalized_meta
+
+
 def load_compiled(entry: CacheEntry) -> Optional[Tuple[Any, Dict]]:
     """Load compiled from serialized data or persisted storage.
 
@@ -104,7 +117,7 @@ def load_compiled(entry: CacheEntry) -> Optional[Tuple[Any, Dict]]:
         from qiskit import qpy
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required for cache load") from e
-    m = load_json(meta)
+    m = _normalize_cached_meta(load_json(meta))
     with qpy_path.open("rb") as f:
         c = qpy.load(f)[0]
     return c, m

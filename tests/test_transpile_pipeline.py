@@ -321,3 +321,24 @@ def test_build_dd_pass_manager_without_basis_skips_translator(monkeypatch):
         "durations": None,
         "dd_sequence": [types.SimpleNamespace(name="x")],
     }
+
+
+def test_measurement_untwirl_counts_preserves_register_separators_and_accepts_json_keys():
+    counts = {"01 0": 2, "00 1": 3}
+
+    out = suppression.apply_measurement_untwirl_counts(counts, {"1": 1})
+
+    assert out == {"00 0": 2, "01 1": 3}
+
+
+def test_measurement_flip_map_normalization_ignores_invalid_and_even_flips():
+    assert suppression.normalize_measurement_flip_map(
+        {"0": "1", 1: 2, "bad": 1, -1: 1, 2: True, 3: False}
+    ) == {0: 1, 2: 1}
+    assert suppression.normalize_measurement_flip_map(None) == {}
+    assert suppression.apply_measurement_untwirl_counts({"000": 1}, {0: 2}) == {
+        "000": 1
+    }
+    assert suppression.apply_measurement_untwirl_counts(
+        {"00": 2, "01": 3}, {0: 1, 2: 1}
+    ) == {"01": 2, "00": 3}
