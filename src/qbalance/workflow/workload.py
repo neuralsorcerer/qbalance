@@ -302,6 +302,11 @@ class Workload:
         baseline_metrics: Dict[str, Dict[str, Any]] = {}
 
         circuits = self.dataset.load_circuits()
+        if len(circuits) != len(self.dataset.records):
+            raise RuntimeError(
+                "Dataset load_circuits() returned a circuit count that does not match "
+                "the number of dataset records"
+            )
 
         # Baseline compile (single default spec)
         baseline_spec = StrategySpec(optimization_level=1, routing_method="sabre")

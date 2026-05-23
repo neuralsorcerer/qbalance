@@ -324,3 +324,24 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
     metrics = bw2.selections["c0"].metrics
     assert "mthree_error" in metrics
     assert "zne_error" in metrics
+
+
+def test_workload_adjust_raises_on_dataset_circuit_record_mismatch(
+    monkeypatch, tmp_path
+):
+    record = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "wlds_mismatch"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [record])
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+
+    with pytest.raises(RuntimeError, match="does not match"):
+        wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust()
