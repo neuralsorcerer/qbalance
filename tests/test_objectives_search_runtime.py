@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from qbalance.metrics.circuit_metrics import extract_circuit_metrics
 from qbalance.mitigation import runtime_options
@@ -227,6 +228,24 @@ def test_pareto_front_non_mapping_metrics_are_treated_as_invalid():
     assert front == [0]
 
 
+def test_default_candidate_strategies_rejects_non_integer_max_candidates():
+
+    with pytest.raises(ValueError, match="max_candidates must be an integer"):
+        default_candidate_strategies(max_candidates=3.5)
+
+    with pytest.raises(ValueError, match="max_candidates must be an integer"):
+        default_candidate_strategies(max_candidates=True)
+
+
+def test_default_candidate_strategies_rejects_non_integer_seed():
+
+    with pytest.raises(ValueError, match="seed must be an integer"):
+        default_candidate_strategies(seed=1.2)
+
+    with pytest.raises(ValueError, match="seed must be an integer"):
+        default_candidate_strategies(seed=False)
+
+
 def test_default_candidate_strategies_non_positive_limit_returns_empty():
 
     assert default_candidate_strategies(max_candidates=0) == []
@@ -238,6 +257,21 @@ def test_default_candidate_strategies_single_limit_returns_first_strategy():
     assert default_candidate_strategies(max_candidates=1) == [
         StrategySpec(optimization_level=0)
     ]
+
+
+def test_default_candidate_strategies_seeded_order_is_reproducible():
+
+    assert default_candidate_strategies(
+        max_candidates=8, seed=7
+    ) == default_candidate_strategies(max_candidates=8, seed=7)
+
+
+def test_default_candidate_strategies_seed_changes_non_baseline_order():
+
+    a = default_candidate_strategies(max_candidates=8, seed=1)
+    b = default_candidate_strategies(max_candidates=8, seed=2)
+    assert a[0] == b[0] == StrategySpec(optimization_level=0)
+    assert a[1:] != b[1:]
 
 
 def test_objective_score_ignores_non_finite_and_invalid_values():

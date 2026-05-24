@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import random
 from typing import List
 
 from qbalance.strategies import StrategySpec
@@ -24,12 +25,15 @@ def default_candidate_strategies(
         List[StrategySpec] with the computed result.
 
     Raises:
-        None.
+        ValueError: If max_candidates is not an integer, or if seed is not an integer.
     """
+    if not isinstance(max_candidates, int) or isinstance(max_candidates, bool):
+        raise ValueError("max_candidates must be an integer")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("seed must be an integer")
+
     if max_candidates <= 0:
         return []
-
-    _ = seed  # reserved for future deterministic candidate randomization
 
     uniq: List[StrategySpec] = []
     seen = set()
@@ -52,55 +56,51 @@ def default_candidate_strategies(
         uniq.append(spec)
         return len(uniq) >= max_candidates
 
+    # Build full candidate pool first; later shuffle deterministically by seed.
+    pool: List[StrategySpec] = []
+
     # Basic compilation sweep
     for opt in (0, 1, 2, 3):
-        if _add(StrategySpec(optimization_level=opt)):
-            return uniq
-        if _add(StrategySpec(optimization_level=opt, routing_method="sabre")):
-            return uniq
-        if _add(
+        pool.append(StrategySpec(optimization_level=opt))
+        pool.append(StrategySpec(optimization_level=opt, routing_method="sabre"))
+        pool.append(
             StrategySpec(
                 optimization_level=opt, layout_method="sabre", routing_method="sabre"
             )
-        ):
-            return uniq
-        if _add(
+        )
+        pool.append(
             StrategySpec(
                 optimization_level=opt,
                 layout_method="qbalance_noise_aware",
                 routing_method="sabre",
             )
-        ):
-            return uniq
+        )
 
     # Suppression variants
-    if _add(
+    pool.append(
         StrategySpec(
             optimization_level=2,
             routing_method="sabre",
             pauli_twirling=True,
             num_twirls=8,
         )
-    ):
-        return uniq
-    if _add(
+    )
+    pool.append(
         StrategySpec(
             optimization_level=2,
             routing_method="sabre",
             dynamical_decoupling=True,
             dd_sequence="XY4",
         )
-    ):
-        return uniq
-    if _add(
+    )
+    pool.append(
         StrategySpec(
             optimization_level=2, routing_method="sabre", measurement_twirling=True
         )
-    ):
-        return uniq
+    )
 
     # Combine: twirling + DD
-    if _add(
+    pool.append(
         StrategySpec(
             optimization_level=2,
             routing_method="sabre",
@@ -110,30 +110,38 @@ def default_candidate_strategies(
             dd_sequence="XY4",
             measurement_twirling=True,
         )
-    ):
-        return uniq
+    )
 
     # Mitigation toggles (execution stage required)
-    if _add(
+    pool.append(
         StrategySpec(
             optimization_level=2,
             routing_method="sabre",
             mthree=True,
             measurement_twirling=True,
         )
-    ):
-        return uniq
-    if _add(
+    )
+    pool.append(
         StrategySpec(
             optimization_level=2,
             routing_method="sabre",
             zne=True,
             measurement_twirling=True,
         )
-    ):
-        return uniq
+    )
 
     # Cutting (optional)
-    _add(StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=4))
+    pool.append(
+        StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=4)
+    )
+
+    if len(pool) > 1:
+        head, tail = pool[0], pool[1:]
+        random.Random(seed).shuffle(tail)
+        pool = [head, *tail]
+
+    for spec in pool:
+        if _add(spec):
+            return uniq
 
     return uniq
