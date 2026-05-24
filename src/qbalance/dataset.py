@@ -381,6 +381,8 @@ def load_dataset(dataset_dir: Path) -> CircuitDataset:
     records: List[CircuitRecord] = []
     required_fields = {"name", "artifact", "format"}
     allowed_formats = {"qpy", "qasm"}
+    seen_names: set[str] = set()
+    seen_artifacts: set[str] = set()
     for i, raw_record in enumerate(records_data):
         if not isinstance(raw_record, dict):
             raise ValueError(f"Record at index {i} must be a JSON object.")
@@ -404,11 +406,33 @@ def load_dataset(dataset_dir: Path) -> CircuitDataset:
         if not isinstance(fmt, str) or fmt not in allowed_formats:
             raise ValueError(f"Record at index {i} has unsupported format: {fmt!r}.")
 
+        if name in seen_names:
+            raise ValueError(
+                f"Record at index {i} has duplicate circuit name: {name!r}."
+            )
+        seen_names.add(name)
+
+        if artifact in seen_artifacts:
+            raise ValueError(
+                f"Record at index {i} has duplicate artifact path: {artifact!r}."
+            )
+        seen_artifacts.add(artifact)
+
         metadata = raw_record.get("metadata", {})
         if metadata is None:
             metadata = {}
         if not isinstance(metadata, dict):
             raise ValueError(f"Record at index {i} has non-object metadata.")
+
+        artifact_path = dataset_dir / artifact
+        if not artifact_path.exists():
+            raise ValueError(
+                f"Record at index {i} points to missing artifact: {artifact!r}."
+            )
+        if not artifact_path.is_file():
+            raise ValueError(
+                f"Record at index {i} points to non-file artifact: {artifact!r}."
+            )
 
         records.append(
             CircuitRecord(

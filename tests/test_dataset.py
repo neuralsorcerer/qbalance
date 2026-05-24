@@ -274,6 +274,7 @@ def test_load_dataset_round_trip_index(tmp_path):
 
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
+    (dataset_dir / "c0.qpy").write_bytes(b"payload")
     (dataset_dir / DATASET_INDEX).write_text(
         json.dumps(
             {
@@ -296,6 +297,88 @@ def test_load_dataset_round_trip_index(tmp_path):
     assert dataset.root == dataset_dir
     assert dataset.names() == ["c0"]
     assert dataset.records[0].metadata == {"split": "train"}
+
+
+def test_load_dataset_rejects_duplicate_names(tmp_path):
+
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "a.qpy").write_bytes(b"a")
+    (dataset_dir / "b.qpy").write_bytes(b"b")
+    (dataset_dir / DATASET_INDEX).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {"name": "dup", "artifact": "a.qpy", "format": "qpy"},
+                    {"name": "dup", "artifact": "b.qpy", "format": "qpy"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate circuit name"):
+        load_dataset(dataset_dir)
+
+
+def test_load_dataset_rejects_duplicate_artifacts(tmp_path):
+
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "a.qpy").write_bytes(b"a")
+    (dataset_dir / DATASET_INDEX).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {"name": "c0", "artifact": "a.qpy", "format": "qpy"},
+                    {"name": "c1", "artifact": "a.qpy", "format": "qpy"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="duplicate artifact path"):
+        load_dataset(dataset_dir)
+
+
+def test_load_dataset_rejects_missing_artifact_file(tmp_path):
+
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / DATASET_INDEX).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [{"name": "c0", "artifact": "missing.qpy", "format": "qpy"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing artifact"):
+        load_dataset(dataset_dir)
+
+
+def test_load_dataset_rejects_non_file_artifact_path(tmp_path):
+
+    dataset_dir = tmp_path / "dataset"
+    dataset_dir.mkdir()
+    (dataset_dir / "folder.qpy").mkdir()
+    (dataset_dir / DATASET_INDEX).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [{"name": "c0", "artifact": "folder.qpy", "format": "qpy"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="non-file artifact"):
+        load_dataset(dataset_dir)
 
 
 def test_load_data_delegates_to_builtin_loader(
@@ -367,6 +450,7 @@ def test_load_dataset_rejects_non_object_metadata(tmp_path):
 
     dataset_dir = tmp_path / "dataset"
     dataset_dir.mkdir()
+    (dataset_dir / "c0.qpy").write_bytes(b"payload")
     (dataset_dir / DATASET_INDEX).write_text(
         json.dumps(
             {
