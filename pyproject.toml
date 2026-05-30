@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qbalance"
-version = "0.1.0"
+version = "0.1.1"
 description = "Balancing workflow library for quantum compilation/mitigation benchmarking with Qiskit."
 readme = "README.md"
 requires-python = ">=3.10"
