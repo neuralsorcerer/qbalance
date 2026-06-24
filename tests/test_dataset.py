@@ -20,6 +20,8 @@ from qbalance.dataset import (
     CircuitDataset,
     CircuitRecord,
     _build_unique_artifact,
+    _build_unique_name,
+    _normalize_metadata_entry,
     load_data,
     load_dataset,
     save_dataset,
@@ -70,6 +72,47 @@ def test_build_unique_artifact_skips_existing_suffixes():
 
     used = {"dup.qpy", "dup_1.qpy"}
     assert _build_unique_artifact("dup", used) == "dup_2.qpy"
+
+
+def test_build_unique_name_skips_existing_suffixes():
+
+    used = {"dup", "dup_1"}
+    assert _build_unique_name("dup", used) == "dup_2"
+
+
+def test_normalize_metadata_entry_deep_copies_json_representation():
+
+    metadata = {"outer": {"inner": [1, {"value": "original"}]}, "tuple": ("x",)}
+    normalized = _normalize_metadata_entry(0, metadata)
+
+    metadata["outer"]["inner"][1]["value"] = "mutated"
+
+    assert normalized == {
+        "outer": {"inner": [1, {"value": "original"}]},
+        "tuple": ["x"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("metadata", "message"),
+    [
+        (None, None),
+        ({"ok": [1, True, None, {"nested": "value"}]}, None),
+        (["not", "a", "dict"], "dict or None"),
+        ({1: "integer key"}, "non-string key"),
+        ({"nested": {2: "integer key"}}, "non-string key"),
+        ({"bad": {"set"}}, "JSON-serializable"),
+        ({"bad": float("nan")}, "JSON-serializable"),
+        ({"bad": float("inf")}, "JSON-serializable"),
+    ],
+)
+def test_normalize_metadata_entry_validation(metadata, message):
+
+    if message is None:
+        assert isinstance(_normalize_metadata_entry(0, metadata), dict)
+    else:
+        with pytest.raises(ValueError, match=message):
+            _normalize_metadata_entry(0, metadata)
 
 
 def test_save_dataset_rejects_misaligned_metadata(
@@ -192,11 +235,52 @@ def test_save_dataset_disambiguates_colliding_names(
         metadata=[{"i": 1}, {"i": 2}, {"i": 3}],
     )
 
+    assert dataset.names() == ["dup", "dup_1", "dup_2"]
     assert [record.artifact for record in dataset.records] == [
         "dup.qpy",
         "dup_1.qpy",
         "dup_2.qpy",
     ]
+    assert load_dataset(tmp_path / "dataset").names() == ["dup", "dup_1", "dup_2"]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "message"),
+    [
+        (["not", "a", "dict"], "dict or None"),
+        ({1: "integer key"}, "non-string key"),
+        ({"bad": {"set"}}, "JSON-serializable"),
+        ({"bad": float("nan")}, "JSON-serializable"),
+    ],
+)
+def test_save_dataset_rejects_invalid_metadata_entry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, metadata, message
+):
+
+    _install_fake_qiskit(monkeypatch)
+
+    with pytest.raises(ValueError, match=message):
+        save_dataset(
+            tmp_path / "dataset",
+            [_DummyCircuit("a")],
+            metadata=[metadata],
+        )
+
+
+def test_save_dataset_copies_metadata_entries(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+
+    _install_fake_qiskit(monkeypatch)
+
+    metadata = {"i": 1, "nested": {"value": "original"}}
+    dataset = save_dataset(tmp_path / "dataset", [_DummyCircuit("a")], [metadata])
+    metadata["i"] = 2
+    metadata["nested"]["value"] = "mutated"
+
+    expected = {"i": 1, "nested": {"value": "original"}}
+    assert dataset.records[0].metadata == expected
+    assert load_dataset(tmp_path / "dataset").records[0].metadata == expected
 
 
 def test_save_dataset_uses_fallback_name_and_empty_metadata(

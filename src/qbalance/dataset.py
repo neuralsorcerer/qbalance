@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -263,6 +264,52 @@ def _build_unique_artifact(base_name: str, used_artifacts: set[str]) -> str:
         suffix += 1
 
 
+def _build_unique_name(base_name: str, used_names: set[str]) -> str:
+    """Return a unique dataset record name while preserving the first name."""
+    suffix = 0
+    while True:
+        name = base_name if suffix == 0 else f"{base_name}_{suffix}"
+        if name not in used_names:
+            return name
+        suffix += 1
+
+
+def _validate_metadata_json_keys(value: Any, *, index: int, path: str) -> None:
+    """Reject metadata mappings that JSON would silently rewrite."""
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"metadata entry at index {index} has a non-string key at {path}."
+                )
+            _validate_metadata_json_keys(nested, index=index, path=f"{path}.{key}")
+    elif isinstance(value, (list, tuple)):
+        for nested_index, nested in enumerate(value):
+            _validate_metadata_json_keys(
+                nested, index=index, path=f"{path}[{nested_index}]"
+            )
+
+
+def _normalize_metadata_entry(index: int, metadata: Any) -> Dict[str, Any]:
+    """Validate and deep-copy a save_dataset metadata entry."""
+    if metadata is None:
+        return {}
+    if not isinstance(metadata, dict):
+        raise ValueError(f"metadata entry at index {index} must be a dict or None.")
+
+    _validate_metadata_json_keys(metadata, index=index, path="metadata")
+    try:
+        normalized = json.loads(json.dumps(metadata, allow_nan=False, sort_keys=True))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"metadata entry at index {index} must be JSON-serializable."
+        ) from exc
+
+    if not isinstance(normalized, dict):  # Defensive: root was checked above.
+        raise ValueError(f"metadata entry at index {index} must be a dict or None.")
+    return cast(Dict[str, Any], normalized)
+
+
 def save_dataset(
     dataset_dir: Path,
     circuits: Sequence[Any],
@@ -294,9 +341,7 @@ def save_dataset(
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required to save circuits") from e
 
-    md: List[Optional[Dict[str, Any]]] = (
-        list(metadata) if metadata is not None else [None] * len(circuits)
-    )
+    md: List[Any] = list(metadata) if metadata is not None else [None] * len(circuits)
     if len(md) != len(circuits):
         raise ValueError("metadata must have the same length as circuits.")
 
@@ -308,13 +353,19 @@ def save_dataset(
     committed = False
     try:
         records: List[CircuitRecord] = []
+        used_names: set[str] = set()
         used_artifacts: set[str] = set()
 
         for i, (qc, m) in enumerate(zip(circuits, md)):
             raw_name = getattr(qc, "name", None)
-            name = f"circuit_{i}" if raw_name is None else str(raw_name)
-            if not name:
-                name = f"circuit_{i}"
+            base_name = f"circuit_{i}" if raw_name is None else str(raw_name)
+            if not base_name:
+                base_name = f"circuit_{i}"
+            name = _build_unique_name(base_name, used_names)
+            used_names.add(name)
+
+            record_metadata = _normalize_metadata_entry(i, m)
+
             safe_stem = _sanitize_artifact_stem(name, fallback=f"circuit_{i}")
             artifact = _build_unique_artifact(safe_stem, used_artifacts)
             used_artifacts.add(artifact)
@@ -323,7 +374,10 @@ def save_dataset(
                 qpy.dump(qc, f)
             records.append(
                 CircuitRecord(
-                    name=name, artifact=artifact, format="qpy", metadata=m or {}
+                    name=name,
+                    artifact=artifact,
+                    format="qpy",
+                    metadata=record_metadata,
                 )
             )
 
