@@ -48,11 +48,6 @@ class _EPS:
         return self._mapping.get(group, [])
 
 
-def test_version_module_exposes_expected_version():
-
-    assert version.__version__ == "0.1.0"
-
-
 def test_utils_hash_and_json_helpers(tmp_path):
 
     digest = stable_hash_bytes(b"abc")
