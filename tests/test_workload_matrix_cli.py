@@ -32,10 +32,8 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     cutting_mod.DeviceConstraints = lambda max_subcircuit_width: types.SimpleNamespace(
         max_subcircuit_width=max_subcircuit_width
     )
-    cutting_mod.OptimizationParameters = (
-        lambda max_backjumps, max_gamma: types.SimpleNamespace(
-            max_backjumps=max_backjumps, max_gamma=max_gamma
-        )
+    cutting_mod.OptimizationParameters = lambda max_backjumps, max_gamma: (
+        types.SimpleNamespace(max_backjumps=max_backjumps, max_gamma=max_gamma)
     )
     cutting_mod.find_cuts = lambda circuit, optimization, constraints: (
         circuit,
@@ -836,3 +834,193 @@ def test_compile_cache_separates_profile_mode(monkeypatch, tmp_path):
     assert calls == [False, True]
     assert "pass_profile" not in no_profile_metrics
     assert "pass_profile" in profile_metrics
+
+
+def test_load_balanced_workload_round_trip(tmp_path):
+    dsroot = tmp_path / "ds_roundtrip"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    (dsroot / "qbalance_dataset.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {
+                        "name": "c0",
+                        "artifact": "c0.qpy",
+                        "format": "qpy",
+                        "metadata": {"family": "stub"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    ds = wl.CircuitDataset(
+        dsroot,
+        [wl.CircuitRecord("c0", "c0.qpy", "qpy", {"family": "stub"})],
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=ds,
+        backend_spec="fake:generic:2",
+        selections={
+            "c0": Strategy(
+                spec=StrategySpec(optimization_level=2, routing_method="sabre"),
+                metrics={"depth": 3, "two_qubit_ops": 1, "objective_score": 5.0},
+            )
+        },
+        baseline_metrics={"c0": {"depth": 4, "two_qubit_ops": 2}},
+        objective=Objective({"depth": 1.5, "two_qubit_ops": 2.0}),
+    )
+
+    out = tmp_path / "balanced"
+    balanced.save(out)
+    loaded = wl.load_balanced_workload(out)
+
+    assert loaded.backend_spec == balanced.backend_spec
+    assert loaded.dataset.names() == ["c0"]
+    assert loaded.objective.weights == {"depth": 1.5, "two_qubit_ops": 2.0}
+    assert loaded.selections["c0"].spec.optimization_level == 2
+    assert loaded.selections["c0"].metrics["objective_score"] == 5.0
+    assert loaded.baseline_metrics["c0"]["depth"] == 4
+
+
+def test_load_balanced_workload_rejects_unknown_selection(tmp_path):
+    out = tmp_path / "bad_balanced"
+    dataset_dir = out / "dataset"
+    dataset_dir.mkdir(parents=True)
+    (dataset_dir / "c0.qpy").write_bytes(b"placeholder")
+    (dataset_dir / "qbalance_dataset.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [{"name": "c0", "artifact": "c0.qpy", "format": "qpy"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "results.json").write_text(
+        json.dumps(
+            {
+                "backend_spec": "fake:generic:2",
+                "objective": {"depth": 1.0},
+                "selections": {"missing": {"spec": {}, "metrics": {}}},
+                "baseline_metrics": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="not present in dataset"):
+        wl.load_balanced_workload(out)
+
+
+def _write_saved_balanced_payload(tmp_path, payload, records=None):
+    out = tmp_path / "saved_balanced"
+    dataset_dir = out / "dataset"
+    dataset_dir.mkdir(parents=True)
+    if records is None:
+        records = [{"name": "c0", "artifact": "c0.qpy", "format": "qpy"}]
+    for record in records:
+        (dataset_dir / record["artifact"]).write_bytes(b"placeholder")
+    (dataset_dir / "qbalance_dataset.json").write_text(
+        json.dumps({"version": 1, "records": records}), encoding="utf-8"
+    )
+    (out / "results.json").write_text(json.dumps(payload), encoding="utf-8")
+    return out
+
+
+def test_load_balanced_workload_is_public_api():
+    import qbalance
+    import qbalance.workflow as workflow
+
+    assert qbalance.load_balanced_workload is wl.load_balanced_workload
+    assert workflow.load_balanced_workload is wl.load_balanced_workload
+
+
+def test_load_balanced_workload_rejects_missing_selection(tmp_path):
+    out = _write_saved_balanced_payload(
+        tmp_path,
+        {
+            "backend_spec": "fake:generic:2",
+            "objective": {"depth": 1.0},
+            "selections": {},
+            "baseline_metrics": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="missing dataset circuits: c0"):
+        wl.load_balanced_workload(out)
+
+
+def test_load_balanced_workload_rejects_unknown_baseline(tmp_path):
+    out = _write_saved_balanced_payload(
+        tmp_path,
+        {
+            "backend_spec": "fake:generic:2",
+            "objective": {"depth": 1.0},
+            "selections": {"c0": {"spec": {}, "metrics": {}}},
+            "baseline_metrics": {"ghost": {}},
+        },
+    )
+
+    with pytest.raises(ValueError, match="baseline metrics reference circuits"):
+        wl.load_balanced_workload(out)
+
+
+def test_load_balanced_workload_wraps_invalid_strategy(tmp_path):
+    out = _write_saved_balanced_payload(
+        tmp_path,
+        {
+            "backend_spec": "fake:generic:2",
+            "objective": {"depth": 1.0},
+            "selections": {"c0": {"spec": {"optimization_level": 9}, "metrics": {}}},
+            "baseline_metrics": {},
+        },
+    )
+
+    with pytest.raises(ValueError, match="Selection for 'c0' has an invalid spec"):
+        wl.load_balanced_workload(out)
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ([], "results must be a JSON object"),
+        ({"backend_spec": "", "selections": {}}, "non-empty backend_spec"),
+        (
+            {"backend_spec": "b", "objective": [], "selections": {}},
+            "objective must be a JSON object",
+        ),
+        (
+            {"backend_spec": "b", "objective": {}, "selections": []},
+            "selections must be a JSON object",
+        ),
+        (
+            {"backend_spec": "b", "objective": {}, "selections": {"c0": []}},
+            "selection for 'c0' must be a JSON object",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": []}},
+            },
+            "selection 'c0' metrics must be a JSON object",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "baseline_metrics": [],
+            },
+            "baseline_metrics must be a JSON object",
+        ),
+    ],
+)
+def test_load_balanced_workload_rejects_malformed_payloads(tmp_path, payload, message):
+    out = _write_saved_balanced_payload(tmp_path, payload)
+
+    with pytest.raises(ValueError, match=message):
+        wl.load_balanced_workload(out)

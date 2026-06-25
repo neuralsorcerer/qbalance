@@ -203,6 +203,129 @@ class BalancedWorkload:
         return zip_path
 
 
+def _require_json_object(value: Any, field: str) -> Mapping[str, Any]:
+    """Return *value* as a mapping or raise a precise loader error."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"Balanced workload {field} must be a JSON object.")
+    return value
+
+
+def _format_name_set(names: Iterable[str]) -> str:
+    """Format circuit-name sets deterministically for error messages."""
+    return ", ".join(sorted(names))
+
+
+def load_balanced_workload(out_dir: Path | str) -> BalancedWorkload:
+    """Load a workload previously written by :meth:`BalancedWorkload.save`.
+
+    Args:
+        out_dir: Directory containing ``results.json`` and the copied ``dataset``
+            subdirectory produced by :meth:`BalancedWorkload.save`.
+
+    Returns:
+        Reconstructed :class:`BalancedWorkload` with dataset, selections,
+        baseline metrics, and objective weights.
+
+    Raises:
+        ValueError: If required artifacts are missing or malformed.
+    """
+    out_dir = Path(out_dir)
+    results_path = out_dir / "results.json"
+    dataset_dir = out_dir / "dataset"
+    try:
+        payload = json.loads(results_path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(
+            f"Could not read balanced workload results from {results_path}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid balanced workload JSON in {results_path}: {exc}"
+        ) from exc
+
+    payload = _require_json_object(payload, "results")
+
+    backend_spec = payload.get("backend_spec")
+    if not isinstance(backend_spec, str) or not backend_spec:
+        raise ValueError(
+            "Balanced workload results must include a non-empty backend_spec."
+        )
+
+    objective_payload = payload.get("objective", {})
+    if objective_payload is None:
+        objective_payload = {}
+    objective = Objective(dict(_require_json_object(objective_payload, "objective")))
+
+    dataset = load_dataset(dataset_dir)
+    dataset_names = set(dataset.names())
+
+    raw_selections = _require_json_object(payload.get("selections"), "selections")
+    selections: Dict[str, Strategy] = {}
+    for name, entry in raw_selections.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                "Balanced workload selection names must be non-empty strings."
+            )
+        entry = _require_json_object(entry, f"selection for {name!r}")
+        spec_payload = entry.get("spec")
+        if not isinstance(spec_payload, Mapping):
+            raise ValueError(f"Selection for {name!r} must include a spec object.")
+        metrics_payload = entry.get("metrics", {})
+        if metrics_payload is None:
+            metrics_payload = {}
+        metrics = dict(
+            _require_json_object(metrics_payload, f"selection {name!r} metrics")
+        )
+        try:
+            spec = StrategySpec(**dict(spec_payload))
+        except Exception as exc:
+            raise ValueError(
+                f"Selection for {name!r} has an invalid spec: {exc}"
+            ) from exc
+        selections[name] = Strategy(spec=spec, metrics=metrics)
+
+    selection_names = set(selections)
+    unknown_selections = selection_names - dataset_names
+    if unknown_selections:
+        raise ValueError(
+            "Balanced workload selections reference circuits not present in dataset: "
+            + _format_name_set(unknown_selections)
+        )
+    missing_selections = dataset_names - selection_names
+    if missing_selections:
+        raise ValueError(
+            "Balanced workload selections are missing dataset circuits: "
+            + _format_name_set(missing_selections)
+        )
+
+    baseline_payload = payload.get("baseline_metrics", {})
+    if baseline_payload is None:
+        baseline_payload = {}
+    baseline_payload = _require_json_object(baseline_payload, "baseline_metrics")
+    baseline_metrics: Dict[str, Dict[str, Any]] = {}
+    for name, metrics in baseline_payload.items():
+        if not isinstance(name, str):
+            raise ValueError("Balanced workload baseline metric names must be strings.")
+        baseline_metrics[name] = dict(
+            _require_json_object(metrics, f"baseline metrics for {name!r}")
+        )
+
+    unknown_baselines = set(baseline_metrics) - dataset_names
+    if unknown_baselines:
+        raise ValueError(
+            "Balanced workload baseline metrics reference circuits not present in dataset: "
+            + _format_name_set(unknown_baselines)
+        )
+
+    return BalancedWorkload(
+        dataset=dataset,
+        backend_spec=backend_spec,
+        selections=selections,
+        baseline_metrics=baseline_metrics,
+        objective=objective,
+    )
+
+
 @dataclass
 class Workload:
     dataset: CircuitDataset

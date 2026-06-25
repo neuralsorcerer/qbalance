@@ -14,6 +14,7 @@ The package root exports the primary workflow and dataset APIs:
 | `load_data(name)` | Load built-in datasets such as `"tiny"`. |
 | `Workload` | Fluent workflow entry point. |
 | `BalancedWorkload` | Result object returned by `Workload.adjust(...)`. |
+| `load_balanced_workload(out_dir)` | Reconstruct a saved balanced workload directory produced by `BalancedWorkload.save(...)`. |
 | `Strategy` | Runtime selection object containing a `StrategySpec` plus metrics. |
 | `StrategySpec` | Immutable strategy model. |
 | `load_strategy_specs(path)` | Load, validate, normalize, and de-duplicate strategy specs from JSON. |
@@ -22,13 +23,16 @@ The package root exports the primary workflow and dataset APIs:
 Example:
 
 ```python
-from qbalance import StrategySpec, Workload, load_data
+from qbalance import StrategySpec, Workload, load_balanced_workload, load_data
 
 balanced = (
     Workload.from_dataset(load_data("tiny"))
     .set_target("fake:generic:5")
     .adjust(strategies=[StrategySpec(optimization_level=1, routing_method="sabre")])
 )
+balanced.save("./balanced", overwrite=True)
+reloaded = load_balanced_workload("./balanced")
+assert reloaded.backend_spec == balanced.backend_spec
 ```
 
 ## Strategies: `qbalance.strategies`
@@ -110,6 +114,25 @@ Methods:
 - `covars() -> dict`: EMD/CVM/KS diagnostics for depth, two-qubit ops, and estimated error.
 - `save(out_dir, overwrite=False) -> None`: save dataset copy, `results.json`, and `summary.txt`.
 - `to_download(zip_path, overwrite=False) -> Path`: save a ZIP bundle.
+
+### `load_balanced_workload(out_dir: Path | str) -> BalancedWorkload`
+
+Reloads a directory written by `BalancedWorkload.save(...)`. The loader reconstructs the copied dataset, selected `Strategy` objects, baseline metrics, and `Objective` weights without re-running compilation or execution. It validates the saved payload before returning:
+
+- `results.json` must be a JSON object with a non-empty string `backend_spec`;
+- `objective`, `selections`, `metrics`, and `baseline_metrics` entries must be JSON objects where present;
+- every saved strategy spec must pass `StrategySpec` validation;
+- selection names must exactly match the bundled dataset records;
+- baseline metric names, if present, must refer to bundled dataset records.
+
+Use it for offline inspection or follow-up processing of saved adjustment results:
+
+```python
+from qbalance import load_balanced_workload
+
+balanced = load_balanced_workload("./balanced")
+print(balanced.summary())
+```
 
 ## Benchmarking: `qbalance.benchmarking`
 

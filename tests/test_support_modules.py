@@ -12,7 +12,6 @@ import types
 
 import pytest
 
-import qbalance._version as version
 from qbalance import builtin_data, cache, plugins
 from qbalance.backends import aer, fake
 from qbalance.backends import resolver as backend_resolver
@@ -124,6 +123,7 @@ def test_cache_roundtrip_and_helpers(tmp_path, monkeypatch):
 def test_cache_optional_dependency_errors(tmp_path, monkeypatch):
 
     monkeypatch.setitem(sys.modules, "qiskit", types.ModuleType("qiskit"))
+    monkeypatch.delitem(sys.modules, "qiskit.qpy", raising=False)
     entry = cache.get_entry("ab", tmp_path)
     with pytest.raises(OptionalDependencyError):
         cache.fingerprint_circuit("x")

@@ -27,7 +27,7 @@ pip install "qbalance[report]"      # HTML/report stack
 ## Python quickstart
 
 ```python
-from qbalance import Workload, load_data
+from qbalance import Workload, load_balanced_workload, load_data
 
 # Built-in tiny dataset: bell, ghz3, qft4.
 ds = load_data("tiny")
@@ -47,6 +47,10 @@ balanced = (
 print(balanced.summary())
 balanced.save("./balanced", overwrite=True)
 balanced.to_download("./balanced_bundle.zip", overwrite=True)
+
+# Later, reload the saved directory without recompiling.
+reloaded = load_balanced_workload("./balanced")
+print(reloaded.summary())
 ```
 
 ## CLI quickstart

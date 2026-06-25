@@ -11,7 +11,11 @@ from qbalance.strategies import (
     coerce_strategy_specs,
     load_strategy_specs,
 )
-from qbalance.workflow.workload import BalancedWorkload, Workload
+from qbalance.workflow.workload import (
+    BalancedWorkload,
+    Workload,
+    load_balanced_workload,
+)
 
 __all__ = [
     "CircuitDataset",
@@ -20,6 +24,7 @@ __all__ = [
     "load_data",
     "Workload",
     "BalancedWorkload",
+    "load_balanced_workload",
     "Strategy",
     "StrategySpec",
     "coerce_strategy_specs",

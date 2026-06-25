@@ -42,6 +42,15 @@ Create datasets programmatically with `qbalance.save_dataset(...)` and load them
 
 `BalancedWorkload.to_download(zip_path, overwrite=False)` creates a ZIP bundle containing the same saved workload layout.
 
+Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections and baseline metrics refer only to circuits in the copied dataset. Extract a ZIP bundle first if you need to reload a download archive.
+
+```python
+from qbalance import load_balanced_workload
+
+balanced = load_balanced_workload("./balanced")
+print(balanced.summary())
+```
+
 ## Matrix JSON
 
 `run_matrix(...)` and `qbalance matrix` write:

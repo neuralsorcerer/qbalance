@@ -100,7 +100,7 @@ pip install -e ".[all]"
 ### Python API
 
 ```python
-from qbalance import Workload, load_data
+from qbalance import Workload, load_balanced_workload, load_data
 
 # 1) built-in tiny dataset: bell, ghz3, qft4
 ds = load_data("tiny")
@@ -121,6 +121,10 @@ balanced = wl.adjust(
 print(balanced.summary())
 balanced.save("./balanced", overwrite=True)
 balanced.to_download("./balanced_bundle.zip", overwrite=True)
+
+# Reload saved results later without recompilation.
+reloaded = load_balanced_workload("./balanced")
+print(reloaded.summary())
 ```
 
 ### CLI
@@ -174,7 +178,8 @@ CircuitDataset
          BalancedWorkload
              ├── summary()
              ├── save(out_dir)
-             └── to_download(zip)
+             ├── to_download(zip)
+             └── reload via load_balanced_workload(out_dir)
 ```
 
 ---

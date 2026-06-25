@@ -18,6 +18,7 @@ CircuitDataset
   -> set_target("fake:generic:5" | "aer:..." | custom plugin)
   -> adjust(...)
   -> BalancedWorkload.save(...) or BalancedWorkload.to_download(...)
+  -> load_balanced_workload(...) for saved-directory reloads
 ```
 
 For fixed cross-product experiments, use `qbalance.benchmarking.run_matrix(...)` or the `qbalance matrix` CLI command.
