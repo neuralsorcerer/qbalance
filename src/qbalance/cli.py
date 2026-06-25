@@ -20,8 +20,14 @@ from qbalance.dataset import load_dataset, save_dataset
 from qbalance.plugins import list_plugins
 from qbalance.reports.html import render_html
 from qbalance.reports.markdown import render_markdown
-from qbalance.strategies import StrategySpec
+from qbalance.strategies import StrategySpec, load_strategy_specs
 from qbalance.workflow.workload import Workload
+
+
+def _strategy_file_or_none(value: Optional[Path]) -> Optional[Path]:
+    """Return a real strategy path, ignoring Typer defaults in direct calls."""
+    return value if isinstance(value, (str, Path)) else None
+
 
 app = typer.Typer(
     add_completion=False, help="qbalance: balance-style quantum workflow toolkit"
@@ -65,6 +71,11 @@ def adjust_cmd(
     search: str = typer.Option("grid", "--search", help="grid|bandit"),
     pareto: bool = typer.Option(False, "--pareto", help="Use Pareto-front selection"),
     max_candidates: int = typer.Option(24, "--max-candidates"),
+    strategies_json: Optional[Path] = typer.Option(
+        None,
+        "--strategies",
+        help="JSON file containing a strategy object, a list, or a strategies object",
+    ),
     execute: bool = typer.Option(
         False,
         "--execute",
@@ -83,6 +94,7 @@ def adjust_cmd(
         search (default: typer.Option('grid', '--search', help='grid|bandit')): Search value consumed by this routine.
         pareto (default: typer.Option(False, '--pareto', help='Use Pareto-front selection')): Pareto value consumed by this routine.
         max_candidates (default: typer.Option(24, '--max-candidates')): Max candidates value consumed by this routine.
+        strategies_json (default: None): Optional JSON file defining explicit candidate strategies.
         execute (default: typer.Option(False, '--execute', help='Execute circuits (needs runnable backend or qbalance[aer])')): Whether to run compiled circuits and collect counts.
         shots (default: typer.Option(1024, '--shots')): Number of shots used when executing circuits on a backend.
         profile (default: typer.Option(False, '--profile', help='Enable per-pass profiling')): Whether pass-level transpiler profiling is enabled.
@@ -94,6 +106,7 @@ def adjust_cmd(
     Raises:
         None.
     """
+    strategy_path = _strategy_file_or_none(strategies_json)
     bw = (
         Workload.from_path(dataset_dir)
         .set_target(backend)
@@ -101,6 +114,7 @@ def adjust_cmd(
             search=search,
             pareto=pareto,
             max_candidates=max_candidates,
+            strategies=load_strategy_specs(strategy_path) if strategy_path else None,
             execute=execute,
             shots=shots,
             profile=profile,
@@ -118,6 +132,11 @@ def matrix_cmd(
         ..., "--backend", "-b", help="Repeatable backend spec"
     ),
     out: Path = typer.Option(..., "--out", "-o", help="Output JSON"),
+    strategies_json: Optional[Path] = typer.Option(
+        None,
+        "--strategies",
+        help="JSON file containing matrix strategies",
+    ),
     execute: bool = typer.Option(False, "--execute"),
     shots: int = typer.Option(1024, "--shots"),
     profile: bool = typer.Option(False, "--profile"),
@@ -130,6 +149,7 @@ def matrix_cmd(
         dataset_dir (default: typer.Argument(...)): Directory containing the dataset index and circuit artifacts.
         backend (default: typer.Option(..., '--backend', '-b', help='Repeatable backend spec')): Backend object (or backend-like handle) used for compilation, property lookup, or execution.
         out (default: typer.Option(..., '--out', '-o', help='Output JSON')): Destination path for generated output files.
+        strategies_json (default: None): Optional JSON file defining matrix strategies.
         execute (default: typer.Option(False, '--execute')): Whether to run compiled circuits and collect counts.
         shots (default: typer.Option(1024, '--shots')): Number of shots used when executing circuits on a backend.
         profile (default: typer.Option(False, '--profile')): Whether pass-level transpiler profiling is enabled.
@@ -140,29 +160,34 @@ def matrix_cmd(
     Raises:
         None.
     """
-    strategies = [
-        StrategySpec(optimization_level=1, routing_method="sabre"),
-        StrategySpec(
-            optimization_level=2,
-            routing_method="sabre",
-            layout_method="qbalance_noise_aware",
-        ),
-        StrategySpec(
-            optimization_level=2,
-            routing_method="sabre",
-            pauli_twirling=True,
-            num_twirls=8,
-        ),
-        StrategySpec(
-            optimization_level=2,
-            routing_method="sabre",
-            dynamical_decoupling=True,
-            dd_sequence="XY4",
-        ),
-        StrategySpec(
-            optimization_level=2, routing_method="sabre", measurement_twirling=True
-        ),
-    ]
+    strategy_path = _strategy_file_or_none(strategies_json)
+    strategies = (
+        load_strategy_specs(strategy_path)
+        if strategy_path
+        else [
+            StrategySpec(optimization_level=1, routing_method="sabre"),
+            StrategySpec(
+                optimization_level=2,
+                routing_method="sabre",
+                layout_method="qbalance_noise_aware",
+            ),
+            StrategySpec(
+                optimization_level=2,
+                routing_method="sabre",
+                pauli_twirling=True,
+                num_twirls=8,
+            ),
+            StrategySpec(
+                optimization_level=2,
+                routing_method="sabre",
+                dynamical_decoupling=True,
+                dd_sequence="XY4",
+            ),
+            StrategySpec(
+                optimization_level=2, routing_method="sabre", measurement_twirling=True
+            ),
+        ]
+    )
     p = run_matrix(
         dataset_dir,
         backend_specs=backend,

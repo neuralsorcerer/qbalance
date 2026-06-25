@@ -11,7 +11,7 @@ import shutil
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -28,7 +28,7 @@ from qbalance.mitigation.mthree import apply_mthree_mitigation
 from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
 from qbalance.objectives import Objective, default_objective
 from qbalance.search import BanditSearcher, default_candidate_strategies, pareto_front
-from qbalance.strategies import Strategy, StrategySpec
+from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
 
@@ -102,7 +102,7 @@ class BalancedWorkload:
             x1 = [float(m.get(k, 0)) for m in base_ms]
             x2 = [float(m.get(k, 0)) for m in sel_ms]
             lines.append(
-                f"  dist[{k}]: EMD={emd_1d(x1,x2):.4g}  CVM={cvm_1d(x1,x2):.4g}  KS={ks_1d(x1,x2):.4g}"
+                f"  dist[{k}]: EMD={emd_1d(x1, x2):.4g}  CVM={cvm_1d(x1, x2):.4g}  KS={ks_1d(x1, x2):.4g}"
             )
         return "\n".join(lines)
 
@@ -264,6 +264,7 @@ class Workload:
         profile: bool = False,
         cache_root: Optional[Path] = None,
         seed: int = 0,
+        strategies: Optional[Iterable[StrategySpec | Mapping[str, Any]]] = None,
     ) -> BalancedWorkload:
         """Adjust used by the qbalance workflow.
 
@@ -278,6 +279,8 @@ class Workload:
             profile (default: False): Whether pass-level transpiler profiling is enabled.
             cache_root (default: None): Cache root value consumed by this routine.
             seed (default: 0): Seed used for deterministic randomization.
+            strategies (default: None): Explicit candidate strategies. When provided,
+                max_candidates is ignored and the supplied order is used for grid search.
 
         Returns:
             BalancedWorkload with the computed result.
@@ -293,8 +296,10 @@ class Workload:
         backend = resolve_backend(self.backend_spec)
         rng = np.random.default_rng(seed)
 
-        candidates = default_candidate_strategies(
-            max_candidates=max_candidates, seed=seed
+        candidates = (
+            coerce_strategy_specs(strategies)
+            if strategies is not None
+            else default_candidate_strategies(max_candidates=max_candidates, seed=seed)
         )
         bandit = BanditSearcher()
 

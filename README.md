@@ -32,6 +32,8 @@ At a high level, it provides a reproducible pipeline to:
 
 It supports both a Python API and a CLI.
 
+Full documentation lives in [`docs/`](docs/index.md), including the [API reference](docs/api-references.md), [CLI guide](docs/cli.md), [strategy configuration guide](docs/strategies.md), and [artifact/report reference](docs/artifacts.md).
+
 ---
 
 ## Why qbalance
@@ -134,6 +136,7 @@ python -m qbalance adjust ./circuits \
   --search bandit \
   --pareto \
   --max-candidates 24 \
+  --strategies ./strategies.json \
   --overwrite
 
 # Evaluate fixed strategy matrix across backends
@@ -142,7 +145,8 @@ python -m qbalance matrix ./circuits \
   --backend fake:generic:10 \
   --out ./matrix.json \
   --execute \
-  --shots 1024
+  --shots 1024 \
+  --strategies ./strategies.json
 
 # Render markdown/html reports
 python -m qbalance report ./matrix.json --out ./report --html
@@ -404,10 +408,22 @@ python -m qbalance adjust ./circuits \
   --search grid \
   --pareto \
   --max-candidates 24 \
+  --strategies ./strategies.json \
   --execute \
   --shots 1024 \
   --profile \
   --overwrite
+```
+
+A strategy JSON file may be either one strategy object, a list of strategy objects, or an object with a `strategies` list:
+
+```json
+{
+  "strategies": [
+    {"optimization_level": 1, "routing_method": "sabre"},
+    {"optimization_level": 2, "layout_method": "qbalance_noise_aware", "routing_method": "sabre"}
+  ]
+}
 ```
 
 ### `matrix`
@@ -419,7 +435,8 @@ python -m qbalance matrix ./circuits \
   --out ./matrix.json \
   --execute \
   --shots 1024 \
-  --profile
+  --profile \
+  --strategies ./strategies.json
 ```
 
 ### `report`

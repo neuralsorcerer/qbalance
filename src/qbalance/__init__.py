@@ -5,7 +5,12 @@
 # LICENSE file in the root directory of this source tree.
 
 from qbalance.dataset import CircuitDataset, load_data, load_dataset, save_dataset
-from qbalance.strategies import Strategy, StrategySpec
+from qbalance.strategies import (
+    Strategy,
+    StrategySpec,
+    coerce_strategy_specs,
+    load_strategy_specs,
+)
 from qbalance.workflow.workload import BalancedWorkload, Workload
 
 __all__ = [
@@ -17,4 +22,6 @@ __all__ = [
     "BalancedWorkload",
     "Strategy",
     "StrategySpec",
+    "coerce_strategy_specs",
+    "load_strategy_specs",
 ]
