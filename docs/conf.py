@@ -8,14 +8,15 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version
-from pathlib import Path
 import sys
+from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 project = "qbalance"
+copyright = "Soumyadip Sarkar"
 author = "Soumyadip Sarkar"
 
 try:
