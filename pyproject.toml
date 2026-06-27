@@ -60,7 +60,7 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/neuralsorcerer/qbalance
+Homepage = "https://github.com/neuralsorcerer/qbalance"
 Repository = "https://github.com/neuralsorcerer/qbalance"
 "Bug Tracker" = "https://github.com/neuralsorcerer/qbalance/issues"
 

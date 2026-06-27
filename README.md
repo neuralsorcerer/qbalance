@@ -19,7 +19,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 [![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.02966-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2605.02966)
 [![DOI:48550/arXiv.2605.02966](https://img.shields.io/badge/DOI-10.48550/arXiv.2605.02966-blue.svg)](https://doi.org/10.48550/arXiv.2605.02966)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/qbalance?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/qbalance)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/qbalance?period=total&units=INTERNATIONAL_SYSTEM&left_color=GRAY&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/qbalance)
 
 </div>
 
