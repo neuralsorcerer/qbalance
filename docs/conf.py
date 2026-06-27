@@ -15,13 +15,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-project = "qbalance"
-copyright = "Soumyadip Sarkar"
+project = "qBalance"
 author = "Soumyadip Sarkar"
+copyright = f"{datetime.now(UTC):%Y}, {author}"
 
 try:
     release = version(project)
-except PackageNotFoundError:  # pragma: no cover - used when building without installation
+except (
+    PackageNotFoundError
+):  # pragma: no cover - used when building without installation
     release = "0.0.0"
 
 version = ".".join(release.split(".")[:2])
