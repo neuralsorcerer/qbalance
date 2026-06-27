@@ -83,6 +83,14 @@ def adjust_cmd(
     ),
     shots: int = typer.Option(1024, "--shots"),
     profile: bool = typer.Option(False, "--profile", help="Enable per-pass profiling"),
+    cache_root: Optional[Path] = typer.Option(
+        None,
+        "--cache-root",
+        help="Compiled-circuit cache directory (defaults to the platform cache)",
+    ),
+    seed: int = typer.Option(
+        0, "--seed", help="Random seed for deterministic search/execution"
+    ),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ):
     """Adjust cmd used by the qbalance workflow.
@@ -118,6 +126,8 @@ def adjust_cmd(
             execute=execute,
             shots=shots,
             profile=profile,
+            cache_root=cache_root,
+            seed=seed,
         )
     )
     bw.save(out, overwrite=overwrite)
@@ -140,6 +150,9 @@ def matrix_cmd(
     execute: bool = typer.Option(False, "--execute"),
     shots: int = typer.Option(1024, "--shots"),
     profile: bool = typer.Option(False, "--profile"),
+    seed: int = typer.Option(
+        0, "--seed", help="Random seed for deterministic execution"
+    ),
 ):
     # Default strategies
 
@@ -195,6 +208,7 @@ def matrix_cmd(
         out_json=out,
         execute=execute,
         shots=shots,
+        seed=seed,
         profile=profile,
     )
     console.print(f"[green]Wrote[/green] {p}")

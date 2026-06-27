@@ -19,6 +19,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 [![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.02966-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2605.02966)
 [![DOI:48550/arXiv.2605.02966](https://img.shields.io/badge/DOI-10.48550/arXiv.2605.02966-blue.svg)](https://doi.org/10.48550/arXiv.2605.02966)
+[![PyPI Downloads](https://static.pepy.tech/personalized-badge/qbalance?period=total&units=INTERNATIONAL_SYSTEM&left_color=BLACK&right_color=GREEN&left_text=downloads)](https://pepy.tech/projects/qbalance)
 
 </div>
 
@@ -114,6 +115,8 @@ balanced = wl.adjust(
     pareto=True,           # optional Pareto pre-filtering
     max_candidates=24,
     execute=False,         # compile-only mode
+    seed=7,                # deterministic candidate ordering
+    cache_root="./.qbalance-cache",
     profile=False,
 )
 
@@ -140,6 +143,8 @@ python -m qbalance adjust ./circuits \
   --search bandit \
   --pareto \
   --max-candidates 24 \
+  --seed 7 \
+  --cache-root ./.qbalance-cache \
   --strategies ./strategies.json \
   --overwrite
 
@@ -149,6 +154,7 @@ python -m qbalance matrix ./circuits \
   --backend fake:generic:10 \
   --out ./matrix.json \
   --execute \
+  --seed 7 \
   --shots 1024 \
   --strategies ./strategies.json
 

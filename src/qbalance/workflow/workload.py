@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import zipfile
 from dataclasses import dataclass, field
@@ -31,6 +32,7 @@ from qbalance.search import BanditSearcher, default_candidate_strategies, pareto
 from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
+from qbalance.utils import validate_integral
 
 log = get_logger(__name__)
 
@@ -415,15 +417,28 @@ class Workload:
             raise ValueError(
                 "Workload has no target backend; call set_target(...) first"
             )
+        if search not in {"grid", "bandit"}:
+            raise ValueError("search must be 'grid' or 'bandit'")
+        shots = validate_integral("shots", shots, positive=True)
+        seed = validate_integral("seed", seed)
+        warmup = validate_integral("warmup", warmup, non_negative=True)
+        if strategies is None:
+            max_candidates = validate_integral(
+                "max_candidates", max_candidates, positive=True
+            )
+
         obj = objective or default_objective()
         backend = resolve_backend(self.backend_spec)
         rng = np.random.default_rng(seed)
+        cache_root = Path(cache_root) if cache_root is not None else None
 
         candidates = (
             coerce_strategy_specs(strategies)
             if strategies is not None
             else default_candidate_strategies(max_candidates=max_candidates, seed=seed)
         )
+        if not candidates:
+            raise ValueError("at least one candidate strategy is required")
         bandit = BanditSearcher()
 
         selections: Dict[str, Strategy] = {}
@@ -449,20 +464,19 @@ class Workload:
             order: List[StrategySpec] = []
             if search == "grid":
                 order = list(candidates)
-            elif search == "bandit":
-                # warmup random subset
+            else:
+                # warmup random subset; warmup=0 intentionally starts from the
+                # bandit's prior and proposes every candidate adaptively.
                 order = []
                 perm = list(candidates)
                 rng.shuffle(perm)
-                order.extend(perm[: max(1, min(warmup, len(perm)))])
+                order.extend(perm[: min(warmup, len(perm))])
                 # then propose until exhaustion or budget
                 while len(order) < len(candidates):
                     proposed = bandit.propose(
                         [c for c in candidates if c not in order], rng=rng
                     )
                     order.append(proposed)
-            else:
-                raise ValueError("search must be 'grid' or 'bandit'")
 
             evals: List[Tuple[StrategySpec, Dict[str, Any]]] = []
             for spec in order:
@@ -537,7 +551,7 @@ class Workload:
                 # score and observe for bandit
                 m["objective_score"] = obj.score(m)
                 evals.append((spec, m))
-                if search == "bandit":
+                if search == "bandit" and _is_finite_number(m["objective_score"]):
                     bandit.observe(spec, m["objective_score"])
 
             # Pareto selection if requested (otherwise min score)
@@ -551,6 +565,14 @@ class Workload:
             baseline_metrics=baseline_metrics,
             objective=obj,
         )
+
+
+def _is_finite_number(value: Any) -> bool:
+    """Return True when *value* can be safely used as a finite float."""
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _compile_cached(

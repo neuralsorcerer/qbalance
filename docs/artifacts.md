@@ -58,6 +58,14 @@ print(balanced.summary())
 ```json
 {
   "version": 1,
+  "metadata": {
+    "dataset_dir": "./circuits",
+    "backends": ["fake:generic:5"],
+    "execute": false,
+    "shots": 1024,
+    "seed": 0,
+    "profile": false
+  },
   "results": [
     {
       "circuit": "bell",
@@ -69,7 +77,7 @@ print(balanced.summary())
 }
 ```
 
-When `execute=True`, metrics can include counts, shot totals, execution errors, and ZNE probabilities depending on the strategy and backend.
+The top-level `metadata` block records the run context used to produce the artifact: dataset path, backend specs, execution/profile flags, shot count, and seed. `results` contains one row per backend/circuit/strategy combination. When `execute=True`, metrics can include counts, shot totals, execution errors, and ZNE probabilities depending on the strategy and backend.
 
 ## Reports
 

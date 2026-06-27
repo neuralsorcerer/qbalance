@@ -4,20 +4,29 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qbalance"
-version = "0.1.2"
+version = "0.1.3"
 description = "Balancing workflow library for quantum compilation/mitigation benchmarking with Qiskit."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
-authors = [{ name = "Soumyadip Sarkar" }]
+authors = [
+    { name = "Soumyadip Sarkar", email = "soumyadip@soumyadipsarkar.com" }
+]
 keywords = ["quantum", "qiskit", "transpiler", "error-mitigation", "benchmarking", "workflow"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "License :: OSI Approved :: MIT License",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: Implementation :: CPython",
   "Topic :: Scientific/Engineering :: Physics",
+  "Topic :: Scientific/Engineering :: Mathematics",
 ]
 
 dependencies = [
@@ -49,6 +58,11 @@ all = [
   "mypy>=1.7",
   "types-PyYAML",
 ]
+
+[project.urls]
+Homepage = "https://github.com/neuralsorcerer/qbalance
+Repository = "https://github.com/neuralsorcerer/qbalance"
+"Bug Tracker" = "https://github.com/neuralsorcerer/qbalance/issues"
 
 [project.scripts]
 qbalance = "qbalance.cli:app"

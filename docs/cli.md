@@ -30,6 +30,8 @@ python -m qbalance adjust ./circuits \
   --max-candidates 24 \
   --execute \
   --shots 1024 \
+  --seed 7 \
+  --cache-root ./.qbalance-cache \
   --profile \
   --strategies ./strategies.json \
   --overwrite
@@ -44,7 +46,9 @@ Options:
 - `--max-candidates INTEGER`: number of generated candidates when `--strategies` is not supplied.
 - `--strategies PATH`: strategy JSON file. When supplied, this file defines the complete candidate set.
 - `--execute`: execute compiled circuits and collect counts.
-- `--shots INTEGER`: execution shots.
+- `--shots INTEGER`: execution shots; must be a positive integer.
+- `--seed INTEGER`: random seed used for deterministic bandit ordering and execution.
+- `--cache-root PATH`: compiled-circuit cache directory; omit to use the platform cache.
 - `--profile`: record pass-level transpiler profiling where supported.
 - `--overwrite`: replace the output directory.
 
@@ -59,6 +63,7 @@ python -m qbalance matrix ./circuits \
   --out ./matrix.json \
   --execute \
   --shots 1024 \
+  --seed 7 \
   --profile \
   --strategies ./strategies.json
 ```
@@ -70,6 +75,7 @@ Options:
 - `--strategies PATH`: strategy JSON file. If omitted, qbalance uses the built-in matrix defaults.
 - `--execute`: execute compiled circuits and include counts/shot data.
 - `--shots INTEGER`: execution shots; must be a positive integer.
+- `--seed INTEGER`: random seed used for deterministic execution.
 - `--profile`: record pass-level transpiler profiling where supported.
 
 ## `report`

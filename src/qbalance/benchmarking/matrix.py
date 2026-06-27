@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
@@ -20,6 +19,7 @@ from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
 from qbalance.strategies import StrategySpec
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
+from qbalance.utils import validate_integral
 
 log = get_logger(__name__)
 
@@ -30,22 +30,6 @@ class TrialResult:
     backend: str
     strategy: Dict[str, Any]
     metrics: Dict[str, Any]
-
-
-def _validate_seed(seed: int) -> None:
-    """Internal helper that validate seed.
-
-    Args:
-        seed: Seed used for deterministic randomization.
-
-    Returns:
-        None. This method updates state or performs side effects only.
-
-    Raises:
-        ValueError: Raised when input validation fails or a dependent operation cannot be completed.
-    """
-    if isinstance(seed, bool) or not isinstance(seed, Integral):
-        raise ValueError("seed must be an integer.")
 
 
 def run_matrix(
@@ -76,9 +60,12 @@ def run_matrix(
     Raises:
         ValueError: Raised when input validation fails or a dependent operation cannot be completed.
     """
-    if isinstance(shots, bool) or not isinstance(shots, Integral) or shots <= 0:
-        raise ValueError("shots must be a positive integer.")
-    _validate_seed(seed)
+    shots = validate_integral("shots", shots, positive=True)
+    seed = validate_integral("seed", seed)
+    if isinstance(backend_specs, (str, bytes)) or len(backend_specs) == 0:
+        raise ValueError("backend_specs must contain at least one backend spec")
+    if isinstance(strategies, (str, bytes)) or len(strategies) == 0:
+        raise ValueError("strategies must contain at least one strategy")
 
     ds = load_dataset(dataset_dir)
     circuits = ds.load_circuits()
@@ -147,6 +134,17 @@ def run_matrix(
 
     out_json = Path(out_json)
     out_json.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"version": 1, "results": [asdict(r) for r in results]}
+    payload = {
+        "version": 1,
+        "metadata": {
+            "dataset_dir": str(Path(dataset_dir)),
+            "backends": list(backend_specs),
+            "execute": bool(execute),
+            "shots": int(shots),
+            "seed": int(seed),
+            "profile": bool(profile),
+        },
+        "results": [asdict(r) for r in results],
+    }
     out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return out_json

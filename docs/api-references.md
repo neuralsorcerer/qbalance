@@ -90,13 +90,21 @@ Methods:
 | `search` | `"grid"` | Candidate ordering mode: `"grid"` or `"bandit"`. |
 | `pareto` | `False` | If true, select from the Pareto front before objective tie-break. |
 | `max_candidates` | `24` | Number of generated candidates when `strategies` is not supplied. |
-| `warmup` | `6` | Bandit warmup count. |
-| `execute` | `False` | Execute compiled circuits and collect counts/mitigation metrics. |
-| `shots` | `1024` | Execution shots. |
+| `warmup` | `6` | Number of randomly ordered candidates evaluated before bandit proposals. `0` starts from the bandit prior. |
+| `execute` | `False` | Execute compiled circuits and collect counts/mitigation metrics. Mitigation strategies such as M3/ZNE also trigger execution. |
+| `shots` | `1024` | Positive integer execution-shot count. Boolean values are rejected. |
 | `profile` | `False` | Enable pass-level transpiler profiling. |
-| `cache_root` | `None` | Optional compiled-circuit cache root. |
-| `seed` | `0` | Deterministic seed for search/execution helpers. |
-| `strategies` | `None` | Explicit iterable of strategies. If provided, `max_candidates` is ignored. |
+| `cache_root` | `None` | Optional compiled-circuit cache root. `str` and `Path` values are accepted and normalized to `Path`. |
+| `seed` | `0` | Integer seed for deterministic candidate ordering and execution helpers. Boolean values are rejected. |
+| `strategies` | `None` | Explicit iterable of strategies. If provided, `max_candidates` is ignored and the supplied order is used for grid search. |
+
+Validation and edge-case behavior:
+
+- `search` must be exactly `"grid"` or `"bandit"`.
+- `shots` must be a positive integer; `seed` must be an integer; `warmup` must be a non-negative integer. Integral scalar types are accepted, but booleans are rejected.
+- `max_candidates` must be a positive integer when generated candidates are used. It is not consulted when explicit `strategies` are supplied.
+- At least one candidate strategy must be available after generated or explicit strategy normalization.
+- `search="bandit"` evaluates up to `warmup` shuffled candidates first, then asks the bandit model to propose remaining candidates. Non-finite objective scores are not observed by the bandit model, but they remain in the evaluated candidates and are handled by final selection.
 
 ### `BalancedWorkload`
 
@@ -142,9 +150,11 @@ Evaluates every `(backend, circuit, strategy)` combination and writes matrix JSO
 
 - `shots` is a positive integer and not a boolean,
 - `seed` is an integer and not a boolean,
+- `backend_specs` is a non-empty sequence of backend specs, not a single string/bytes value,
+- `strategies` is a non-empty sequence of strategy objects, not a single string/bytes value,
 - loaded circuit count matches dataset record count.
 
-When `execute=True`, it records counts and shot totals. If a strategy has `zne=True`, it also runs folded circuits for `zne_factors` and stores extrapolated probabilities.
+The JSON payload contains `version`, `metadata`, and `results`. `metadata` records `dataset_dir`, `backends`, `execute`, `shots`, `seed`, and `profile` so matrix artifacts are self-describing. When `execute=True`, each result's metrics can include counts and shot totals. If a strategy has `zne=True`, qbalance also runs folded circuits for `zne_factors` and stores extrapolated probabilities.
 
 ## Search: `qbalance.search`
 

@@ -1024,3 +1024,175 @@ def test_load_balanced_workload_rejects_malformed_payloads(tmp_path, payload, me
 
     with pytest.raises(ValueError, match=message):
         wl.load_balanced_workload(out)
+
+
+def test_cli_seed_and_cache_options_forwarded(monkeypatch, tmp_path):
+    adjust_kwargs = {}
+
+    class BW:
+        def save(self, out, overwrite=False):
+            _ = (out, overwrite)
+
+        def summary(self):
+            return "sum"
+
+    monkeypatch.setattr(
+        cli.Workload,
+        "from_path",
+        classmethod(
+            lambda cls, p: types.SimpleNamespace(
+                set_target=lambda b: types.SimpleNamespace(
+                    adjust=lambda **k: (adjust_kwargs.update(k) or BW())
+                )
+            )
+        ),
+    )
+
+    cache_root = tmp_path / "cache"
+    cli.adjust_cmd(
+        tmp_path,
+        "b",
+        tmp_path / "o",
+        cache_root=cache_root,
+        seed=123,
+        shots=77,
+    )
+    assert adjust_kwargs["cache_root"] == cache_root
+    assert adjust_kwargs["seed"] == 123
+    assert adjust_kwargs["shots"] == 77
+
+    matrix_kwargs = {}
+    monkeypatch.setattr(
+        cli,
+        "run_matrix",
+        lambda *a, **k: (matrix_kwargs.update(k) or tmp_path / "m.json"),
+    )
+    cli.matrix_cmd(tmp_path, ["b"], tmp_path / "m.json", seed=456, shots=88)
+    assert matrix_kwargs["seed"] == 456
+    assert matrix_kwargs["shots"] == 88
+
+
+def test_workload_adjust_validates_numeric_options(tmp_path):
+    work = wl.Workload(dataset=types.SimpleNamespace()).set_target("b")
+    with pytest.raises(ValueError, match="shots"):
+        work.adjust(shots=0)
+    with pytest.raises(ValueError, match="seed"):
+        work.adjust(seed=True)
+    with pytest.raises(ValueError, match="max_candidates"):
+        work.adjust(max_candidates=True)
+    with pytest.raises(ValueError, match="warmup"):
+        work.adjust(warmup=-1)
+
+
+def test_run_matrix_rejects_empty_or_string_sequences(tmp_path):
+    with pytest.raises(ValueError, match="backend_specs"):
+        matrix_mod.run_matrix(tmp_path, [], [StrategySpec()], tmp_path / "x.json")
+    with pytest.raises(ValueError, match="backend_specs"):
+        matrix_mod.run_matrix(
+            tmp_path, "backend", [StrategySpec()], tmp_path / "x.json"
+        )
+    with pytest.raises(ValueError, match="strategies"):
+        matrix_mod.run_matrix(tmp_path, ["b"], [], tmp_path / "x.json")
+    with pytest.raises(ValueError, match="strategies"):
+        matrix_mod.run_matrix(tmp_path, ["b"], "strategy", tmp_path / "x.json")
+
+
+def test_run_matrix_writes_reproducibility_metadata(monkeypatch, tmp_path):
+    ds = types.SimpleNamespace(
+        records=[types.SimpleNamespace(name="c0")],
+        load_circuits=lambda: [_Circ()],
+    )
+    monkeypatch.setattr(matrix_mod, "load_dataset", lambda p: ds)
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_one",
+        lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}}),
+    )
+
+    out = matrix_mod.run_matrix(
+        tmp_path,
+        ["b0"],
+        [StrategySpec()],
+        tmp_path / "metadata.json",
+        execute=False,
+        shots=12,
+        seed=34,
+        profile=True,
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["metadata"] == {
+        "dataset_dir": str(tmp_path),
+        "backends": ["b0"],
+        "execute": False,
+        "shots": 12,
+        "seed": 34,
+        "profile": True,
+    }
+
+
+def test_workload_adjust_accepts_integral_types_and_cache_root_string(
+    monkeypatch, tmp_path
+):
+    qc = _Circ()
+    record = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_integral"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [record])
+    monkeypatch.setattr(ds, "load_circuits", lambda: [qc])
+    monkeypatch.setattr(wl, "resolve_backend", lambda b: object())
+    seen_cache_roots = []
+
+    def fake_compile_cached(circuit, backend, spec, profile, cache_root):
+        seen_cache_roots.append(cache_root)
+        return circuit, {
+            "depth": 1,
+            "two_qubit_ops": 0,
+            "estimated_error": 0.0,
+            "compile_time_s": 0.0,
+        }
+
+    monkeypatch.setattr(wl, "_compile_cached", fake_compile_cached)
+    result = (
+        wl.Workload.from_dataset(ds)
+        .set_target("b")
+        .adjust(
+            search="bandit",
+            max_candidates=np.int64(1),
+            warmup=np.int64(0),
+            seed=np.int64(3),
+            shots=np.int64(4),
+            cache_root=str(tmp_path / "cache"),
+        )
+    )
+    assert result.selections["c0"].metrics["objective_score"] == 1.0
+    assert all(root == tmp_path / "cache" for root in seen_cache_roots)
+
+
+def test_bandit_skips_non_finite_observations(monkeypatch, tmp_path):
+    qc = _Circ()
+    record = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_non_finite"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [record])
+    monkeypatch.setattr(ds, "load_circuits", lambda: [qc])
+    monkeypatch.setattr(wl, "resolve_backend", lambda b: object())
+    specs = [StrategySpec(optimization_level=0), StrategySpec(optimization_level=1)]
+    monkeypatch.setattr(wl, "default_candidate_strategies", lambda **k: specs)
+
+    def fake_compile_cached(circuit, backend, spec, profile, cache_root):
+        if spec.optimization_level == 0:
+            return circuit, {"depth": float("inf")}
+        return circuit, {"depth": 1, "two_qubit_ops": 0, "estimated_error": 0.0}
+
+    monkeypatch.setattr(wl, "_compile_cached", fake_compile_cached)
+    result = (
+        wl.Workload.from_dataset(ds)
+        .set_target("b")
+        .adjust(search="bandit", max_candidates=2, warmup=2)
+    )
+    assert result.selections["c0"].spec.optimization_level == 1

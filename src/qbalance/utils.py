@@ -8,10 +8,49 @@ from __future__ import annotations
 
 import hashlib
 import json
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, cast
 
 from platformdirs import user_cache_dir
+
+
+def validate_integral(
+    name: str,
+    value: Any,
+    *,
+    positive: bool = False,
+    non_negative: bool = False,
+) -> int:
+    """Validate an integer-like option and return it as a builtin ``int``.
+
+    Args:
+        name: User-facing option name used in error messages.
+        value: Candidate value to validate.
+        positive: Require the value to be greater than zero.
+        non_negative: Require the value to be zero or greater.
+
+    Returns:
+        The validated value as a builtin ``int``.
+
+    Raises:
+        ValueError: If the value is bool, non-integral, or violates bounds.
+    """
+    if positive and non_negative:
+        raise ValueError("positive and non_negative are mutually exclusive")
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        if positive:
+            raise ValueError(f"{name} must be a positive integer")
+        if non_negative:
+            raise ValueError(f"{name} must be a non-negative integer")
+        raise ValueError(f"{name} must be an integer")
+
+    value_int = int(value)
+    if positive and value_int <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    if non_negative and value_int < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value_int
 
 
 def stable_hash_bytes(data: bytes) -> str:

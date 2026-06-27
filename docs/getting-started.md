@@ -40,6 +40,8 @@ balanced = (
         pareto=True,
         max_candidates=24,
         execute=False,
+        seed=7,
+        cache_root="./.qbalance-cache",
         profile=False,
     )
 )
@@ -64,6 +66,8 @@ python -m qbalance adjust ./circuits \
   --search bandit \
   --pareto \
   --max-candidates 24 \
+  --seed 7 \
+  --cache-root ./.qbalance-cache \
   --overwrite
 
 python -m qbalance matrix ./circuits \
@@ -71,7 +75,8 @@ python -m qbalance matrix ./circuits \
   --backend fake:generic:10 \
   --out ./matrix.json \
   --execute \
-  --shots 1024
+  --shots 1024 \
+  --seed 7
 
 python -m qbalance report ./matrix.json --out ./report --html
 ```
@@ -109,4 +114,4 @@ python -m qbalance matrix ./circuits \
   --strategies ./strategies.json
 ```
 
-When explicit strategies are supplied to `adjust`, `max_candidates` is ignored because the JSON file is the candidate set.
+When explicit strategies are supplied to `adjust`, `max_candidates` is ignored because the JSON file is the candidate set. Use `seed`/`--seed` to make randomized candidate ordering and execution helpers reproducible, and `cache_root`/`--cache-root` to choose where compiled-circuit cache artifacts are stored.
