@@ -10,6 +10,17 @@ qbalance is a workflow toolkit for balancing quantum compilation, noise-suppress
 - [Artifacts and reports](artifacts.md): dataset layouts, balanced workload outputs, matrix JSON, and report generation.
 - [API reference](api-references.md): public Python API, lower-level modules, extension points, and validation behavior.
 
+```{toctree}
+:maxdepth: 2
+:caption: User guide
+
+getting-started
+strategies
+cli
+artifacts
+api-references
+```
+
 ## Core flow
 
 ```text

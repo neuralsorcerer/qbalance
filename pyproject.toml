@@ -45,6 +45,7 @@ mitigation = ["mthree>=3.0.0"]
 cutting = ["qiskit-addon-cutting>=0.7.0"]
 report = ["jinja2>=3.1", "matplotlib>=3.7", "pandas>=2.0"]
 dev = ["pytest>=7.4", "ruff>=0.5", "mypy>=1.7", "types-PyYAML"]
+docs = ["sphinx>=8.1,<9.0", "myst-parser>=4.0", "furo>=2024.8.6"]
 all = [
   "qiskit-aer>=0.14",
   "qiskit-ibm-runtime>=0.24",
@@ -57,6 +58,9 @@ all = [
   "ruff>=0.5",
   "mypy>=1.7",
   "types-PyYAML",
+  "sphinx>=8.1,<9.0",
+  "myst-parser>=4.0",
+  "furo>=2024.8.6",
 ]
 
 [project.urls]
