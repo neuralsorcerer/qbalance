@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
