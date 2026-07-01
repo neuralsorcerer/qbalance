@@ -108,11 +108,16 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     work = wl.Workload.from_dataset(ds).set_target("fake:generic:2")
     balanced = work.adjust(search="grid", execute=True, pareto=True, max_candidates=2)
     assert balanced.backend_spec == "fake:generic:2"
-    assert "qbalance summary" in balanced.summary()
+    summary = balanced.summary()
+    assert "qbalance summary" in summary
+    assert "candidate evaluations:" in summary
     assert "depth" in balanced.covars()
+    assert len(balanced.evaluation_history["c0"]) == 2
 
     out_dir = tmp_path / "out"
     balanced.save(out_dir)
+    saved_payload = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
+    assert len(saved_payload["evaluation_history"]["c0"]) == 2
     z = balanced.to_download(tmp_path / "bundle.zip", overwrite=True)
     assert z.exists()
 
@@ -871,6 +876,18 @@ def test_load_balanced_workload_round_trip(tmp_path):
         },
         baseline_metrics={"c0": {"depth": 4, "two_qubit_ops": 2}},
         objective=Objective({"depth": 1.5, "two_qubit_ops": 2.0}),
+        evaluation_history={
+            "c0": [
+                Strategy(
+                    spec=StrategySpec(optimization_level=1),
+                    metrics={"depth": 4, "objective_score": 6.0},
+                ),
+                Strategy(
+                    spec=StrategySpec(optimization_level=2, routing_method="sabre"),
+                    metrics={"depth": 3, "objective_score": 5.0},
+                ),
+            ]
+        },
     )
 
     out = tmp_path / "balanced"
@@ -883,6 +900,8 @@ def test_load_balanced_workload_round_trip(tmp_path):
     assert loaded.selections["c0"].spec.optimization_level == 2
     assert loaded.selections["c0"].metrics["objective_score"] == 5.0
     assert loaded.baseline_metrics["c0"]["depth"] == 4
+    assert len(loaded.evaluation_history["c0"]) == 2
+    assert loaded.evaluation_history["c0"][1].metrics["objective_score"] == 5.0
 
 
 def test_load_balanced_workload_rejects_unknown_selection(tmp_path):
@@ -1006,7 +1025,7 @@ def test_load_balanced_workload_wraps_invalid_strategy(tmp_path):
                 "objective": {},
                 "selections": {"c0": {"spec": {}, "metrics": []}},
             },
-            "selection 'c0' metrics must be a JSON object",
+            "selection for 'c0' metrics must be a JSON object",
         ),
         (
             {
@@ -1020,6 +1039,113 @@ def test_load_balanced_workload_wraps_invalid_strategy(tmp_path):
     ],
 )
 def test_load_balanced_workload_rejects_malformed_payloads(tmp_path, payload, message):
+    out = _write_saved_balanced_payload(tmp_path, payload)
+
+    with pytest.raises(ValueError, match=message):
+        wl.load_balanced_workload(out)
+
+
+@pytest.mark.parametrize("history_value", [None, pytest.param("missing", id="missing")])
+def test_load_balanced_workload_accepts_legacy_payload_without_history(
+    tmp_path, history_value
+):
+    payload = {
+        "backend_spec": "fake:generic:2",
+        "objective": {"depth": 1.0},
+        "selections": {"c0": {"spec": {}, "metrics": {}}},
+        "baseline_metrics": {},
+    }
+    if history_value != "missing":
+        payload["evaluation_history"] = history_value
+    out = _write_saved_balanced_payload(tmp_path, payload)
+
+    loaded = wl.load_balanced_workload(out)
+
+    assert loaded.evaluation_history == {}
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": [],
+            },
+            "evaluation_history must be a JSON object",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {"c0": {}},
+            },
+            "evaluation history for 'c0' must be a list",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {"": []},
+            },
+            "evaluation history names must be non-empty strings",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {"c0": [[]]},
+            },
+            "evaluation history entry 0 for 'c0' must be a JSON object",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {"c0": [{"metrics": {}}]},
+            },
+            "Evaluation history entry 0 for 'c0' must include a spec object",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {"c0": [{"spec": {}, "metrics": []}]},
+            },
+            "evaluation history entry 0 for 'c0' metrics must be a JSON object",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {
+                    "c0": [{"spec": {"optimization_level": 7}, "metrics": {}}]
+                },
+            },
+            "Evaluation history entry 0 for 'c0' has an invalid spec",
+        ),
+        (
+            {
+                "backend_spec": "b",
+                "objective": {},
+                "selections": {"c0": {"spec": {}, "metrics": {}}},
+                "evaluation_history": {"ghost": []},
+            },
+            "evaluation history references circuits not present",
+        ),
+    ],
+)
+def test_load_balanced_workload_rejects_malformed_evaluation_history(
+    tmp_path, payload, message
+):
     out = _write_saved_balanced_payload(tmp_path, payload)
 
     with pytest.raises(ValueError, match=message):
@@ -1042,7 +1168,7 @@ def test_cli_seed_and_cache_options_forwarded(monkeypatch, tmp_path):
         classmethod(
             lambda cls, p: types.SimpleNamespace(
                 set_target=lambda b: types.SimpleNamespace(
-                    adjust=lambda **k: (adjust_kwargs.update(k) or BW())
+                    adjust=lambda **k: adjust_kwargs.update(k) or BW()
                 )
             )
         ),
@@ -1065,7 +1191,7 @@ def test_cli_seed_and_cache_options_forwarded(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli,
         "run_matrix",
-        lambda *a, **k: (matrix_kwargs.update(k) or tmp_path / "m.json"),
+        lambda *a, **k: matrix_kwargs.update(k) or tmp_path / "m.json",
     )
     cli.matrix_cmd(tmp_path, ["b"], tmp_path / "m.json", seed=456, shots=88)
     assert matrix_kwargs["seed"] == 456

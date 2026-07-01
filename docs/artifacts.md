@@ -36,13 +36,33 @@ Create datasets programmatically with `qbalance.save_dataset(...)` and load them
 `results.json` includes:
 
 - `backend_spec`,
-- objective weights,
-- selected strategy specs and metrics per circuit,
-- baseline metrics per circuit.
+- `objective`: objective weights,
+- `selections`: selected strategy specs and metrics per circuit,
+- `baseline_metrics`: baseline compile metrics per circuit,
+- `evaluation_history`: every evaluated candidate strategy and metrics per circuit, in evaluation order.
+
+A minimal shape is:
+
+```json
+{
+  "backend_spec": "fake:generic:5",
+  "objective": {"depth": 1.0},
+  "selections": {
+    "bell": {"spec": {"optimization_level": 1}, "metrics": {"depth": 3}}
+  },
+  "baseline_metrics": {"bell": {"depth": 4}},
+  "evaluation_history": {
+    "bell": [
+      {"spec": {"optimization_level": 0}, "metrics": {"depth": 5}},
+      {"spec": {"optimization_level": 1}, "metrics": {"depth": 3}}
+    ]
+  }
+}
+```
 
 `BalancedWorkload.to_download(zip_path, overwrite=False)` creates a ZIP bundle containing the same saved workload layout.
 
-Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections and baseline metrics refer only to circuits in the copied dataset. Extract a ZIP bundle first if you need to reload a download archive.
+Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections, baseline metrics, and evaluation-history entries refer only to circuits in the copied dataset. Older artifacts that omit `evaluation_history` or set it to `null` still load, with an empty history mapping. Extract a ZIP bundle first if you need to reload a download archive.
 
 ```python
 from qbalance import load_balanced_workload

@@ -377,7 +377,7 @@ Additional performance-relevant behavior:
 ### `adjust` output directory
 
 - `dataset/` copied dataset index + artifacts,
-- `results.json` selected strategy specs/metrics + baseline metrics + objective weights,
+- `results.json` selected strategy specs/metrics + baseline metrics + objective weights + per-circuit candidate evaluation history,
 - `summary.txt` text summary.
 
 ### `matrix` output JSON

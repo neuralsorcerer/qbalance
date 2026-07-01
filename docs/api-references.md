@@ -112,26 +112,28 @@ Properties:
 
 - `dataset`
 - `backend_spec`
-- `selections`: mapping from circuit name to selected `Strategy`
-- `baseline_metrics`
-- `objective`
+- `selections`: mapping from circuit name to the selected `Strategy`.
+- `baseline_metrics`: mapping from circuit name to baseline compile metrics.
+- `objective`: the objective used to score candidates.
+- `evaluation_history`: optional mapping from circuit name to every evaluated candidate `Strategy`, in evaluation order. This is empty for legacy artifacts that predate candidate-history persistence.
 
 Methods:
 
-- `summary() -> str`: human-readable baseline-vs-balanced aggregate summary.
+- `summary() -> str`: human-readable baseline-vs-balanced aggregate summary. When `evaluation_history` is present, the summary includes total and mean candidate-evaluation counts.
 - `covars() -> dict`: EMD/CVM/KS diagnostics for depth, two-qubit ops, and estimated error.
-- `save(out_dir, overwrite=False) -> None`: save dataset copy, `results.json`, and `summary.txt`.
+- `save(out_dir, overwrite=False) -> None`: save dataset copy, `results.json`, and `summary.txt`. The results file contains selections, baselines, objective weights, and `evaluation_history`.
 - `to_download(zip_path, overwrite=False) -> Path`: save a ZIP bundle.
 
 ### `load_balanced_workload(out_dir: Path | str) -> BalancedWorkload`
 
-Reloads a directory written by `BalancedWorkload.save(...)`. The loader reconstructs the copied dataset, selected `Strategy` objects, baseline metrics, and `Objective` weights without re-running compilation or execution. It validates the saved payload before returning:
+Reloads a directory written by `BalancedWorkload.save(...)`. The loader reconstructs the copied dataset, selected `Strategy` objects, baseline metrics, full candidate evaluation history, and `Objective` weights without re-running compilation or execution. Artifacts written before `evaluation_history` existed remain loadable; missing or `null` history is treated as an empty mapping. It validates the saved payload before returning:
 
 - `results.json` must be a JSON object with a non-empty string `backend_spec`;
-- `objective`, `selections`, `metrics`, and `baseline_metrics` entries must be JSON objects where present;
+- `objective`, `selections`, `metrics`, `baseline_metrics`, and `evaluation_history` entries must have the expected JSON shapes where present;
+- every saved selection and evaluation-history entry must contain a strategy `spec` object and optional metrics object;
 - every saved strategy spec must pass `StrategySpec` validation;
 - selection names must exactly match the bundled dataset records;
-- baseline metric names, if present, must refer to bundled dataset records.
+- baseline metric names and evaluation-history names, if present, must refer to bundled dataset records.
 
 Use it for offline inspection or follow-up processing of saved adjustment results:
 

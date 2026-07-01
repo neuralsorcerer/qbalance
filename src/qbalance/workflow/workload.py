@@ -46,6 +46,7 @@ class BalancedWorkload:
     selections: Dict[str, Strategy]  # circuit_name -> Strategy
     baseline_metrics: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     objective: Objective = field(default_factory=default_objective)
+    evaluation_history: Dict[str, List[Strategy]] = field(default_factory=dict)
 
     def summary(self) -> str:
         # Compare baseline vs selected over depth + two_qubit_ops + estimated_error
@@ -66,6 +67,13 @@ class BalancedWorkload:
         lines.append("qbalance summary")
         lines.append(f"  backend: {self.backend_spec}")
         lines.append(f"  circuits: {len(self.selections)}")
+        if self.evaluation_history:
+            counts = [len(v) for v in self.evaluation_history.values()]
+            if counts:
+                lines.append(
+                    "  candidate evaluations: "
+                    f"total={sum(counts)} mean_per_circuit={float(np.mean(counts)):.4g}"
+                )
 
         def agg(ms: List[Dict[str, Any]]) -> Dict[str, float]:
             """Agg used by the qbalance workflow.
@@ -171,6 +179,13 @@ class BalancedWorkload:
                 for name, s in self.selections.items()
             },
             "baseline_metrics": self.baseline_metrics,
+            "evaluation_history": {
+                name: [
+                    {"spec": strategy.spec.model_dump(), "metrics": strategy.metrics}
+                    for strategy in strategies
+                ]
+                for name, strategies in self.evaluation_history.items()
+            },
         }
         (out_dir / "results.json").write_text(
             json.dumps(results, indent=2), encoding="utf-8"
@@ -217,6 +232,60 @@ def _format_name_set(names: Iterable[str]) -> str:
     return ", ".join(sorted(names))
 
 
+def _strategy_from_result_entry(entry: Any, field: str) -> Strategy:
+    """Parse a saved Strategy payload containing spec and optional metrics."""
+    entry_obj = _require_json_object(entry, field)
+    spec_payload = entry_obj.get("spec")
+    if not isinstance(spec_payload, Mapping):
+        raise ValueError(f"{field.capitalize()} must include a spec object.")
+
+    metrics_payload = entry_obj.get("metrics", {})
+    if metrics_payload is None:
+        metrics_payload = {}
+    metrics = dict(_require_json_object(metrics_payload, f"{field} metrics"))
+
+    try:
+        spec = StrategySpec(**dict(spec_payload))
+    except Exception as exc:
+        raise ValueError(f"{field.capitalize()} has an invalid spec: {exc}") from exc
+    return Strategy(spec=spec, metrics=metrics)
+
+
+def _load_evaluation_history(
+    payload: Mapping[str, Any], dataset_names: set[str]
+) -> Dict[str, List[Strategy]]:
+    """Load optional saved candidate evaluations, preserving legacy compatibility."""
+    history_payload = payload.get("evaluation_history", {})
+    if history_payload is None:
+        history_payload = {}
+    history_payload = _require_json_object(history_payload, "evaluation_history")
+
+    evaluation_history: Dict[str, List[Strategy]] = {}
+    for name, entries in history_payload.items():
+        if not isinstance(name, str) or not name:
+            raise ValueError(
+                "Balanced workload evaluation history names must be non-empty strings."
+            )
+        if not isinstance(entries, list):
+            raise ValueError(
+                f"Balanced workload evaluation history for {name!r} must be a list."
+            )
+        evaluation_history[name] = [
+            _strategy_from_result_entry(
+                entry, f"evaluation history entry {idx} for {name!r}"
+            )
+            for idx, entry in enumerate(entries)
+        ]
+
+    unknown_history = set(evaluation_history) - dataset_names
+    if unknown_history:
+        raise ValueError(
+            "Balanced workload evaluation history references circuits not present in dataset: "
+            + _format_name_set(unknown_history)
+        )
+    return evaluation_history
+
+
 def load_balanced_workload(out_dir: Path | str) -> BalancedWorkload:
     """Load a workload previously written by :meth:`BalancedWorkload.save`.
 
@@ -226,7 +295,7 @@ def load_balanced_workload(out_dir: Path | str) -> BalancedWorkload:
 
     Returns:
         Reconstructed :class:`BalancedWorkload` with dataset, selections,
-        baseline metrics, and objective weights.
+        baseline metrics, objective weights, and optional evaluation history.
 
     Raises:
         ValueError: If required artifacts are missing or malformed.
@@ -268,23 +337,7 @@ def load_balanced_workload(out_dir: Path | str) -> BalancedWorkload:
             raise ValueError(
                 "Balanced workload selection names must be non-empty strings."
             )
-        entry = _require_json_object(entry, f"selection for {name!r}")
-        spec_payload = entry.get("spec")
-        if not isinstance(spec_payload, Mapping):
-            raise ValueError(f"Selection for {name!r} must include a spec object.")
-        metrics_payload = entry.get("metrics", {})
-        if metrics_payload is None:
-            metrics_payload = {}
-        metrics = dict(
-            _require_json_object(metrics_payload, f"selection {name!r} metrics")
-        )
-        try:
-            spec = StrategySpec(**dict(spec_payload))
-        except Exception as exc:
-            raise ValueError(
-                f"Selection for {name!r} has an invalid spec: {exc}"
-            ) from exc
-        selections[name] = Strategy(spec=spec, metrics=metrics)
+        selections[name] = _strategy_from_result_entry(entry, f"selection for {name!r}")
 
     selection_names = set(selections)
     unknown_selections = selection_names - dataset_names
@@ -319,12 +372,15 @@ def load_balanced_workload(out_dir: Path | str) -> BalancedWorkload:
             + _format_name_set(unknown_baselines)
         )
 
+    evaluation_history = _load_evaluation_history(payload, dataset_names)
+
     return BalancedWorkload(
         dataset=dataset,
         backend_spec=backend_spec,
         selections=selections,
         baseline_metrics=baseline_metrics,
         objective=objective,
+        evaluation_history=evaluation_history,
     )
 
 
@@ -443,6 +499,7 @@ class Workload:
 
         selections: Dict[str, Strategy] = {}
         baseline_metrics: Dict[str, Dict[str, Any]] = {}
+        evaluation_history: Dict[str, List[Strategy]] = {}
 
         circuits = self.dataset.load_circuits()
         if len(circuits) != len(self.dataset.records):
@@ -555,6 +612,9 @@ class Workload:
                     bandit.observe(spec, m["objective_score"])
 
             # Pareto selection if requested (otherwise min score)
+            evaluation_history[rec.name] = [
+                Strategy(spec=spec, metrics=dict(metrics)) for spec, metrics in evals
+            ]
             chosen_spec, chosen_m = _choose(evals, pareto=pareto, objective=obj)
             selections[rec.name] = Strategy(spec=chosen_spec, metrics=chosen_m)
 
@@ -564,6 +624,7 @@ class Workload:
             selections=selections,
             baseline_metrics=baseline_metrics,
             objective=obj,
+            evaluation_history=evaluation_history,
         )
 
 
