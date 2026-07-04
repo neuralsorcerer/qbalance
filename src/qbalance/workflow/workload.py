@@ -91,9 +91,9 @@ class BalancedWorkload:
             for k in keys:
                 vals: List[float] = []
                 for m in ms:
-                    value = m.get(k)
-                    if isinstance(value, (int, float)):
-                        vals.append(float(value))
+                    value = _finite_float_or_none(m.get(k))
+                    if value is not None:
+                        vals.append(value)
                 out[k] = float(np.mean(vals)) if vals else float("nan")
             return out
 
@@ -109,12 +109,97 @@ class BalancedWorkload:
 
         # Distribution diagnostics inspired by balance's EMD/CVMD/KS additions
         for k in ["depth", "two_qubit_ops"]:
-            x1 = [float(m.get(k, 0)) for m in base_ms]
-            x2 = [float(m.get(k, 0)) for m in sel_ms]
+            x1 = [_finite_float_or_default(m.get(k), 0.0) for m in base_ms]
+            x2 = [_finite_float_or_default(m.get(k), 0.0) for m in sel_ms]
             lines.append(
                 f"  dist[{k}]: EMD={emd_1d(x1, x2):.4g}  CVM={cvm_1d(x1, x2):.4g}  KS={ks_1d(x1, x2):.4g}"
             )
+
+        diagnostics = self.selection_diagnostics()
+        objective_deltas = [
+            float(item["objective_delta"])
+            for item in diagnostics.values()
+            if _is_finite_number(item.get("objective_delta"))
+        ]
+        comparable = [
+            item
+            for item in diagnostics.values()
+            if item.get("objective_improved") is not None
+        ]
+        improved = sum(1 for item in comparable if item["objective_improved"] is True)
+        if objective_deltas:
+            lines.append(
+                "  objective deltas: "
+                f"mean={float(np.mean(objective_deltas)):.4g} "
+                f"improved={improved}/{len(comparable)}"
+            )
         return "\n".join(lines)
+
+    def selection_diagnostics(self) -> Dict[str, Dict[str, Any]]:
+        """Return per-circuit baseline-vs-selected diagnostic deltas.
+
+        The adjustment workflow optimizes a weighted objective, but downstream
+        reviews often need to know *why* a strategy was selected and whether it
+        actually improves on the baseline for each circuit.  This method
+        computes deterministic, JSON-serializable diagnostics without requiring
+        recompilation: baseline score, selected score, absolute and relative
+        deltas for common compile metrics, and candidate evaluation counts.
+        Negative deltas indicate improvements for minimized metrics.
+        """
+        metric_keys = ("depth", "two_qubit_ops", "estimated_error", "compile_time_s")
+        diagnostics: Dict[str, Dict[str, Any]] = {}
+
+        for name, selected in self.selections.items():
+            baseline = self.baseline_metrics.get(name, {})
+            selected_metrics = selected.metrics or {}
+            baseline_score, baseline_terms = _diagnostic_objective_score(
+                self.objective, baseline
+            )
+            selected_score, selected_terms = _diagnostic_objective_score(
+                self.objective, selected_metrics
+            )
+
+            metric_deltas: Dict[str, Dict[str, Optional[float]]] = {}
+            for key in metric_keys:
+                base_value = _finite_float_or_none(baseline.get(key))
+                selected_value = _finite_float_or_none(selected_metrics.get(key))
+                delta = (
+                    selected_value - base_value
+                    if base_value is not None and selected_value is not None
+                    else None
+                )
+                if delta is not None and base_value is not None and base_value != 0.0:
+                    relative_delta = delta / abs(base_value)
+                else:
+                    relative_delta = None
+                metric_deltas[key] = {
+                    "baseline": base_value,
+                    "selected": selected_value,
+                    "delta": delta,
+                    "relative_delta": relative_delta,
+                }
+
+            score_delta = (
+                selected_score - baseline_score
+                if baseline_score is not None and selected_score is not None
+                else None
+            )
+            diagnostics[name] = {
+                "baseline_objective_score": baseline_score,
+                "selected_objective_score": selected_score,
+                "objective_delta": score_delta,
+                "objective_improved": (
+                    score_delta <= 0.0 if score_delta is not None else None
+                ),
+                "objective_terms": {
+                    "baseline": baseline_terms,
+                    "selected": selected_terms,
+                },
+                "evaluated_candidates": len(self.evaluation_history.get(name, [])),
+                "metric_deltas": metric_deltas,
+            }
+
+        return diagnostics
 
     def covars(self) -> Dict[str, Dict[str, float]]:
         # Return diagnostic distances for key metrics
@@ -134,8 +219,8 @@ class BalancedWorkload:
         sel_ms = [s.metrics for s in self.selections.values()]
         base_ms = [self.baseline_metrics.get(n, {}) for n in self.selections.keys()]
         for k in ["depth", "two_qubit_ops", "estimated_error"]:
-            x1 = [float(m.get(k, 0) or 0) for m in base_ms]
-            x2 = [float(m.get(k, 0) or 0) for m in sel_ms]
+            x1 = [_finite_float_or_default(m.get(k), 0.0) for m in base_ms]
+            x2 = [_finite_float_or_default(m.get(k), 0.0) for m in sel_ms]
             out[k] = {"emd": emd_1d(x1, x2), "cvm": cvm_1d(x1, x2), "ks": ks_1d(x1, x2)}
         return out
 
@@ -179,6 +264,7 @@ class BalancedWorkload:
                 for name, s in self.selections.items()
             },
             "baseline_metrics": self.baseline_metrics,
+            "selection_diagnostics": self.selection_diagnostics(),
             "evaluation_history": {
                 name: [
                     {"spec": strategy.spec.model_dump(), "metrics": strategy.metrics}
@@ -634,6 +720,48 @@ def _is_finite_number(value: Any) -> bool:
         return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def _finite_float_or_none(value: Any) -> Optional[float]:
+    """Return a finite float for diagnostics, otherwise ``None``."""
+    try:
+        value_f = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return value_f if math.isfinite(value_f) else None
+
+
+def _finite_float_or_default(value: Any, default: float) -> float:
+    """Return a finite float or a deterministic fallback value."""
+    value_f = _finite_float_or_none(value)
+    return default if value_f is None else value_f
+
+
+def _diagnostic_objective_score(
+    objective: Objective, metrics: Mapping[str, Any]
+) -> Tuple[Optional[float], Dict[str, float]]:
+    """Compute a JSON-safe objective score and contributing terms.
+
+    Unlike :meth:`Objective.score`, this helper returns ``None`` when no
+    finite objective term contributes.  That distinction matters for review
+    diagnostics: missing or malformed metrics should be reported as
+    incomparable rather than as an accidental score of zero.
+    """
+    terms: Dict[str, float] = {}
+    total = 0.0
+    for key, weight in objective._valid_weights:
+        value = _finite_float_or_none(metrics.get(key))
+        if value is None:
+            continue
+        term = weight * value
+        if not math.isfinite(term):
+            continue
+        terms[key] = term
+        total += term
+
+    if not terms or not math.isfinite(total):
+        return None, terms
+    return total, terms
 
 
 def _compile_cached(

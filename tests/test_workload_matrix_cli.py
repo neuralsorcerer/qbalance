@@ -112,12 +112,16 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     assert "qbalance summary" in summary
     assert "candidate evaluations:" in summary
     assert "depth" in balanced.covars()
+    diagnostics = balanced.selection_diagnostics()
+    assert diagnostics["c0"]["evaluated_candidates"] == 2
+    assert "objective deltas:" in summary
     assert len(balanced.evaluation_history["c0"]) == 2
 
     out_dir = tmp_path / "out"
     balanced.save(out_dir)
     saved_payload = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
     assert len(saved_payload["evaluation_history"]["c0"]) == 2
+    assert saved_payload["selection_diagnostics"]["c0"]["evaluated_candidates"] == 2
     z = balanced.to_download(tmp_path / "bundle.zip", overwrite=True)
     assert z.exists()
 
@@ -900,8 +904,53 @@ def test_load_balanced_workload_round_trip(tmp_path):
     assert loaded.selections["c0"].spec.optimization_level == 2
     assert loaded.selections["c0"].metrics["objective_score"] == 5.0
     assert loaded.baseline_metrics["c0"]["depth"] == 4
+    diagnostics = loaded.selection_diagnostics()["c0"]
+    assert diagnostics["metric_deltas"]["depth"]["delta"] == -1.0
+    assert diagnostics["objective_improved"] is True
     assert len(loaded.evaluation_history["c0"]) == 2
     assert loaded.evaluation_history["c0"][1].metrics["objective_score"] == 5.0
+
+
+def test_selection_diagnostics_handles_missing_and_invalid_metrics(tmp_path):
+    dsroot = tmp_path / "ds_diag_edges"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(
+        dsroot,
+        [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})],
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={
+            "c0": Strategy(
+                spec=StrategySpec(),
+                metrics={
+                    "depth": "bad",
+                    "two_qubit_ops": float("nan"),
+                    "compile_time_s": float("inf"),
+                },
+            )
+        },
+        baseline_metrics={"c0": {"depth": None, "estimated_error": "bad"}},
+        objective=Objective({"depth": 1.0, "estimated_error": 10.0}),
+    )
+
+    diagnostics = balanced.selection_diagnostics()["c0"]
+
+    assert diagnostics["baseline_objective_score"] is None
+    assert diagnostics["selected_objective_score"] is None
+    assert diagnostics["objective_delta"] is None
+    assert diagnostics["objective_improved"] is None
+    assert diagnostics["objective_terms"] == {"baseline": {}, "selected": {}}
+    assert diagnostics["metric_deltas"]["depth"] == {
+        "baseline": None,
+        "selected": None,
+        "delta": None,
+        "relative_delta": None,
+    }
+    json.dumps(balanced.selection_diagnostics(), allow_nan=False)
+    assert "objective deltas:" not in balanced.summary()
 
 
 def test_load_balanced_workload_rejects_unknown_selection(tmp_path):
