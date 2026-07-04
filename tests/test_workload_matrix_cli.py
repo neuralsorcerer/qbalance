@@ -116,11 +116,16 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     assert diagnostics["c0"]["evaluated_candidates"] == 2
     assert "objective deltas:" in summary
     assert len(balanced.evaluation_history["c0"]) == 2
+    rankings = balanced.candidate_rankings()
+    assert [row["rank"] for row in rankings["c0"]] == [1, 2]
+    assert rankings["c0"][0]["objective_score"] <= rankings["c0"][1]["objective_score"]
+    assert sum(1 for row in rankings["c0"] if row["selected"]) == 1
 
     out_dir = tmp_path / "out"
     balanced.save(out_dir)
     saved_payload = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
     assert len(saved_payload["evaluation_history"]["c0"]) == 2
+    assert len(saved_payload["candidate_rankings"]["c0"]) == 2
     assert saved_payload["selection_diagnostics"]["c0"]["evaluated_candidates"] == 2
     z = balanced.to_download(tmp_path / "bundle.zip", overwrite=True)
     assert z.exists()
@@ -951,6 +956,52 @@ def test_selection_diagnostics_handles_missing_and_invalid_metrics(tmp_path):
     }
     json.dumps(balanced.selection_diagnostics(), allow_nan=False)
     assert "objective deltas:" not in balanced.summary()
+
+
+def test_candidate_rankings_match_selection_score_and_are_json_safe(tmp_path):
+    dsroot = tmp_path / "ds_ranking_edges"
+    dsroot.mkdir()
+    dataset = wl.CircuitDataset(
+        dsroot,
+        [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})],
+    )
+    selected = Strategy(
+        spec=StrategySpec(optimization_level=2),
+        metrics={"depth": 100.0, "objective_score": 1.0},
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={"c0": selected},
+        objective=Objective({"depth": 1.0}),
+        evaluation_history={
+            "c0": [
+                Strategy(
+                    spec=StrategySpec(optimization_level=0),
+                    metrics={"depth": 1.0, "objective_score": 10.0},
+                ),
+                selected,
+                Strategy(
+                    spec=StrategySpec(optimization_level=3),
+                    metrics={"depth": "bad", "objective_score": 0.0},
+                ),
+                Strategy(
+                    spec=StrategySpec(optimization_level=1),
+                    metrics={"not_an_objective_term": 5.0},
+                ),
+            ]
+        },
+    )
+
+    rankings = balanced.candidate_rankings()["c0"]
+
+    assert [row["original_index"] for row in rankings] == [1, 0, 2, 3]
+    assert rankings[0]["selected"] is True
+    assert rankings[0]["selection_score"] == 1.0
+    assert rankings[0]["objective_score"] == 100.0
+    assert rankings[2]["selection_score"] is None
+    assert rankings[3]["selection_score"] is None
+    json.dumps(rankings, allow_nan=False)
 
 
 def test_load_balanced_workload_rejects_unknown_selection(tmp_path):

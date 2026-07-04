@@ -201,6 +201,60 @@ class BalancedWorkload:
 
         return diagnostics
 
+    def candidate_rankings(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Return objective-ranked candidate evaluations for every circuit.
+
+        The raw ``evaluation_history`` preserves execution order, which is useful
+        for reproducing grid or bandit searches but awkward for audit reports.
+        This helper derives a stable, JSON-serializable leaderboard per circuit
+        from the already-collected metrics.  Entries with finite objective
+        scores sort ahead of incomparable entries; ties are resolved by original
+        evaluation order so repeated calls are deterministic.
+        """
+
+        rankings: Dict[str, List[Dict[str, Any]]] = {}
+        for name, strategies in self.evaluation_history.items():
+            selected = self.selections.get(name)
+            rows: List[Dict[str, Any]] = []
+            for original_index, strategy in enumerate(strategies):
+                score, terms = _diagnostic_objective_score(
+                    self.objective, strategy.metrics or {}
+                )
+                sort_score = _objective_score(strategy.metrics, self.objective)
+                rows.append(
+                    {
+                        "original_index": original_index,
+                        "spec": strategy.spec.model_dump(),
+                        "objective_score": score,
+                        "selection_score": (
+                            sort_score if math.isfinite(sort_score) else None
+                        ),
+                        "objective_terms": terms,
+                        "selected": (
+                            selected is not None
+                            and strategy.spec == selected.spec
+                            and strategy.metrics == selected.metrics
+                        ),
+                    }
+                )
+
+            rows.sort(
+                key=lambda row: (
+                    row["selection_score"] is None,
+                    (
+                        float("inf")
+                        if row["selection_score"] is None
+                        else float(row["selection_score"])
+                    ),
+                    int(row["original_index"]),
+                )
+            )
+            for rank, row in enumerate(rows, start=1):
+                row["rank"] = rank
+            rankings[name] = rows
+
+        return rankings
+
     def covars(self) -> Dict[str, Dict[str, float]]:
         # Return diagnostic distances for key metrics
 
@@ -265,6 +319,7 @@ class BalancedWorkload:
             },
             "baseline_metrics": self.baseline_metrics,
             "selection_diagnostics": self.selection_diagnostics(),
+            "candidate_rankings": self.candidate_rankings(),
             "evaluation_history": {
                 name: [
                     {"spec": strategy.spec.model_dump(), "metrics": strategy.metrics}
@@ -764,6 +819,61 @@ def _diagnostic_objective_score(
     return total, terms
 
 
+def _derived_objective_score(metrics: Mapping[str, Any], objective: Objective) -> float:
+    """Compute a finite-safe score from metrics and objective weights."""
+    derived = 0.0
+    contributed = False
+    has_objective_key = False
+    for key, weight in objective._valid_weights:
+        if key not in metrics:
+            continue
+        has_objective_key = True
+        raw_value = metrics.get(key)
+        if raw_value is None:
+            continue
+        try:
+            value_f = float(raw_value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if not np.isfinite(value_f):
+            continue
+        term = weight * value_f
+        if not np.isfinite(term):
+            continue
+        derived += term
+        contributed = True
+
+    if not contributed and has_objective_key:
+        return float("inf")
+    if not contributed:
+        return float("nan")
+    return derived if np.isfinite(derived) else float("inf")
+
+
+def _objective_score(metrics: Mapping[str, Any] | None, objective: Objective) -> float:
+    """Return the same finite-safe selection score used by workload choice."""
+    if not isinstance(metrics, Mapping):
+        return float("inf")
+
+    try:
+        score = float(metrics.get("objective_score", float("inf")))
+    except (TypeError, ValueError, OverflowError):
+        score = float("inf")
+    derived = _derived_objective_score(metrics, objective)
+    if np.isfinite(score) and np.isfinite(derived):
+        return score
+    if np.isfinite(score) and np.isnan(derived):
+        return score
+    if np.isfinite(score):
+        return float("inf")
+
+    # Fallback: compute objective only if at least one objective-relevant
+    # metric contributes a finite weighted term. This prevents malformed
+    # metrics (e.g., {"depth": "bad"}) from receiving an accidental 0.0
+    # score and being preferred over valid candidates.
+    return derived if np.isfinite(derived) else float("inf")
+
+
 def _compile_cached(
     circuit: Any,
     backend: Any,
@@ -833,73 +943,9 @@ def _choose(
         raise RuntimeError("No candidate strategies were successfully evaluated")
 
     pareto_keys = ("depth", "two_qubit_ops", "estimated_error")
-    valid_objective_terms = objective._valid_weights
-
-    def _derived_objective_score(metrics: Mapping[str, Any]) -> float:
-        """Compute a finite-safe objective score from raw metrics."""
-        derived = 0.0
-        contributed = False
-        has_objective_key = False
-        for key, weight in valid_objective_terms:
-            if key not in metrics:
-                continue
-            has_objective_key = True
-            raw_value = metrics.get(key)
-            if raw_value is None:
-                continue
-            try:
-                value_f = float(raw_value)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not np.isfinite(value_f):
-                continue
-            term = weight * value_f
-            if not np.isfinite(term):
-                continue
-            derived += term
-            contributed = True
-
-        if not contributed and has_objective_key:
-            return float("inf")
-        if not contributed:
-            return float("nan")
-        return derived if np.isfinite(derived) else float("inf")
-
-    def _objective_score(metrics: Mapping[str, Any] | None) -> float:
-        """Internal helper that objective score.
-
-        Args:
-            metrics: Mapping of metric names to numeric values used for scoring.
-
-        Returns:
-            float with the computed result.
-
-        Raises:
-            None.
-        """
-        if not isinstance(metrics, Mapping):
-            return float("inf")
-
-        try:
-            score = float(metrics.get("objective_score", float("inf")))
-        except (TypeError, ValueError, OverflowError):
-            score = float("inf")
-        derived = _derived_objective_score(metrics)
-        if np.isfinite(score) and np.isfinite(derived):
-            return score
-        if np.isfinite(score) and np.isnan(derived):
-            return score
-        if np.isfinite(score):
-            return float("inf")
-
-        # Fallback: compute objective only if at least one objective-relevant
-        # metric contributes a finite weighted term. This prevents malformed
-        # metrics (e.g., {"depth": "bad"}) from receiving an accidental 0.0
-        # score and being preferred over valid candidates.
-        return derived if np.isfinite(derived) else float("inf")
 
     if not pareto:
-        best = min(evals, key=lambda t: _objective_score(t[1]))
+        best = min(evals, key=lambda t: _objective_score(t[1], objective))
         return best[0], best[1]
 
     # Pareto on key metrics, then tie-break by objective_score.
@@ -907,7 +953,7 @@ def _choose(
     # which already performs robust finite-safe normalization.
     front_idx = pareto_front(evals, keys=pareto_keys)
     front = [evals[i] for i in front_idx]
-    best = min(front, key=lambda t: _objective_score(t[1]))
+    best = min(front, key=lambda t: _objective_score(t[1], objective))
     return best[0], best[1]
 
 

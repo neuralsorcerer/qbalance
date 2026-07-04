@@ -47,6 +47,7 @@ balanced = (
 )
 
 print(balanced.summary())
+print(balanced.candidate_rankings()["bell"][0])
 balanced.save("./balanced", overwrite=True)
 balanced.to_download("./balanced_bundle.zip", overwrite=True)
 

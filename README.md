@@ -123,6 +123,7 @@ balanced = wl.adjust(
 
 # 4) inspect/persist artifacts
 print(balanced.summary())
+print(balanced.candidate_rankings()["bell"][0])
 balanced.save("./balanced", overwrite=True)
 balanced.to_download("./balanced_bundle.zip", overwrite=True)
 
@@ -377,10 +378,12 @@ Additional performance-relevant behavior:
 ### `adjust` output directory
 
 - `dataset/` copied dataset index + artifacts,
-- `results.json` selected strategy specs/metrics + baseline metrics + objective weights + per-circuit selection diagnostics + per-circuit candidate evaluation history,
+- `results.json` selected strategy specs/metrics + baseline metrics + objective weights + per-circuit selection diagnostics + per-circuit candidate rankings + per-circuit candidate evaluation history,
 - `summary.txt` text summary.
 
 Saved adjustment results also include per-circuit `selection_diagnostics`. These diagnostics report baseline and selected objective scores, objective deltas, improvement flags, finite weighted objective terms, candidate-evaluation counts, and absolute/relative deltas for common compile metrics. Missing, non-numeric, NaN, and infinite metric values are normalized to `null` in diagnostics so saved artifacts remain strict JSON-compatible and invalid metrics are not confused with zero-cost objective terms.
+
+Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection and then original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates.
 
 ### `matrix` output JSON
 

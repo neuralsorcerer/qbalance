@@ -40,6 +40,7 @@ Create datasets programmatically with `qbalance.save_dataset(...)` and load them
 - `selections`: selected strategy specs and metrics per circuit,
 - `baseline_metrics`: baseline compile metrics per circuit,
 - `selection_diagnostics`: derived per-circuit baseline-vs-selected diagnostics,
+- `candidate_rankings`: derived per-circuit objective-ranked candidate leaderboards,
 - `evaluation_history`: every evaluated candidate strategy and metrics per circuit, in evaluation order.
 
 A minimal shape is:
@@ -73,6 +74,28 @@ A minimal shape is:
       }
     }
   },
+  "candidate_rankings": {
+    "bell": [
+      {
+        "original_index": 1,
+        "spec": {"optimization_level": 1},
+        "objective_score": 3.0,
+        "selection_score": 3.0,
+        "objective_terms": {"depth": 3.0},
+        "selected": true,
+        "rank": 1
+      },
+      {
+        "original_index": 0,
+        "spec": {"optimization_level": 0},
+        "objective_score": 5.0,
+        "selection_score": 5.0,
+        "objective_terms": {"depth": 5.0},
+        "selected": false,
+        "rank": 2
+      }
+    ]
+  },
   "evaluation_history": {
     "bell": [
       {"spec": {"optimization_level": 0}, "metrics": {"depth": 5}},
@@ -92,7 +115,15 @@ Selection diagnostics are JSON-safe and finite-aware:
 - `objective_terms` records each finite weighted objective contribution used in the score.
 - `metric_deltas` contains `baseline`, `selected`, `delta`, and `relative_delta` values for common compile metrics; invalid or non-finite inputs become `null`.
 
-Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections, baseline metrics, and evaluation-history entries refer only to circuits in the copied dataset. `selection_diagnostics` is derived metadata and is recomputed by `BalancedWorkload.selection_diagnostics()` after loading, so older artifacts that omit it still load. Older artifacts that omit `evaluation_history` or set it to `null` also still load, with an empty history mapping. Extract a ZIP bundle first if you need to reload a download archive.
+Candidate rankings are derived from `evaluation_history` and are also JSON-safe:
+
+- entries are sorted by the same finite-safe selection score used for final strategy selection, then by `original_index` for deterministic ties;
+- `objective_score` is the diagnostic score recomputed from finite weighted objective terms;
+- `selection_score` mirrors selection semantics, including a valid stored `metrics["objective_score"]` when available, and becomes `null` for incomparable candidates;
+- `objective_terms` records the finite weighted terms used for the diagnostic score;
+- `selected` marks the row matching the saved selected strategy and metrics.
+
+Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections, baseline metrics, and evaluation-history entries refer only to circuits in the copied dataset. `selection_diagnostics` and `candidate_rankings` are derived metadata and are recomputed by `BalancedWorkload.selection_diagnostics()` and `BalancedWorkload.candidate_rankings()` after loading, so older artifacts that omit them still load. Older artifacts that omit `evaluation_history` or set it to `null` also still load, with an empty history mapping. Extract a ZIP bundle first if you need to reload a download archive.
 
 ```python
 from qbalance import load_balanced_workload
