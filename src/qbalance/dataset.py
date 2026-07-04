@@ -131,7 +131,10 @@ class CircuitDataset:
             ValueError: Raised when input validation fails or a dependent operation cannot be completed.
         """
         try:
-            from qiskit import QuantumCircuit, qpy
+            import qiskit
+
+            QuantumCircuit = qiskit.QuantumCircuit
+            qpy = qiskit.qpy
         except Exception as e:  # pragma: no cover
             raise OptionalDependencyError("qiskit is required to load circuits") from e
 
@@ -337,7 +340,9 @@ def save_dataset(
         raise FileExistsError(f"{dataset_dir} exists (use overwrite=True)")
 
     try:
-        from qiskit import qpy
+        import qiskit
+
+        qpy = qiskit.qpy
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required to save circuits") from e
 
