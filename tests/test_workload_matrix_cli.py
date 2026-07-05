@@ -493,8 +493,8 @@ def test_workload_additional_branches(monkeypatch, tmp_path):
     )
 
     work2 = wl.Workload.from_dataset(ds).set_target("b")
-    res = work2.adjust(search="bandit", execute=True, pareto=False, max_candidates=1)
-    assert "exec_error" in next(iter(res.selections.values())).metrics
+    with pytest.raises(RuntimeError, match="No feasible candidate"):
+        work2.adjust(search="bandit", execute=True, pareto=False, max_candidates=1)
     with pytest.raises(ValueError):
         work2.adjust(search="bad")
 
@@ -1422,3 +1422,119 @@ def test_bandit_skips_non_finite_observations(monkeypatch, tmp_path):
         .adjust(search="bandit", max_candidates=2, warmup=2)
     )
     assert result.selections["c0"].spec.optimization_level == 1
+
+
+def test_failed_strategy_is_infeasible_even_with_good_compile_metrics():
+    failed = StrategySpec(optimization_level=0, mthree=True)
+    healthy = StrategySpec(optimization_level=1)
+    chosen_spec, chosen_metrics = wl._choose(
+        [
+            (
+                failed,
+                {
+                    "depth": 1,
+                    "two_qubit_ops": 0,
+                    "estimated_error": 0.0,
+                    "mthree_error": "calibration failed",
+                    "strategy_failed": True,
+                    "strategy_failure_reason": "mthree_failed",
+                    "objective_score": float("inf"),
+                },
+            ),
+            (
+                healthy,
+                {
+                    "depth": 10,
+                    "two_qubit_ops": 0,
+                    "estimated_error": 0.0,
+                    "objective_score": 10.0,
+                },
+            ),
+        ],
+        pareto=False,
+        objective=default_objective(),
+    )
+    assert chosen_spec == healthy
+    assert chosen_metrics["objective_score"] == 10.0
+
+
+def test_failed_strategy_cannot_dominate_pareto_front():
+    failed = StrategySpec(optimization_level=0, mthree=True)
+    healthy = StrategySpec(optimization_level=1)
+    chosen_spec, chosen_metrics = wl._choose(
+        [
+            (
+                failed,
+                {
+                    "depth": 1,
+                    "two_qubit_ops": 0,
+                    "estimated_error": 0.0,
+                    "strategy_failed": True,
+                    "strategy_failure_reason": "mthree_failed",
+                    "objective_score": float("inf"),
+                },
+            ),
+            (
+                healthy,
+                {
+                    "depth": 10,
+                    "two_qubit_ops": 1,
+                    "estimated_error": 0.1,
+                    "objective_score": 13.0,
+                },
+            ),
+        ],
+        pareto=True,
+        objective=default_objective(),
+    )
+    assert chosen_spec == healthy
+    assert chosen_metrics["objective_score"] == 13.0
+
+
+def test_choose_raises_when_every_candidate_is_infeasible():
+    with pytest.raises(RuntimeError, match="No feasible candidate"):
+        wl._choose(
+            [
+                (
+                    StrategySpec(optimization_level=0),
+                    {
+                        "depth": 1,
+                        "strategy_failed": True,
+                        "strategy_failure_reason": "execution_failed",
+                        "objective_score": float("inf"),
+                    },
+                ),
+                (StrategySpec(optimization_level=1), {"depth": "bad"}),
+            ],
+            pareto=False,
+            objective=default_objective(),
+        )
+
+
+def test_strategy_failure_reason_marks_requested_runtime_failures():
+    assert (
+        wl._strategy_failure_reason(
+            {"exec_error": "backend unavailable"}, StrategySpec(), execute=True
+        )
+        == "execution_failed"
+    )
+    assert (
+        wl._strategy_failure_reason(
+            {"mthree_error": "bad calibration"},
+            StrategySpec(mthree=True),
+            execute=False,
+        )
+        == "mthree_failed"
+    )
+    assert (
+        wl._strategy_failure_reason(
+            {"zne_error": "fold failed"}, StrategySpec(zne=True), execute=False
+        )
+        == "zne_failed"
+    )
+    assert (
+        wl._strategy_failure_reason(
+            {"exec_error": "ignored"}, StrategySpec(), execute=False
+        )
+        is None
+    )

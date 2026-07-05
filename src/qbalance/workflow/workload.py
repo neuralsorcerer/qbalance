@@ -746,8 +746,16 @@ class Workload:
                     except Exception as e:
                         m["exec_error"] = str(e)
 
-                # score and observe for bandit
-                m["objective_score"] = obj.score(m)
+                # score and observe for bandit.  Hard execution/mitigation
+                # failures make a candidate infeasible for selection rather than
+                # letting good compile-only metrics hide a failed runtime path.
+                failure_reason = _strategy_failure_reason(m, spec, execute=execute)
+                if failure_reason is not None:
+                    m["strategy_failed"] = True
+                    m["strategy_failure_reason"] = failure_reason
+                    m["objective_score"] = float("inf")
+                else:
+                    m["objective_score"] = obj.score(m)
                 evals.append((spec, m))
                 if search == "bandit" and _is_finite_number(m["objective_score"]):
                     bandit.observe(spec, m["objective_score"])
@@ -767,6 +775,25 @@ class Workload:
             objective=obj,
             evaluation_history=evaluation_history,
         )
+
+
+def _strategy_failure_reason(
+    metrics: Mapping[str, Any], spec: StrategySpec, *, execute: bool
+) -> Optional[str]:
+    """Return why a candidate is infeasible for selection, if applicable.
+
+    Compilation metrics alone can look attractive even when the requested
+    runtime or mitigation stage failed.  Treat those candidates as evaluated
+    but infeasible so audit history remains complete while selection and the
+    bandit surrogate learn only from successful end-to-end strategies.
+    """
+    if execute and metrics.get("exec_error"):
+        return "execution_failed"
+    if spec.mthree and metrics.get("mthree_error"):
+        return "mthree_failed"
+    if spec.zne and metrics.get("zne_error"):
+        return "zne_failed"
+    return None
 
 
 def _is_finite_number(value: Any) -> bool:
@@ -850,10 +877,16 @@ def _derived_objective_score(metrics: Mapping[str, Any], objective: Objective) -
     return derived if np.isfinite(derived) else float("inf")
 
 
+def _is_infeasible_metrics(metrics: Mapping[str, Any] | None) -> bool:
+    """Return True when metrics explicitly mark a candidate as infeasible."""
+    return not isinstance(metrics, Mapping) or bool(metrics.get("strategy_failed"))
+
+
 def _objective_score(metrics: Mapping[str, Any] | None, objective: Objective) -> float:
     """Return the same finite-safe selection score used by workload choice."""
-    if not isinstance(metrics, Mapping):
+    if _is_infeasible_metrics(metrics):
         return float("inf")
+    assert isinstance(metrics, Mapping)
 
     try:
         score = float(metrics.get("objective_score", float("inf")))
@@ -942,17 +975,28 @@ def _choose(
     if not evals:
         raise RuntimeError("No candidate strategies were successfully evaluated")
 
+    feasible_evals = [
+        (spec, metrics)
+        for spec, metrics in evals
+        if not _is_infeasible_metrics(metrics)
+        and math.isfinite(_objective_score(metrics, objective))
+    ]
+    if not feasible_evals:
+        raise RuntimeError(
+            "No feasible candidate strategies were successfully evaluated"
+        )
+
     pareto_keys = ("depth", "two_qubit_ops", "estimated_error")
 
     if not pareto:
-        best = min(evals, key=lambda t: _objective_score(t[1], objective))
+        best = min(feasible_evals, key=lambda t: _objective_score(t[1], objective))
         return best[0], best[1]
 
     # Pareto on key metrics, then tie-break by objective_score.
-    # We intentionally pass raw metric mappings to pareto_front,
-    # which already performs robust finite-safe normalization.
-    front_idx = pareto_front(evals, keys=pareto_keys)
-    front = [evals[i] for i in front_idx]
+    # Failed or otherwise incomparable candidates are filtered before Pareto
+    # construction so invalid low metric values cannot dominate feasible work.
+    front_idx = pareto_front(feasible_evals, keys=pareto_keys)
+    front = [feasible_evals[i] for i in front_idx]
     best = min(front, key=lambda t: _objective_score(t[1], objective))
     return best[0], best[1]
 

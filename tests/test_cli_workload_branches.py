@@ -316,14 +316,12 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("zne")),
     )
 
-    bw2 = (
-        wl.Workload.from_dataset(ds_real)
-        .set_target("fake:generic:2")
-        .adjust(search="bandit", execute=True, max_candidates=2)
-    )
-    metrics = bw2.selections["c0"].metrics
-    assert "mthree_error" in metrics
-    assert "zne_error" in metrics
+    with pytest.raises(RuntimeError, match="No feasible candidate"):
+        (
+            wl.Workload.from_dataset(ds_real)
+            .set_target("fake:generic:2")
+            .adjust(search="bandit", execute=True, max_candidates=2)
+        )
 
 
 def test_workload_adjust_raises_on_dataset_circuit_record_mismatch(
