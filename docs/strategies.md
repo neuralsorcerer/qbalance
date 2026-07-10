@@ -63,7 +63,7 @@ balanced = (
 )
 ```
 
-`Workload.adjust(strategies=...)` accepts any iterable of `StrategySpec` objects or mapping objects. Inputs are validated and duplicate strategies are removed while preserving first-seen order.
+`Workload.adjust(strategies=...)` accepts any iterable of `StrategySpec` objects or mapping objects. Inputs are validated and duplicate strategies are removed while preserving first-seen order. When explicit strategies intentionally exclude the baseline, `allow_regression=False` can still select the baseline as a guarded fallback if the best feasible candidate is worse than the finite-safe baseline objective; equal scores and incomparable baselines do not trigger fallback.
 
 ## Strategy JSON formats
 

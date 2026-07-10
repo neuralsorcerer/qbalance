@@ -37,7 +37,7 @@ Create datasets programmatically with `qbalance.save_dataset(...)` and load them
 
 - `backend_spec`,
 - `objective`: objective weights,
-- `selections`: selected strategy specs and metrics per circuit,
+- `selections`: selected strategy specs and metrics per circuit. When `allow_regression=False` falls back to the baseline, the selected metrics include guard metadata such as `selected_by_regression_guard`, `rejected_candidate_spec`, and `rejected_candidate_objective_score`;
 - `baseline_metrics`: baseline compile metrics per circuit,
 - `selection_diagnostics`: derived per-circuit baseline-vs-selected diagnostics,
 - `candidate_rankings`: derived per-circuit objective-ranked candidate leaderboards,
@@ -121,7 +121,8 @@ Candidate rankings are derived from `evaluation_history` and are also JSON-safe:
 - `objective_score` is the diagnostic score recomputed from finite weighted objective terms;
 - `selection_score` mirrors selection semantics, including a valid stored `metrics["objective_score"]` when available, and becomes `null` for incomparable candidates;
 - `objective_terms` records the finite weighted terms used for the diagnostic score;
-- `selected` marks the row matching the saved selected strategy and metrics.
+- `selected` marks the row matching the saved selected strategy and metrics;
+- when `allow_regression=False` chooses the baseline and that baseline was not in `evaluation_history`, `candidate_rankings` includes one synthetic selected baseline row with `original_index: null` so consumers can still identify the final selection exactly once.
 
 Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections, baseline metrics, and evaluation-history entries refer only to circuits in the copied dataset. `selection_diagnostics` and `candidate_rankings` are derived metadata and are recomputed by `BalancedWorkload.selection_diagnostics()` and `BalancedWorkload.candidate_rankings()` after loading, so older artifacts that omit them still load. Older artifacts that omit `evaluation_history` or set it to `null` also still load, with an empty history mapping. Extract a ZIP bundle first if you need to reload a download archive.
 

@@ -97,6 +97,7 @@ Methods:
 | `cache_root` | `None` | Optional compiled-circuit cache root. `str` and `Path` values are accepted and normalized to `Path`. |
 | `seed` | `0` | Integer seed for deterministic candidate ordering and execution helpers. Boolean values are rejected. |
 | `strategies` | `None` | Explicit iterable of strategies. If provided, `max_candidates` is ignored and the supplied order is used for grid search. |
+| `allow_regression` | `True` | Boolean safety rail. When `False`, final selection falls back to the baseline strategy if the best feasible candidate has a finite-safe objective score worse than the finite-safe baseline score. Equal scores and incomparable baselines do not trigger fallback. |
 
 Validation and edge-case behavior:
 
@@ -104,7 +105,9 @@ Validation and edge-case behavior:
 - `shots` must be a positive integer; `seed` must be an integer; `warmup` must be a non-negative integer. Integral scalar types are accepted, but booleans are rejected.
 - `max_candidates` must be a positive integer when generated candidates are used. It is not consulted when explicit `strategies` are supplied.
 - At least one candidate strategy must be available after generated or explicit strategy normalization.
+- `allow_regression` must be a real boolean (`True` or `False`).
 - `search="bandit"` evaluates up to `warmup` shuffled candidates first, then asks the bandit model to propose remaining candidates. Non-finite objective scores are not observed by the bandit model, but they remain in the evaluated candidates and are handled by final selection.
+- With `allow_regression=False`, qbalance still records the full candidate evaluation history. Only the final selected strategy changes: if the selected candidate score is worse than the baseline score, the saved selection uses the baseline spec and baseline metrics plus guard metadata (`selected_by_regression_guard`, `rejected_candidate_spec`, and `rejected_candidate_objective_score`).
 
 ### `BalancedWorkload`
 
@@ -121,7 +124,7 @@ Methods:
 
 - `summary() -> str`: human-readable baseline-vs-balanced aggregate summary. When `evaluation_history` is present, the summary includes total and mean candidate-evaluation counts. When objective scores are comparable, it also reports the mean selected-minus-baseline objective delta and the number of comparable circuits whose objective improved.
 - `selection_diagnostics() -> dict`: per-circuit baseline-vs-selected diagnostics computed from already stored metrics. Each entry includes `baseline_objective_score`, `selected_objective_score`, `objective_delta`, `objective_improved`, per-objective `objective_terms`, `evaluated_candidates`, and `metric_deltas` for `depth`, `two_qubit_ops`, `estimated_error`, and `compile_time_s`. Missing, non-numeric, NaN, and infinite metric values are normalized to `None`; objective scores are `None` when no finite weighted term contributes, so invalid metrics are not mistaken for zero-cost candidates.
-- `candidate_rankings() -> dict`: per-circuit candidate leaderboards derived from `evaluation_history`, sorted by the same finite-safe selection score used by final strategy selection and then by original evaluation order. Each row contains `rank`, `original_index`, serialized `spec`, diagnostic `objective_score`, JSON-safe `selection_score`, finite weighted `objective_terms`, and a `selected` marker. `objective_score` is recomputed from finite objective terms for review; `selection_score` mirrors selection semantics, including stored finite `metrics["objective_score"]` when it is valid. Candidates with malformed, missing, or non-finite objective information get `selection_score=None` in the exported leaderboard and sort after comparable candidates.
+- `candidate_rankings() -> dict`: per-circuit candidate leaderboards derived from `evaluation_history`, sorted by the same finite-safe selection score used by final strategy selection and then by original evaluation order. Each row contains `rank`, `original_index`, serialized `spec`, diagnostic `objective_score`, JSON-safe `selection_score`, finite weighted `objective_terms`, and a `selected` marker. `objective_score` is recomputed from finite objective terms for review; `selection_score` mirrors selection semantics, including stored finite `metrics["objective_score"]` when it is valid. Candidates with malformed, missing, or non-finite objective information get `selection_score=None` in the exported leaderboard and sort after comparable candidates. If `allow_regression=False` falls back to a baseline that was not part of the candidate list, the baseline is included as the selected ranking row with `original_index: null` so saved audit artifacts still identify the final selection exactly once.
 - `covars() -> dict`: EMD/CVM/KS diagnostics for depth, two-qubit ops, and estimated error. Missing, non-numeric, NaN, and infinite metric values are treated as `0.0` for these distribution-distance summaries.
 - `save(out_dir, overwrite=False) -> None`: save dataset copy, `results.json`, and `summary.txt`. The results file contains selections, baselines, objective weights, `selection_diagnostics`, `candidate_rankings`, and `evaluation_history`.
 - `to_download(zip_path, overwrite=False) -> Path`: save a ZIP bundle.

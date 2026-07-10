@@ -217,25 +217,30 @@ class BalancedWorkload:
             selected = self.selections.get(name)
             rows: List[Dict[str, Any]] = []
             for original_index, strategy in enumerate(strategies):
-                score, terms = _diagnostic_objective_score(
-                    self.objective, strategy.metrics or {}
-                )
-                sort_score = _objective_score(strategy.metrics, self.objective)
                 rows.append(
-                    {
-                        "original_index": original_index,
-                        "spec": strategy.spec.model_dump(),
-                        "objective_score": score,
-                        "selection_score": (
-                            sort_score if math.isfinite(sort_score) else None
-                        ),
-                        "objective_terms": terms,
-                        "selected": (
-                            selected is not None
-                            and strategy.spec == selected.spec
-                            and strategy.metrics == selected.metrics
-                        ),
-                    }
+                    _candidate_ranking_row(
+                        strategy,
+                        self.objective,
+                        original_index=original_index,
+                        selected=selected is not None
+                        and strategy.spec == selected.spec
+                        and strategy.metrics == selected.metrics,
+                    )
+                )
+                
+            # A guarded no-regression selection can intentionally choose the
+            # baseline strategy, which is not part of the evaluated candidate
+            # history when users provide an explicit strategy list.  Include it
+            # in the audit leaderboard so saved rankings always identify the
+            # final selection exactly once.
+            if selected is not None and not any(row["selected"] for row in rows):
+                rows.append(
+                    _candidate_ranking_row(
+                        selected,
+                        self.objective,
+                        original_index=None,
+                        selected=True,
+                    )
                 )
 
             rows.sort(
@@ -246,11 +251,12 @@ class BalancedWorkload:
                         if row["selection_score"] is None
                         else float(row["selection_score"])
                     ),
-                    int(row["original_index"]),
+                    int(row["_tie_index"]),
                 )
             )
             for rank, row in enumerate(rows, start=1):
                 row["rank"] = rank
+                del row["_tie_index"]
             rankings[name] = rows
 
         return rankings
@@ -359,6 +365,27 @@ class BalancedWorkload:
                     z.write(p, p.relative_to(tmp))
         shutil.rmtree(tmp, ignore_errors=True)
         return zip_path
+
+
+def _candidate_ranking_row(
+    strategy: Strategy,
+    objective: Objective,
+    *,
+    original_index: Optional[int],
+    selected: bool,
+) -> Dict[str, Any]:
+    """Build one JSON-serializable candidate-ranking row."""
+    score, terms = _diagnostic_objective_score(objective, strategy.metrics or {})
+    sort_score = _objective_score(strategy.metrics, objective)
+    return {
+        "original_index": original_index,
+        "spec": strategy.spec.model_dump(),
+        "objective_score": score,
+        "selection_score": sort_score if math.isfinite(sort_score) else None,
+        "objective_terms": terms,
+        "selected": selected,
+        "_tie_index": original_index if original_index is not None else 1_000_000_000,
+    }
 
 
 def _require_json_object(value: Any, field: str) -> Mapping[str, Any]:
@@ -587,6 +614,7 @@ class Workload:
         cache_root: Optional[Path] = None,
         seed: int = 0,
         strategies: Optional[Iterable[StrategySpec | Mapping[str, Any]]] = None,
+        allow_regression: bool = True,
     ) -> BalancedWorkload:
         """Adjust used by the qbalance workflow.
 
@@ -603,6 +631,9 @@ class Workload:
             seed (default: 0): Seed used for deterministic randomization.
             strategies (default: None): Explicit candidate strategies. When provided,
                 max_candidates is ignored and the supplied order is used for grid search.
+            allow_regression (default: True): When False, keep the baseline strategy
+                when the selected feasible candidate has a worse finite-safe objective
+                score than the baseline compile for that circuit.
 
         Returns:
             BalancedWorkload with the computed result.
@@ -623,6 +654,9 @@ class Workload:
             max_candidates = validate_integral(
                 "max_candidates", max_candidates, positive=True
             )
+
+        if not isinstance(allow_regression, bool):
+            raise ValueError("allow_regression must be a boolean")
 
         obj = objective or default_objective()
         backend = resolve_backend(self.backend_spec)
@@ -765,6 +799,14 @@ class Workload:
                 Strategy(spec=spec, metrics=dict(metrics)) for spec, metrics in evals
             ]
             chosen_spec, chosen_m = _choose(evals, pareto=pareto, objective=obj)
+            if not allow_regression:
+                chosen_spec, chosen_m = _guard_against_regression(
+                    baseline_spec,
+                    baseline_metrics[rec.name],
+                    chosen_spec,
+                    chosen_m,
+                    objective=obj,
+                )
             selections[rec.name] = Strategy(spec=chosen_spec, metrics=chosen_m)
 
         return BalancedWorkload(
@@ -775,6 +817,37 @@ class Workload:
             objective=obj,
             evaluation_history=evaluation_history,
         )
+
+
+def _guard_against_regression(
+    baseline_spec: StrategySpec,
+    baseline_metrics: Mapping[str, Any],
+    chosen_spec: StrategySpec,
+    chosen_metrics: Dict[str, Any],
+    objective: Objective,
+) -> Tuple[StrategySpec, Dict[str, Any]]:
+    """Return the baseline strategy when candidate selection regresses.
+
+    The normal optimizer is intentionally free to explore user-supplied
+    candidates, but production workflows often need a safety rail: never ship a
+    balanced selection whose objective is worse than the known baseline.  Scores
+    are computed with the same finite-safe helper used by selection so malformed
+    candidate metrics cannot bypass the guard.
+    """
+    baseline_score = _objective_score(baseline_metrics, objective)
+    chosen_score = _objective_score(chosen_metrics, objective)
+    if math.isfinite(baseline_score) and (
+        not math.isfinite(chosen_score) or chosen_score > baseline_score
+    ):
+        guarded_metrics = dict(baseline_metrics)
+        guarded_metrics["objective_score"] = baseline_score
+        guarded_metrics["selected_by_regression_guard"] = True
+        guarded_metrics["rejected_candidate_spec"] = chosen_spec.model_dump()
+        guarded_metrics["rejected_candidate_objective_score"] = (
+            chosen_score if math.isfinite(chosen_score) else None
+        )
+        return baseline_spec, guarded_metrics
+    return chosen_spec, chosen_metrics
 
 
 def _strategy_failure_reason(

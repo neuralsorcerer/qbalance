@@ -115,4 +115,4 @@ python -m qbalance matrix ./circuits \
   --strategies ./strategies.json
 ```
 
-When explicit strategies are supplied to `adjust`, `max_candidates` is ignored because the JSON file is the candidate set. Use `seed`/`--seed` to make randomized candidate ordering and execution helpers reproducible, and `cache_root`/`--cache-root` to choose where compiled-circuit cache artifacts are stored.
+When explicit strategies are supplied to `adjust`, `max_candidates` is ignored because the JSON file is the candidate set. Use `seed`/`--seed` to make randomized candidate ordering and execution helpers reproducible, and `cache_root`/`--cache-root` to choose where compiled-circuit cache artifacts are stored. Add `--no-regression` (or `allow_regression=False` in Python) when production runs should fall back to the baseline compile instead of accepting a best candidate with a worse objective score; equal objective scores and baselines with no finite objective score are left unchanged.

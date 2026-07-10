@@ -34,6 +34,7 @@ python -m qbalance adjust ./circuits \
   --cache-root ./.qbalance-cache \
   --profile \
   --strategies ./strategies.json \
+  --no-regression \
   --overwrite
 ```
 
@@ -50,6 +51,7 @@ Options:
 - `--seed INTEGER`: random seed used for deterministic bandit ordering and execution.
 - `--cache-root PATH`: compiled-circuit cache directory; omit to use the platform cache.
 - `--profile`: record pass-level transpiler profiling where supported.
+- `--no-regression`: keep the baseline strategy when the best feasible candidate has a worse objective score than the finite-safe baseline score; equal scores and incomparable baselines do not trigger fallback.
 - `--overwrite`: replace the output directory.
 
 ## `matrix`

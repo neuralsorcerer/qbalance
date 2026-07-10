@@ -119,6 +119,7 @@ balanced = wl.adjust(
     seed=7,                # deterministic candidate ordering
     cache_root="./.qbalance-cache",
     profile=False,
+    allow_regression=False,  # optional: keep baseline if candidates regress
 )
 
 # 4) inspect/persist artifacts
@@ -148,6 +149,7 @@ python -m qbalance adjust ./circuits \
   --seed 7 \
   --cache-root ./.qbalance-cache \
   --strategies ./strategies.json \
+  --no-regression \
   --overwrite
 
 # Evaluate fixed strategy matrix across backends
@@ -381,7 +383,7 @@ Additional performance-relevant behavior:
 - `results.json` selected strategy specs/metrics + baseline metrics + objective weights + per-circuit selection diagnostics + per-circuit candidate rankings + per-circuit candidate evaluation history,
 - `summary.txt` text summary.
 
-Saved adjustment results also include per-circuit `selection_diagnostics`. These diagnostics report baseline and selected objective scores, objective deltas, improvement flags, finite weighted objective terms, candidate-evaluation counts, and absolute/relative deltas for common compile metrics. Missing, non-numeric, NaN, and infinite metric values are normalized to `null` in diagnostics so saved artifacts remain strict JSON-compatible and invalid metrics are not confused with zero-cost objective terms.
+Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection and then original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates. If `--no-regression`/`allow_regression=False` falls back to a baseline that was not in the candidate history, the selected baseline is emitted as a synthetic ranking row with `original_index: null`.
 
 Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection and then original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates.
 
@@ -429,8 +431,11 @@ python -m qbalance adjust ./circuits \
   --execute \
   --shots 1024 \
   --profile \
+  --no-regression \
   --overwrite
 ```
+
+Use `--no-regression` when the final selection should fall back to the baseline compile instead of accepting the best feasible candidate with a worse objective score; equal scores and incomparable baselines do not trigger fallback.
 
 A strategy JSON file may be either one strategy object, a list of strategy objects, or an object with a `strategies` list:
 

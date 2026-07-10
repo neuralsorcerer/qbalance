@@ -91,6 +91,11 @@ def adjust_cmd(
     seed: int = typer.Option(
         0, "--seed", help="Random seed for deterministic search/execution"
     ),
+    no_regression: bool = typer.Option(
+        False,
+        "--no-regression",
+        help="Keep the baseline strategy if all candidates worsen the objective",
+    ),
     overwrite: bool = typer.Option(False, "--overwrite"),
 ):
     """Adjust cmd used by the qbalance workflow.
@@ -128,6 +133,7 @@ def adjust_cmd(
             profile=profile,
             cache_root=cache_root,
             seed=seed,
+            allow_regression=not no_regression,
         )
     )
     bw.save(out, overwrite=overwrite)
