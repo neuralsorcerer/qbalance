@@ -227,7 +227,7 @@ class BalancedWorkload:
                         and strategy.metrics == selected.metrics,
                     )
                 )
-                
+
             # A guarded no-regression selection can intentionally choose the
             # baseline strategy, which is not part of the evaluated candidate
             # history when users provide an explicit strategy list.  Include it
