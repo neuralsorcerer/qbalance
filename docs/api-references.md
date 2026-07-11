@@ -68,6 +68,12 @@ The function rejects malformed JSON, unreadable files, unsupported container sha
 
 Normalizes an in-memory iterable of `StrategySpec` instances or mapping objects. Strings/bytes and non-iterables are rejected. Empty iterables are rejected. Duplicate normalized strategies are removed.
 
+## Objectives: `qbalance.objectives`
+
+- `Objective(weights)`: immutable weighted minimization objective. Non-finite or non-numeric weights/metric values are ignored during scoring.
+- `default_objective()`: returns the built-in depth/two-qubit/error/compile-time weighting used by `Workload.adjust(...)` when no custom objective is supplied.
+- `load_objective(path)`: loads objective weights from JSON. The file may be a direct metric-to-weight object such as `{"depth": 1.0}`, an object with a `weights` mapping, or a saved-results-style object with an `objective` mapping; malformed files, empty mappings, blank metric names, booleans, non-numeric weights, and non-finite weights raise `ValueError`.
+
 ## Workflow: `qbalance.workflow.workload`
 
 ### `Workload`

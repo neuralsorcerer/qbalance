@@ -34,6 +34,7 @@ python -m qbalance adjust ./circuits \
   --cache-root ./.qbalance-cache \
   --profile \
   --strategies ./strategies.json \
+  --objective ./objective.json \
   --no-regression \
   --overwrite
 ```
@@ -46,6 +47,7 @@ Options:
 - `--pareto`: restrict final selection to the Pareto front before objective tie-break.
 - `--max-candidates INTEGER`: number of generated candidates when `--strategies` is not supplied.
 - `--strategies PATH`: strategy JSON file. When supplied, this file defines the complete candidate set.
+- `--objective PATH`: objective-weight JSON file: a direct metric-to-weight mapping, `{ "weights": { ... } }`, or a saved-results object with an `objective` mapping. All metric names must be non-empty strings and all weights must be finite non-boolean numbers.
 - `--execute`: execute compiled circuits and collect counts.
 - `--shots INTEGER`: execution shots; must be a positive integer.
 - `--seed INTEGER`: random seed used for deterministic bandit ordering and execution.

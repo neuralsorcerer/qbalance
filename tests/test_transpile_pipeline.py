@@ -98,8 +98,10 @@ def test_noise_layout_suppression_and_pipeline(monkeypatch):
 
             self.steps.append(x)
 
-        def run(self, out):
+        def run(self, out, callback=None):
 
+            if callback is not None:
+                callback(pass_=object(), time=0.1, count=1)
             return out
 
     transpiler.PassManager = PM2
@@ -114,7 +116,8 @@ def test_noise_layout_suppression_and_pipeline(monkeypatch):
     assert suppression.apply_measurement_untwirl_counts({"01": 1}, {0: 1})
 
     ppm = types.ModuleType("qiskit.transpiler.preset_passmanagers")
-    ppm.generate_preset_pass_manager = lambda **kwargs: _PM(_Circ())
+    ppm.generate_translation_passmanager = lambda **kwargs: _PM(_Circ())
+    ppm.generate_unroll_3q = lambda **kwargs: _PM(_Circ())
     monkeypatch.setitem(sys.modules, "qiskit.transpiler.preset_passmanagers", ppm)
     conv = types.ModuleType("qiskit.converters")
     conv.circuit_to_dag = lambda c: c

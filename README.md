@@ -149,6 +149,7 @@ python -m qbalance adjust ./circuits \
   --seed 7 \
   --cache-root ./.qbalance-cache \
   --strategies ./strategies.json \
+  --objective ./objective.json \
   --no-regression \
   --overwrite
 
@@ -428,12 +429,15 @@ python -m qbalance adjust ./circuits \
   --pareto \
   --max-candidates 24 \
   --strategies ./strategies.json \
+  --objective ./objective.json \
   --execute \
   --shots 1024 \
   --profile \
   --no-regression \
   --overwrite
 ```
+
+Use `--objective` to tune the metric trade-off used for candidate ranking and no-regression checks. The file may be a direct mapping such as `{"depth": 1.0, "two_qubit_ops": 2.0}`, an object with a `weights` field, or a saved-results object with an `objective` field. The loader rejects empty mappings, blank metric names, booleans, non-numeric values, and non-finite values.
 
 Use `--no-regression` when the final selection should fall back to the baseline compile instead of accepting the best feasible candidate with a worse objective score; equal scores and incomparable baselines do not trigger fallback.
 

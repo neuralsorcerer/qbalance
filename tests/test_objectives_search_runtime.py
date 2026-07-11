@@ -11,7 +11,7 @@ import pytest
 
 from qbalance.metrics.circuit_metrics import extract_circuit_metrics
 from qbalance.mitigation import runtime_options
-from qbalance.objectives import Objective, default_objective
+from qbalance.objectives import Objective, default_objective, load_objective
 from qbalance.search.bandit import BanditSearcher, _featurize
 from qbalance.search.candidates import default_candidate_strategies
 from qbalance.search.pareto import pareto_front
@@ -66,6 +66,100 @@ def test_metrics_objective_search_and_runtime_options():
     )
     assert opts["resilience_level"] == 2
     assert opts["twirling"]["enable_gates"] is True
+
+
+def test_load_objective_accepts_supported_json_shapes(tmp_path):
+
+    direct = tmp_path / "direct.json"
+    direct.write_text('{"depth": 0.5, "two_qubit_ops": "2.0"}', encoding="utf-8")
+    loaded_direct = load_objective(direct)
+    assert loaded_direct.weights == {"depth": 0.5, "two_qubit_ops": 2.0}
+    assert loaded_direct.score({"depth": 4, "two_qubit_ops": 3}) == 8.0
+
+    wrapped = tmp_path / "wrapped.json"
+    wrapped.write_text('{"weights": {"estimated_error": 10}}', encoding="utf-8")
+    loaded_wrapped = load_objective(wrapped)
+    assert loaded_wrapped.weights == {"estimated_error": 10.0}
+    assert loaded_wrapped.score({"estimated_error": 0.25}) == 2.5
+
+    saved_results = tmp_path / "saved_results.json"
+    saved_results.write_text(
+        '{"objective": {"compile_time_s": 0.25}, "selections": {}}',
+        encoding="utf-8",
+    )
+    loaded_saved = load_objective(saved_results)
+    assert loaded_saved.weights == {"compile_time_s": 0.25}
+
+
+def test_load_objective_rejects_malformed_files(tmp_path):
+
+    cases = {
+        "list.json": "[]",
+        "bad_weights.json": '{"weights": []}',
+        "empty.json": "{}",
+        "nested_empty.json": '{"weights": {}}',
+        "non_numeric.json": '{"depth": "not numeric"}',
+        "null_weight.json": '{"depth": null}',
+        "bool_weight.json": '{"depth": true}',
+        "non_finite.json": '{"depth": NaN}',
+        "bad_objective.json": '{"objective": []}',
+        "blank_key.json": '{"": 1.0}',
+    }
+    for filename, payload in cases.items():
+        path = tmp_path / filename
+        path.write_text(payload, encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_objective(path)
+
+
+def test_load_objective_reports_unreadable_path(tmp_path):
+
+    with pytest.raises(ValueError, match="Could not read objective JSON"):
+        load_objective(tmp_path / "missing.json")
+
+
+def test_adjust_cli_loads_custom_objective(monkeypatch, tmp_path):
+
+    from qbalance import cli
+
+    objective_path = tmp_path / "objective.json"
+    objective_path.write_text('{"depth": 3.0}', encoding="utf-8")
+    captured = {}
+
+    class FakeBalancedWorkload:
+        def save(self, out, overwrite=False):
+            captured["save"] = (out, overwrite)
+
+        def summary(self):
+            return "summary"
+
+    class FakeTargetedWorkload:
+        def adjust(self, **kwargs):
+            captured["adjust"] = kwargs
+            return FakeBalancedWorkload()
+
+    class FakeWorkload:
+        @classmethod
+        def from_path(cls, dataset_dir):
+            captured["dataset_dir"] = dataset_dir
+            return cls()
+
+        def set_target(self, backend):
+            captured["backend"] = backend
+            return FakeTargetedWorkload()
+
+    monkeypatch.setattr(cli, "Workload", FakeWorkload)
+
+    cli.adjust_cmd(
+        tmp_path / "dataset",
+        backend="fake:generic:5",
+        out=tmp_path / "out",
+        objective_json=objective_path,
+        overwrite=False,
+    )
+
+    assert captured["adjust"]["objective"].weights == {"depth": 3.0}
+    assert captured["save"] == (tmp_path / "out", False)
 
 
 def test_bandit_searcher_validates_hyperparameters():

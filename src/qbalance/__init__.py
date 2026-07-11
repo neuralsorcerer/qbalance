@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 from qbalance.dataset import CircuitDataset, load_data, load_dataset, save_dataset
+from qbalance.objectives import Objective, default_objective, load_objective
 from qbalance.strategies import (
     Strategy,
     StrategySpec,
@@ -22,6 +23,9 @@ __all__ = [
     "load_dataset",
     "save_dataset",
     "load_data",
+    "Objective",
+    "default_objective",
+    "load_objective",
     "Workload",
     "BalancedWorkload",
     "load_balanced_workload",

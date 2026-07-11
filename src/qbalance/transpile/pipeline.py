@@ -28,7 +28,41 @@ from qbalance.utils import instruction_parts
 log = get_logger(__name__)
 
 
-def _generate_pm(backend: Any, spec: StrategySpec):
+def _backend_basis_gates(backend: Any, target: Any) -> list[str] | None:
+    """Return backend basis gates for Qiskit stage generators when available."""
+    if target is not None:
+        raw_names = getattr(target, "operation_names", None)
+        if callable(raw_names):
+            raw_names = raw_names()
+        names = sorted(str(name) for name in (raw_names or ()) if str(name).strip())
+        return names or None
+
+    configuration = getattr(backend, "configuration", None)
+    if callable(configuration):
+        try:
+            raw_basis = getattr(configuration(), "basis_gates", None)
+        except Exception:
+            raw_basis = None
+        if raw_basis:
+            names = sorted(str(name) for name in raw_basis if str(name).strip())
+            return names or None
+    return None
+
+
+def _append_stage(pass_manager: Any, stage: Any) -> Any:
+    """Append a generated Qiskit stage pass manager with stub compatibility."""
+    try:
+        pass_manager += stage
+        return pass_manager
+    except TypeError:
+        append = getattr(pass_manager, "append", None)
+        if callable(append):
+            append(stage)
+            return pass_manager
+        raise
+
+
+def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
     """Internal helper that generate pm.
 
     Args:
@@ -42,30 +76,41 @@ def _generate_pm(backend: Any, spec: StrategySpec):
         OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
     """
     try:
-        from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+        from qiskit.transpiler import PassManager
+        from qiskit.transpiler.passes import (
+            ApplyLayout,
+            EnlargeWithAncilla,
+            FullAncillaAllocation,
+            SetLayout,
+        )
+        from qiskit.transpiler.preset_passmanagers import (
+            generate_translation_passmanager,
+            generate_unroll_3q,
+        )
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError(
-            "qiskit preset pass managers are required (qiskit>=1.0)"
+            "qiskit preset pass-manager stage generators are required (qiskit>=1.0)"
         ) from e
 
-    init_layout = None
-    if spec.layout_method == "qbalance_noise_aware":
-        init_layout = noise_aware_initial_layout(
-            backend, None
-        )  # will be overridden later per-circuit
+    target = getattr(backend, "target", None)
+    basis_gates = _backend_basis_gates(backend, target)
+    translation_method = spec.translation_method or "translator"
 
-    pm = generate_preset_pass_manager(
-        optimization_level=spec.optimization_level,
-        backend=backend,
-        layout_method=(
-            None
-            if spec.layout_method in (None, "qbalance_noise_aware")
-            else spec.layout_method
+    pm = PassManager()
+    if initial_layout is not None and target is not None:
+        pm.append(SetLayout(initial_layout))
+        pm.append(FullAncillaAllocation(target))
+        pm.append(EnlargeWithAncilla())
+        pm.append(ApplyLayout())
+
+    pm = _append_stage(pm, generate_unroll_3q(target=target, basis_gates=basis_gates))
+    pm = _append_stage(
+        pm,
+        generate_translation_passmanager(
+            target=target,
+            basis_gates=basis_gates,
+            method=translation_method,
         ),
-        routing_method=spec.routing_method,
-        translation_method=spec.translation_method,
-        seed_transpiler=spec.seed_transpiler,
-        initial_layout=init_layout,
     )
     return pm
 
@@ -119,20 +164,7 @@ def compile_one(
             try:
                 il = noise_aware_initial_layout(backend, tw)
                 if il is not None:
-                    # regenerate pass manager with initial_layout
-                    from qiskit.transpiler.preset_passmanagers import (
-                        generate_preset_pass_manager,
-                    )
-
-                    pm = generate_preset_pass_manager(
-                        optimization_level=spec.optimization_level,
-                        backend=backend,
-                        layout_method=None,
-                        routing_method=spec.routing_method,
-                        translation_method=spec.translation_method,
-                        seed_transpiler=spec.seed_transpiler,
-                        initial_layout=il,
-                    )
+                    pm = _generate_pm(backend, spec, initial_layout=il)
             except Exception:
                 pass
 

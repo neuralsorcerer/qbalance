@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping, Tuple
 
 
@@ -75,6 +76,92 @@ class Objective:
                 continue
             score += term
         return score
+
+
+def load_objective(path: Path | str) -> Objective:
+    """Load objective weights from a JSON file.
+
+    Accepted shapes are a direct mapping of metric names to weights, for
+    example ``{"depth": 1.0, "two_qubit_ops": 2.0}``, an object containing a
+    ``"weights"`` mapping, or a saved-results-style object containing an
+    ``"objective"`` mapping.  The loader is intentionally stricter than
+    :class:`Objective`: every loaded metric name must be a non-empty string and
+    every loaded weight must be numeric, finite, and not a boolean.
+
+    Args:
+        path: JSON file containing objective weights.
+
+    Returns:
+        Objective initialized with validated weights.
+
+    Raises:
+        ValueError: If the file cannot be read, is not strict JSON, does not
+            contain a supported JSON object shape, or contains invalid weights.
+    """
+    import json
+
+    source = Path(path)
+    try:
+        payload = json.loads(
+            source.read_text(encoding="utf-8"),
+            parse_constant=lambda constant: _raise_invalid_json_constant(constant),
+        )
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid objective JSON in {source}: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"Could not read objective JSON from {source}: {exc}") from exc
+
+    weights = _objective_weights_from_payload(payload)
+    return Objective(_normalize_objective_weights(weights))
+
+
+def _raise_invalid_json_constant(constant: str) -> None:
+    """Reject non-standard JSON numeric constants such as NaN and Infinity."""
+    raise ValueError(f"Invalid objective JSON constant: {constant}")
+
+
+def _objective_weights_from_payload(payload: Any) -> Mapping[str, Any]:
+    """Extract objective weights from a supported decoded JSON payload."""
+    if not isinstance(payload, Mapping):
+        raise ValueError("Objective JSON must be an object")
+
+    if "weights" in payload:
+        weights = payload["weights"]
+        field = "weights"
+    elif "objective" in payload:
+        weights = payload["objective"]
+        field = "objective"
+    else:
+        weights = payload
+        field = "top-level objective"
+
+    if not isinstance(weights, Mapping):
+        raise ValueError(f"Objective JSON field '{field}' must be an object")
+    return weights
+
+
+def _normalize_objective_weights(weights: Mapping[str, Any]) -> dict[str, float]:
+    """Validate and coerce loaded objective weights to finite floats."""
+    if not weights:
+        raise ValueError("Objective JSON must contain at least one weight")
+
+    normalized: dict[str, float] = {}
+    for key, value in weights.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Objective metric names must be non-empty strings")
+        if isinstance(value, bool):
+            raise ValueError(f"Objective weight for {key!r} must not be a boolean")
+        try:
+            value_f = float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(
+                f"Objective weight for {key!r} must be numeric and finite"
+            ) from exc
+        if not math.isfinite(value_f):
+            raise ValueError(f"Objective weight for {key!r} must be numeric and finite")
+        normalized[key] = value_f
+
+    return normalized
 
 
 def default_objective() -> Objective:

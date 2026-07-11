@@ -17,6 +17,7 @@ from rich.table import Table
 from qbalance.benchmarking.matrix import run_matrix
 from qbalance.builtin_data import _make_tiny
 from qbalance.dataset import load_dataset, save_dataset
+from qbalance.objectives import load_objective
 from qbalance.plugins import list_plugins
 from qbalance.reports.html import render_html
 from qbalance.reports.markdown import render_markdown
@@ -76,6 +77,11 @@ def adjust_cmd(
         "--strategies",
         help="JSON file containing a strategy object, a list, or a strategies object",
     ),
+    objective_json: Optional[Path] = typer.Option(
+        None,
+        "--objective",
+        help='JSON file containing objective weights (direct mapping or {"weights": ...})',
+    ),
     execute: bool = typer.Option(
         False,
         "--execute",
@@ -120,10 +126,12 @@ def adjust_cmd(
         None.
     """
     strategy_path = _strategy_file_or_none(strategies_json)
+    objective_path = _strategy_file_or_none(objective_json)
     bw = (
         Workload.from_path(dataset_dir)
         .set_target(backend)
         .adjust(
+            objective=load_objective(objective_path) if objective_path else None,
             search=search,
             pareto=pareto,
             max_candidates=max_candidates,
