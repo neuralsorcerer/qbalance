@@ -16,6 +16,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 [![Test Windows](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml?query=branch%3Amain)
 [![Test MacOS](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml?query=branch%3Amain)
 [![Lints](https://github.com/neuralsorcerer/qbalance/actions/workflows/lint.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/lint.yml?query=branch%3Amain)
+[![CodeQL](https://github.com/neuralsorcerer/qbalance/actions/workflows/codeql.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/codeql.yml?query=branch%3Amain)
 [![Documentation](https://github.com/neuralsorcerer/qbalance/actions/workflows/docs.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/docs.yml?query=branch%3Amain)
 [![License](https://img.shields.io/badge/License-MIT-3c60b1.svg?logo=opensourceinitiative&logoColor=white)](./LICENSE)
 [![arXiv](https://img.shields.io/badge/arXiv-2605.02966-b31b1b.svg?logo=arxiv)](https://arxiv.org/abs/2605.02966)
