@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from qbalance.reports.common import aggregate, load_matrix, strategy_key
+from qbalance.reports.common import aggregate, load_matrix, sort_value, strategy_key
 
 
 def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
@@ -52,7 +52,10 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
             agg = aggregate(rows)
             items.append((sk, agg))
         items.sort(
-            key=lambda t: (t[1].get("depth", 1e9), t[1].get("two_qubit_ops", 1e9))
+            key=lambda t: (
+                sort_value(t[1].get("depth")),
+                sort_value(t[1].get("two_qubit_ops")),
+            )
         )
         for sk, agg in items:
             lines.append(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,7 +33,7 @@ from qbalance.search import BanditSearcher, default_candidate_strategies, pareto
 from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
-from qbalance.utils import validate_integral
+from qbalance.utils import bit_index, instruction_parts, validate_integral
 
 log = get_logger(__name__)
 
@@ -301,6 +302,13 @@ class BalancedWorkload:
         if out_dir.exists():
             if not overwrite:
                 raise FileExistsError(f"{out_dir} exists (use overwrite=True)")
+            dataset_root = Path(self.dataset.root).resolve()
+            out_resolved = out_dir.resolve()
+            if dataset_root == out_resolved or out_resolved in dataset_root.parents:
+                raise ValueError(
+                    f"Cannot overwrite {out_dir}: it contains this workload's "
+                    "source dataset. Save to a different directory."
+                )
             shutil.rmtree(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -355,15 +363,18 @@ class BalancedWorkload:
         zip_path = Path(zip_path)
         if zip_path.exists() and not overwrite:
             raise FileExistsError(f"{zip_path} exists (use overwrite=True)")
-        tmp = zip_path.parent / (zip_path.stem + "_dir")
-        if tmp.exists():
-            shutil.rmtree(tmp)
-        self.save(tmp, overwrite=True)
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
-            for p in tmp.rglob("*"):
-                if p.is_file():
-                    z.write(p, p.relative_to(tmp))
-        shutil.rmtree(tmp, ignore_errors=True)
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        # A unique staging directory avoids clobbering unrelated user paths
+        # that happen to match a predictable name next to the zip file.
+        tmp = Path(tempfile.mkdtemp(prefix=f".{zip_path.stem}-", dir=zip_path.parent))
+        try:
+            self.save(tmp, overwrite=True)
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+                for p in sorted(tmp.rglob("*")):
+                    if p.is_file():
+                        z.write(p, p.relative_to(tmp))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
         return zip_path
 
 
@@ -692,107 +703,55 @@ class Workload:
             baseline_metrics[rec.name] = m
 
         for qc, rec in zip(circuits, self.dataset.records):
-            # choose candidate evaluation order
-            order: List[StrategySpec] = []
-            if search == "grid":
-                order = list(candidates)
-            else:
-                # warmup random subset; warmup=0 intentionally starts from the
-                # bandit's prior and proposes every candidate adaptively.
-                order = []
-                perm = list(candidates)
-                rng.shuffle(perm)
-                order.extend(perm[: min(warmup, len(perm))])
-                # then propose until exhaustion or budget
-                while len(order) < len(candidates):
-                    proposed = bandit.propose(
-                        [c for c in candidates if c not in order], rng=rng
-                    )
-                    order.append(proposed)
-
             evals: List[Tuple[StrategySpec, Dict[str, Any]]] = []
-            for spec in order:
-                # apply circuit cutting before compile if requested
-                working = qc
-                cut_meta = None
-                if spec.cutting and spec.max_subcircuit_qubits:
-                    try:
-                        working, cut_meta = find_cuts_best_effort(
-                            working, spec.max_subcircuit_qubits
-                        )
-                    except Exception:
-                        # if cutting fails, skip this candidate
-                        continue
 
-                compiled, m = _compile_cached(
-                    working, backend, spec, profile=profile, cache_root=cache_root
+            def _evaluate_and_record(
+                spec: StrategySpec,
+                *,
+                circuit: Any = qc,
+                record_evals: List[Any] = evals,
+            ) -> Optional[Dict[str, Any]]:
+                metrics = _evaluate_candidate(
+                    circuit,
+                    backend,
+                    spec,
+                    objective=obj,
+                    execute=execute,
+                    shots=shots,
+                    seed=seed,
+                    profile=profile,
+                    cache_root=cache_root,
                 )
+                if metrics is not None:
+                    record_evals.append((spec, metrics))
+                return metrics
 
-                # optional execution for mitigation or if execute=True
-                if execute or spec.mthree or spec.zne:
-                    try:
-                        counts = run_counts(
-                            backend, compiled, shots=shots, seed_simulator=seed
-                        )
-                        # undo measurement twirling flips if present
-                        flip_map = m.get("measurement_flip_map") or {}
-                        counts = apply_measurement_untwirl_counts(counts, flip_map)
-                        m["raw_counts_entropy"] = _entropy_from_counts(counts)
-                        m["raw_top_prob"] = _top_prob(counts)
-                        if spec.mthree:
-                            try:
-                                measured = list(range(compiled.num_qubits))
-                                probs = apply_mthree_mitigation(
-                                    backend,
-                                    counts,
-                                    measured_qubits=measured,
-                                    shots=shots,
-                                )
-                                m["mitigated_top_prob"] = float(
-                                    max(probs.values()) if probs else 0.0
-                                )
-                            except Exception as e:
-                                m["mthree_error"] = str(e)
-                        if spec.zne:
-                            try:
-                                factors = list(spec.zne_factors)
-                                counts_pf = []
-                                for f in factors:
-                                    c_fold = fold_global(compiled, f)
-                                    cts = run_counts(
-                                        backend,
-                                        c_fold,
-                                        shots=shots,
-                                        seed_simulator=seed,
-                                    )
-                                    cts = apply_measurement_untwirl_counts(
-                                        cts, flip_map
-                                    )
-                                    counts_pf.append(cts)
-                                probs = zne_extrapolate_counts(
-                                    factors, counts_pf, degree=spec.zne_degree
-                                )
-                                m["zne_top_prob"] = float(
-                                    max(probs.values()) if probs else 0.0
-                                )
-                            except Exception as e:
-                                m["zne_error"] = str(e)
-                    except Exception as e:
-                        m["exec_error"] = str(e)
-
-                # score and observe for bandit.  Hard execution/mitigation
-                # failures make a candidate infeasible for selection rather than
-                # letting good compile-only metrics hide a failed runtime path.
-                failure_reason = _strategy_failure_reason(m, spec, execute=execute)
-                if failure_reason is not None:
-                    m["strategy_failed"] = True
-                    m["strategy_failure_reason"] = failure_reason
-                    m["objective_score"] = float("inf")
-                else:
-                    m["objective_score"] = obj.score(m)
-                evals.append((spec, m))
-                if search == "bandit" and _is_finite_number(m["objective_score"]):
-                    bandit.observe(spec, m["objective_score"])
+            if search == "grid":
+                for spec in candidates:
+                    _evaluate_and_record(spec)
+            else:
+                # Warmup evaluates a random subset first; warmup=0 intentionally
+                # starts from the bandit's prior.  The remaining candidates are
+                # proposed one at a time, observing each result before the next
+                # proposal so the Thompson-sampling posterior stays current.
+                remaining = list(candidates)
+                rng.shuffle(remaining)
+                warmup_specs = remaining[: min(warmup, len(remaining))]
+                remaining = remaining[len(warmup_specs) :]
+                for spec in warmup_specs:
+                    warm_m = _evaluate_and_record(spec)
+                    if warm_m is not None and _is_finite_number(
+                        warm_m["objective_score"]
+                    ):
+                        bandit.observe(spec, warm_m["objective_score"])
+                while remaining:
+                    proposed = bandit.propose(list(remaining), rng=rng)
+                    remaining.remove(proposed)
+                    prop_m = _evaluate_and_record(proposed)
+                    if prop_m is not None and _is_finite_number(
+                        prop_m["objective_score"]
+                    ):
+                        bandit.observe(proposed, prop_m["objective_score"])
 
             # Pareto selection if requested (otherwise min score)
             evaluation_history[rec.name] = [
@@ -850,6 +809,124 @@ def _guard_against_regression(
     return chosen_spec, chosen_metrics
 
 
+def _evaluate_candidate(
+    circuit: Any,
+    backend: Any,
+    spec: StrategySpec,
+    *,
+    objective: Objective,
+    execute: bool,
+    shots: int,
+    seed: int,
+    profile: bool,
+    cache_root: Optional[Path],
+) -> Optional[Dict[str, Any]]:
+    """Compile and optionally execute one candidate strategy for one circuit.
+
+    Returns the candidate's metrics, or ``None`` when the candidate must be
+    skipped entirely (currently only when requested circuit cutting fails).
+    Execution and mitigation failures are captured inside the metrics so the
+    candidate stays in the audit history but is marked infeasible.
+    """
+    # apply circuit cutting before compile if requested
+    working = circuit
+    if spec.cutting and spec.max_subcircuit_qubits:
+        try:
+            working, _cut_meta = find_cuts_best_effort(
+                working, spec.max_subcircuit_qubits
+            )
+        except Exception:
+            # if cutting fails, skip this candidate
+            return None
+
+    compiled, m = _compile_cached(
+        working, backend, spec, profile=profile, cache_root=cache_root
+    )
+
+    # optional execution for mitigation or if execute=True
+    if execute or spec.mthree or spec.zne:
+        try:
+            counts = run_counts(backend, compiled, shots=shots, seed_simulator=seed)
+            # undo measurement twirling flips if present
+            flip_map = m.get("measurement_flip_map") or {}
+            counts = apply_measurement_untwirl_counts(counts, flip_map)
+            m["raw_counts_entropy"] = _entropy_from_counts(counts)
+            m["raw_top_prob"] = _top_prob(counts)
+            if spec.mthree:
+                try:
+                    measured = _final_measurement_qubits(compiled)
+                    probs = apply_mthree_mitigation(
+                        backend,
+                        counts,
+                        measured_qubits=measured,
+                        shots=shots,
+                    )
+                    m["mitigated_top_prob"] = float(
+                        max(probs.values()) if probs else 0.0
+                    )
+                except Exception as e:
+                    m["mthree_error"] = str(e)
+            if spec.zne:
+                try:
+                    factors = list(spec.zne_factors)
+                    counts_pf = []
+                    for f in factors:
+                        c_fold = fold_global(compiled, f)
+                        cts = run_counts(
+                            backend,
+                            c_fold,
+                            shots=shots,
+                            seed_simulator=seed,
+                        )
+                        cts = apply_measurement_untwirl_counts(cts, flip_map)
+                        counts_pf.append(cts)
+                    probs = zne_extrapolate_counts(
+                        factors, counts_pf, degree=spec.zne_degree
+                    )
+                    m["zne_top_prob"] = float(max(probs.values()) if probs else 0.0)
+                except Exception as e:
+                    m["zne_error"] = str(e)
+        except Exception as e:
+            m["exec_error"] = str(e)
+
+    # score the candidate.  Hard execution/mitigation failures make it
+    # infeasible for selection rather than letting good compile-only metrics
+    # hide a failed runtime path.
+    failure_reason = _strategy_failure_reason(m, spec, execute=execute)
+    if failure_reason is not None:
+        m["strategy_failed"] = True
+        m["strategy_failure_reason"] = failure_reason
+        m["objective_score"] = float("inf")
+    else:
+        m["objective_score"] = objective.score(m)
+    return m
+
+
+def _final_measurement_qubits(circuit: Any) -> List[int]:
+    """Return the qubit measured into each clbit, ordered by clbit index.
+
+    Measurement mitigation needs the qubit that feeds every classical bit of
+    the observed bitstrings.  Compiled circuits are usually wider than the
+    number of measured bits, so ``range(num_qubits)`` mismatches the counts
+    keys on any backend wider than the logical circuit.  Falls back to
+    ``range(num_qubits)`` when no per-clbit mapping can be recovered.
+    """
+    mapping: Dict[int, int] = {}
+    try:
+        for entry in list(getattr(circuit, "data", None) or []):
+            inst, qargs, cargs = instruction_parts(entry)
+            if getattr(inst, "name", "") != "measure":
+                continue
+            if len(qargs) != 1 or len(cargs) != 1:
+                continue
+            mapping[bit_index(circuit, cargs[0])] = bit_index(circuit, qargs[0])
+    except Exception:
+        mapping = {}
+    if not mapping:
+        return list(range(int(getattr(circuit, "num_qubits", 0) or 0)))
+    return [qubit for _, qubit in sorted(mapping.items())]
+
+
 def _strategy_failure_reason(
     metrics: Mapping[str, Any], spec: StrategySpec, *, execute: bool
 ) -> Optional[str]:
@@ -860,7 +937,8 @@ def _strategy_failure_reason(
     but infeasible so audit history remains complete while selection and the
     bandit surrogate learn only from successful end-to-end strategies.
     """
-    if execute and metrics.get("exec_error"):
+    execution_requested = execute or spec.mthree or spec.zne
+    if execution_requested and metrics.get("exec_error"):
         return "execution_failed"
     if spec.mthree and metrics.get("mthree_error"):
         return "mthree_failed"

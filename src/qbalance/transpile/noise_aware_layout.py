@@ -16,6 +16,43 @@ from qbalance.utils import bit_index, instruction_parts
 log = get_logger(__name__)
 
 
+_DIRECTIVE_NAMES = {"barrier", "delay"}
+
+
+def _backend_target(backend: Any) -> Any:
+    """Return the BackendV2 transpiler target when one is exposed."""
+    return getattr(backend, "target", None)
+
+
+def _target_instruction_error(
+    target: Any, name: str, qubits: tuple[int, ...]
+) -> Optional[float]:
+    """Read an instruction error rate from a BackendV2 target, best effort."""
+    if target is None:
+        return None
+    try:
+        properties_map = target[name]
+        props = properties_map.get(qubits)
+        if props is None:
+            return None
+        return _coerce_error_rate(getattr(props, "error", None))
+    except Exception:
+        return None
+
+
+def _target_qubit_property(target: Any, q: int, attr: str) -> Optional[float]:
+    """Read a per-qubit property (e.g. t1/t2) from a BackendV2 target."""
+    if target is None:
+        return None
+    try:
+        qubit_properties = getattr(target, "qubit_properties", None)
+        if qubit_properties is None:
+            return None
+        return _coerce_finite_float(getattr(qubit_properties[q], attr, None))
+    except Exception:
+        return None
+
+
 def _safe_get_qubit_readout_error(backend: Any, q: int) -> Optional[float]:
     # Best-effort across backend versions
 
@@ -31,6 +68,11 @@ def _safe_get_qubit_readout_error(backend: Any, q: int) -> Optional[float]:
     Raises:
         None.
     """
+    # BackendV2: readout error lives on the target's measure instruction.
+    error = _target_instruction_error(_backend_target(backend), "measure", (q,))
+    if error is not None:
+        return error
+
     try:
         props = backend.properties()
         if props is None:
@@ -58,6 +100,10 @@ def _safe_get_t1(backend: Any, q: int) -> Optional[float]:
     Raises:
         None.
     """
+    value = _target_qubit_property(_backend_target(backend), q, "t1")
+    if value is not None:
+        return value
+
     try:
         props = backend.properties()
         if props is None:
@@ -84,6 +130,10 @@ def _safe_get_t2(backend: Any, q: int) -> Optional[float]:
     Raises:
         None.
     """
+    value = _target_qubit_property(_backend_target(backend), q, "t2")
+    if value is not None:
+        return value
+
     try:
         props = backend.properties()
         if props is None:
@@ -112,6 +162,15 @@ def _safe_get_2q_error(backend: Any, gate: str, q0: int, q1: int) -> Optional[fl
     Raises:
         None.
     """
+    # BackendV2: gate errors live on the target, keyed by qubit tuple.  Try
+    # the reversed direction too because some targets only list one direction.
+    target = _backend_target(backend)
+    error = _target_instruction_error(target, gate, (q0, q1))
+    if error is None:
+        error = _target_instruction_error(target, gate, (q1, q0))
+    if error is not None:
+        return error
+
     try:
         props = backend.properties()
         if props is None:
@@ -162,9 +221,14 @@ def estimate_circuit_error(backend: Any, circuit: Any) -> float:
     # 1 - Π(1-e_i) approximation
     total_survival = 1.0
     try:
+        target = _backend_target(backend)
         for entry in circuit.data:
             inst, qargs, _ = instruction_parts(entry)
             name = getattr(inst, "name", "").lower()
+            if name in _DIRECTIVE_NAMES:
+                # Barriers/delays are scheduling directives, not error channels;
+                # a two-qubit barrier must not be billed as a two-qubit gate.
+                continue
             if len(qargs) == 2:
                 q0 = bit_index(circuit, qargs[0])
                 q1 = bit_index(circuit, qargs[1])
@@ -178,8 +242,15 @@ def estimate_circuit_error(backend: Any, circuit: Any) -> float:
                 if e is None:
                     e = 0.02
                 total_survival *= 1.0 - e
-            elif len(qargs) > 0 and name not in {"barrier", "delay"}:
-                # 1q gate errors: best-effort use 0.001
+            elif len(qargs) == 1:
+                # 1q gate errors: prefer target calibration, else 0.001
+                q0 = bit_index(circuit, qargs[0])
+                e = _target_instruction_error(target, name, (q0,))
+                if e is None:
+                    e = 0.001
+                total_survival *= 1.0 - e
+            elif len(qargs) > 0:
+                # multi-qubit (>2) operations: conservative default
                 total_survival *= 1.0 - 0.001
     except Exception:
         return 1.0
@@ -210,10 +281,12 @@ def noise_aware_initial_layout(backend: Any, circuit: Any) -> Optional[Any]:
     if n is None:
         return None
 
-    # logical activity: interaction graph degree
+    # logical activity: interaction graph degree (directives are not gates)
     deg = np.zeros(n, dtype=float)
     for entry in circuit.data:
-        _, qargs, _ = instruction_parts(entry)
+        inst, qargs, _ = instruction_parts(entry)
+        if getattr(inst, "name", "").lower() in _DIRECTIVE_NAMES:
+            continue
         if len(qargs) == 2:
             a = bit_index(circuit, qargs[0])
             b = bit_index(circuit, qargs[1])

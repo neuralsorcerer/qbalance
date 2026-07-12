@@ -386,8 +386,6 @@ Additional performance-relevant behavior:
 
 Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection and then original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates. If `--no-regression`/`allow_regression=False` falls back to a baseline that was not in the candidate history, the selected baseline is emitted as a synthetic ranking row with `original_index: null`.
 
-Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection and then original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates.
-
 ### `matrix` output JSON
 
 ```json

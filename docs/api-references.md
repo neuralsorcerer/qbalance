@@ -112,7 +112,7 @@ Validation and edge-case behavior:
 - `max_candidates` must be a positive integer when generated candidates are used. It is not consulted when explicit `strategies` are supplied.
 - At least one candidate strategy must be available after generated or explicit strategy normalization.
 - `allow_regression` must be a real boolean (`True` or `False`).
-- `search="bandit"` evaluates up to `warmup` shuffled candidates first, then asks the bandit model to propose remaining candidates. Non-finite objective scores are not observed by the bandit model, but they remain in the evaluated candidates and are handled by final selection.
+- `search="bandit"` evaluates up to `warmup` shuffled candidates first, then asks the bandit model to propose the remaining candidates one at a time, observing each evaluation before the next proposal. Non-finite objective scores are not observed by the bandit model, but they remain in the evaluated candidates and are handled by final selection.
 - With `allow_regression=False`, qbalance still records the full candidate evaluation history. Only the final selected strategy changes: if the selected candidate score is worse than the baseline score, the saved selection uses the baseline spec and baseline metrics plus guard metadata (`selected_by_regression_guard`, `rejected_candidate_spec`, and `rejected_candidate_objective_score`).
 
 ### `BalancedWorkload`
@@ -198,7 +198,7 @@ Backends are resolved by backend spec strings and entry-point plugins.
 
 Built-in entry points include:
 
-- `fake`: `fake:generic:<num_qubits>` and fake-provider style backends where available.
+- `fake`: `fake:generic:<num_qubits>` (optionally `fake:generic:<num_qubits>:<calibration_seed>`; calibration data is seeded deterministically, seed 0 by default) and `fake:ibm:<name>` device snapshots via `qiskit-ibm-runtime` where available.
 - `aer`: qiskit-aer backends when the `aer` extra is installed.
 
 Third-party packages can register `qbalance.backends` entry points. `qbalance plugins list` shows discovered plugin groups.

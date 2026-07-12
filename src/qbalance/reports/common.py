@@ -63,6 +63,21 @@ def strategy_key(spec: Dict[str, Any]) -> str:
     return ",".join(parts) if parts else "default"
 
 
+def sort_value(value: Any) -> float:
+    """Return a total-order sort key: non-finite/missing values sort last.
+
+    ``aggregate`` emits NaN for metrics with no finite samples; NaN compares
+    False against everything, which makes ``list.sort`` ordering depend on
+    input order. Mapping NaN (and any unparsable value) to +inf keeps report
+    tables deterministic.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return float("inf")
+    return number if math.isfinite(number) else float("inf")
+
+
 def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, float]:
     """Aggregate used by the qbalance workflow.
 

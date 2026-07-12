@@ -23,8 +23,13 @@ def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
     Raises:
         None.
     """
+    directive_names = {"barrier", "delay"}
     instruction_data = [instruction_parts(entry) for entry in circuit.data]
-    twoq = sum(1 for _, qargs, _ in instruction_data if len(qargs) == 2)
+    twoq = sum(
+        1
+        for inst, qargs, _ in instruction_data
+        if len(qargs) == 2 and getattr(inst, "name", "") not in directive_names
+    )
     meas = sum(
         1 for inst, _, _ in instruction_data if getattr(inst, "name", "") == "measure"
     )

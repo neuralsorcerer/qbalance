@@ -27,6 +27,22 @@ from qbalance.utils import instruction_parts
 
 log = get_logger(__name__)
 
+_DIRECTIVE_NAMES = {"barrier", "delay"}
+
+
+def _count_two_qubit_ops(circuit: Any) -> int:
+    """Count two-qubit gate operations, excluding scheduling directives.
+
+    Barriers can span exactly two qubits; counting them as two-qubit gates
+    would inflate the objective for otherwise identical circuits.
+    """
+    count = 0
+    for entry in circuit.data:
+        inst, qargs, _ = instruction_parts(entry)
+        if len(qargs) == 2 and getattr(inst, "name", "") not in _DIRECTIVE_NAMES:
+            count += 1
+    return count
+
 
 def _backend_basis_gates(backend: Any, target: Any) -> list[str] | None:
     """Return backend basis gates for Qiskit stage generators when available."""
@@ -196,9 +212,7 @@ def compile_one(
             "depth": int(out.depth()),
             "size": int(out.size()),
             "width": int(out.num_qubits),
-            "two_qubit_ops": int(
-                sum(1 for entry in out.data if len(instruction_parts(entry)[1]) == 2)
-            ),
+            "two_qubit_ops": int(_count_two_qubit_ops(out)),
             "dd_applied": bool(dd_applied),
             "measurement_flip_map": flip_map,
         }
