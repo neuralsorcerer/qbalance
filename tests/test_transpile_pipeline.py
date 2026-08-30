@@ -528,3 +528,102 @@ def test_measurement_twirling_still_twirls_independent_and_delayed_measurements(
     delayed.delay(16, 0)
     _, flip_map = suppression.apply_measurement_twirling(delayed, seed=0)
     assert flip_map == {0: 1}
+
+
+@pytest.mark.parametrize(
+    "builder,label",
+    [
+        (lambda: _single_register_circuit(), "single register"),
+        (lambda: _multi_register_circuit(), "multiple classical registers"),
+        (lambda: _permuted_mapping_circuit(), "permuted qubit to clbit mapping"),
+        (lambda: _repeated_measurement_circuit(), "same qubit measured twice"),
+    ],
+)
+def test_measurement_twirl_untwirl_round_trip_preserves_the_distribution(
+    builder, label
+):
+    """Twirling plus untwirling must reproduce the untwirled distribution.
+
+    This is the property the flip map exists to guarantee, and it exercises the
+    count-key bit order (little-endian, register separators preserved) that
+    untwirling depends on.
+    """
+    pytest.importorskip("qiskit_aer")
+    from qiskit_aer import AerSimulator
+
+    simulator = AerSimulator()
+    shots = 20000
+    circuit = builder()
+
+    def distribution(counts):
+        total = sum(counts.values())
+        return {key: value / total for key, value in counts.items()}
+
+    reference = distribution(
+        simulator.run(circuit, shots=shots, seed_simulator=1).result().get_counts()
+    )
+
+    for seed in range(4):
+        twirled, flip_map = suppression.apply_measurement_twirling(circuit, seed=seed)
+        raw = (
+            simulator.run(twirled, shots=shots, seed_simulator=1).result().get_counts()
+        )
+        corrected = distribution(
+            suppression.apply_measurement_untwirl_counts(raw, flip_map)
+        )
+        total_variation = 0.5 * sum(
+            abs(reference.get(key, 0.0) - corrected.get(key, 0.0))
+            for key in set(reference) | set(corrected)
+        )
+        assert total_variation < 0.03, (label, seed, total_variation)
+
+
+def _single_register_circuit():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(3, 3)
+    qc.ry(1.1, 0)
+    qc.cx(0, 1)
+    qc.ry(0.4, 2)
+    qc.measure(range(3), range(3))
+    return qc
+
+
+def _multi_register_circuit():
+    from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+
+    qubits = QuantumRegister(3, "q")
+    first = ClassicalRegister(2, "ca")
+    second = ClassicalRegister(1, "cb")
+    qc = QuantumCircuit(qubits, first, second)
+    qc.ry(0.9, 0)
+    qc.h(1)
+    qc.ry(1.4, 2)
+    qc.cx(0, 1)
+    qc.measure(qubits[0], first[0])
+    qc.measure(qubits[1], first[1])
+    qc.measure(qubits[2], second[0])
+    return qc
+
+
+def _permuted_mapping_circuit():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(3, 3)
+    qc.ry(0.9, 0)
+    qc.h(1)
+    qc.ry(1.4, 2)
+    qc.measure(0, 2)
+    qc.measure(1, 0)
+    qc.measure(2, 1)
+    return qc
+
+
+def _repeated_measurement_circuit():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 2)
+    qc.ry(1.2, 0)
+    qc.measure(0, 0)
+    qc.measure(0, 1)
+    return qc

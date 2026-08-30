@@ -27,6 +27,8 @@ A strategy is represented by `qbalance.StrategySpec`. It is immutable and combin
 
 Boolean values are rejected for integer-like fields even though Python treats `bool` as a subclass of `int`.
 
+Unknown fields are rejected as well, so a misspelled key fails loudly instead of silently producing a default strategy.
+
 ## Default candidate generation
 
 `qbalance.search.default_candidate_strategies(max_candidates=24, seed=0)` builds a deterministic candidate pool that includes:

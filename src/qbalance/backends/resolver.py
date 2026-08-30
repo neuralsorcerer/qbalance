@@ -63,7 +63,14 @@ def resolve_backend(spec_or_obj: Union[str, BackendLike]) -> BackendLike:
         _PLUGINS = _load_backend_plugins()
 
     spec = spec_or_obj.strip()
-    kind = spec.split(":")[0]
+    if not spec:
+        raise QBalanceError(
+            f"Backend spec must be a non-empty string. Available kinds: {sorted(_PLUGINS.keys())}"
+        )
+
+    # Plugins parse their own spec parts tolerantly, so strip the kind here too;
+    # otherwise "fake : generic : 5" is rejected as an unknown kind "fake ".
+    kind = spec.split(":")[0].strip()
     plugin = _PLUGINS.get(kind)
     if plugin is None:
         raise QBalanceError(

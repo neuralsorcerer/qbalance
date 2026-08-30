@@ -51,6 +51,7 @@ Important validation rules:
 - When `cutting=True`, `max_subcircuit_qubits` is required.
 - If `max_subcircuit_qubits` is provided, it must be an integer `>= 1`.
 - `resilience_level` must be `None`, `0`, `1`, or `2`.
+- Unknown fields are rejected. A misspelled key such as `optimisation_level` would otherwise be dropped silently, leaving a default strategy and a run that reports several visibly different entries as one identical configuration.
 
 ### `load_strategy_specs(path: Path | str) -> list[StrategySpec]`
 

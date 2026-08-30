@@ -109,7 +109,11 @@ class StrategySpec(BaseModel):
 
         return self
 
-    model_config = dict(frozen=True)
+    # ``extra="forbid"`` matters for a comparison tool: pydantic would otherwise
+    # drop an unknown key silently, so a typo such as "optimisation_level" or
+    # "routing" would yield a default strategy and a run that reports several
+    # visibly different entries as one identical configuration.
+    model_config = dict(frozen=True, extra="forbid")
 
 
 def load_strategy_specs(path: Path | str) -> list[StrategySpec]:

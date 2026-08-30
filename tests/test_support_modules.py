@@ -435,3 +435,25 @@ def test_get_logger_does_not_double_emit_when_the_host_configures_logging():
     assert len(package_logger.handlers) <= 1
     # Records still reach the package logger's level configuration.
     assert module_logger.getEffectiveLevel() <= logging.WARNING
+
+
+def test_resolve_backend_accepts_the_same_spacing_its_plugins_do():
+    """Regression: the resolver rejected "fake : generic : 5" as kind 'fake '.
+
+    The fake plugin strips each spec part deliberately, so dispatch has to strip
+    the kind too; otherwise the error claims an available kind is unknown.
+    """
+    pytest.importorskip("qiskit")
+
+    from qbalance.backends import resolve_backend
+
+    spaced = resolve_backend(" fake : generic : 5 ")
+    plain = resolve_backend("fake:generic:5")
+    assert spaced.num_qubits == plain.num_qubits == 5
+
+    for spec in ("", "   "):
+        with pytest.raises(QBalanceError, match="non-empty"):
+            resolve_backend(spec)
+
+    with pytest.raises(QBalanceError, match="Unknown backend kind"):
+        resolve_backend("definitely_not_a_kind:1")
