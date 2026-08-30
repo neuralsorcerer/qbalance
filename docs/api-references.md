@@ -188,8 +188,9 @@ Common compile metrics include depth, size, two-qubit operation count, estimated
 
 ## Execution and mitigation
 
-- `qbalance.execution.run_counts(backend, circuit, shots=1024, seed_simulator=None)`: execute a circuit on a backend-like object and return counts.
-- `qbalance.mitigation.apply_mthree_mitigation(...)`: optional M3 mitigation integration.
+- `qbalance.execution.run_counts(backend, circuit, shots=1024, seed_simulator=None, seed_transpiler=None)`: execute a circuit on a backend-like object and return counts. Seeds are forwarded only to `run` implementations that accept them.
+- `qbalance.mitigation.apply_mthree_mitigation(backend, raw_counts, measured_qubits, shots, calibration_shots=10000)`: optional M3 mitigation integration. `measured_qubits` must list the physical qubit feeding each classical bit, ordered by classical bit index; `qbalance.workflow.workload` derives it from the compiled circuit.
+- `qbalance.mitigation.runtime_options.build_runtime_estimator_options(...)`: builds an IBM Runtime EstimatorV2 options mapping. This is a standalone helper: qbalance's own compile/execute path does not call it, and `StrategySpec.resilience_level` is likewise carried through to artifacts as metadata rather than applied locally.
 - `qbalance.mitigation.fold_global(circuit, factor)`: global folding helper for ZNE.
 - `qbalance.mitigation.fold_global_for_backend(circuit, backend, factor)`: fold a compiled circuit and re-express it in the backend's native basis. Folding appends `circuit.inverse()`, which introduces adjoint gates (for example `sxdg`) that are outside the backend basis, so the ZNE workflow uses this helper to keep folded circuits runnable. The qubit layout and the measurement clbit mapping are preserved.
 - `qbalance.mitigation.zne_extrapolate_counts(factors, counts_per_factor, degree=1)`: extrapolate probability distributions back to zero noise.

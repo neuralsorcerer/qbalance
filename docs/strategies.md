@@ -23,7 +23,7 @@ A strategy is represented by `qbalance.StrategySpec`. It is immutable and combin
 | `zne_degree` | `int` | `1` | Must be non-negative generally and `1 <= degree < len(zne_factors)` when `zne=True`. |
 | `cutting` | `bool` | `False` | Enables best-effort circuit cutting before compilation. |
 | `max_subcircuit_qubits` | `int | None` | `None` | Required when `cutting=True`; if provided, must be `>= 1`. |
-| `resilience_level` | `int | None` | `None` | Optional IBM Runtime-style level; valid values are `0`, `1`, or `2`. |
+| `resilience_level` | `int | None` | `None` | Optional IBM Runtime-style level; valid values are `0`, `1`, or `2`. Carried through to artifacts as metadata; the local compile/execute path does not apply it. |
 
 Boolean values are rejected for integer-like fields even though Python treats `bool` as a subclass of `int`.
 

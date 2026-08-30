@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+from types import ModuleType
 from typing import Any
 
 from qbalance.errors import OptionalDependencyError, QBalanceError
@@ -70,7 +71,9 @@ def _resolve_ibm(spec: str, parts: list[str]) -> Any:
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required for fake backends") from e
     factory = getattr(fake_provider_module, "fake_backend", None)
-    if callable(factory):
+    # Guard against the same shadowing: qiskit.providers.fake_provider.fake_backend
+    # is a submodule, not the legacy factory function.
+    if callable(factory) and not isinstance(factory, ModuleType):
         try:
             return factory(name)
         except Exception as e:
@@ -92,13 +95,17 @@ def _resolve_ibm(spec: str, parts: list[str]) -> Any:
         candidates.extend([f"Fake{title}", f"Fake{title}V2"])
     for candidate in candidates:
         backend_cls = getattr(ibm_fake_provider, candidate, None)
-        if backend_cls is not None:
-            try:
-                return backend_cls()
-            except Exception as e:
-                raise QBalanceError(
-                    f"Could not resolve fake backend {name!r}: {e}"
-                ) from e
+        if not isinstance(backend_cls, type):
+            # qiskit_ibm_runtime.fake_provider exposes a submodule per device
+            # ("manila") alongside the backend class ("FakeManilaV2").  Skipping
+            # non-classes keeps that submodule from shadowing the class the next
+            # candidate spelling resolves to, which is the whole point of trying
+            # several spellings.
+            continue
+        try:
+            return backend_cls()
+        except Exception as e:
+            raise QBalanceError(f"Could not resolve fake backend {name!r}: {e}") from e
     raise QBalanceError(
         f"Unknown IBM fake backend {name!r} (no matching class in "
         "qiskit_ibm_runtime.fake_provider)"

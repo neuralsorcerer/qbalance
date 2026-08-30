@@ -322,3 +322,104 @@ def test_fold_global_for_backend_leaves_unknown_backends_untouched():
         "h",
         "measure",
     ]
+
+
+def test_fake_ibm_backends_resolve_from_lowercase_device_names():
+    """Regression: a same-named submodule shadowed the backend class.
+
+    ``qiskit_ibm_runtime.fake_provider`` exposes a submodule per device
+    (``manila``) next to the class (``FakeManilaV2``).  The resolver found the
+    submodule, tried to call it, and raised instead of trying the next candidate
+    spelling -- defeating the lowercase device names the candidate list exists
+    to accept.
+    """
+    pytest.importorskip("qiskit_ibm_runtime")
+
+    from qbalance.backends import resolve_backend
+
+    lowercase = resolve_backend("fake:ibm:manila")
+    titlecase = resolve_backend("fake:ibm:Manila")
+    explicit = resolve_backend("fake:ibm:FakeManilaV2")
+
+    assert type(lowercase) is type(titlecase) is type(explicit)
+    assert lowercase.num_qubits == 5
+
+    from qbalance.errors import QBalanceError
+
+    with pytest.raises(QBalanceError, match="Unknown IBM fake backend"):
+        resolve_backend("fake:ibm:definitely_not_a_device")
+
+
+def test_mthree_mitigation_improves_a_readout_noisy_distribution():
+    """The wrapper must feed mthree the qubits its count keys actually use.
+
+    ``_final_measurement_qubits`` orders physical qubits by classical bit, and
+    getting that wrong silently degrades the correction rather than failing, so
+    check the mitigated distribution really moves toward the ideal one.
+    """
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import NoiseModel, ReadoutError
+
+    from qbalance.mitigation.mthree import apply_mthree_mitigation
+    from qbalance.strategies import StrategySpec
+    from qbalance.transpile.pipeline import compile_one
+    from qbalance.workflow.workload import _final_measurement_qubits
+
+    noise = NoiseModel()
+    for qubit in range(5):
+        wrong_one = 0.02 + 0.04 * qubit
+        wrong_zero = 0.01 + 0.02 * qubit
+        noise.add_readout_error(
+            ReadoutError([[1 - wrong_one, wrong_one], [wrong_zero, 1 - wrong_zero]]),
+            [qubit],
+        )
+    noisy = AerSimulator(noise_model=noise)
+
+    circuit = QuantumCircuit(3, 3)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.cx(1, 2)
+    circuit.measure(range(3), range(3))
+    compiled, _ = compile_one(
+        circuit,
+        backend=GenericBackendV2(num_qubits=5, seed=1),
+        spec=StrategySpec(optimization_level=2, routing_method="sabre"),
+        profile=False,
+    )
+
+    shots = 8000
+    raw = noisy.run(compiled, shots=shots, seed_simulator=5).result().get_counts()
+    ideal = (
+        AerSimulator()
+        .run(compiled, shots=shots, seed_simulator=5)
+        .result()
+        .get_counts()
+    )
+
+    def normalized(counts):
+        total = sum(counts.values())
+        return {key: value / total for key, value in counts.items()}
+
+    def total_variation(first, second):
+        return 0.5 * sum(
+            abs(first.get(key, 0.0) - second.get(key, 0.0))
+            for key in set(first) | set(second)
+        )
+
+    measured = _final_measurement_qubits(compiled)
+    assert len(measured) == compiled.num_clbits
+
+    mitigated = apply_mthree_mitigation(
+        noisy, raw, measured_qubits=measured, shots=shots
+    )
+    assert all(isinstance(value, float) for value in mitigated.values())
+
+    ideal_probs = normalized(ideal)
+    raw_error = total_variation(ideal_probs, normalized(raw))
+    mitigated_error = total_variation(ideal_probs, normalized(mitigated))
+    assert mitigated_error < raw_error / 2
