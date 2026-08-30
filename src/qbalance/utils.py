@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, cast
@@ -83,6 +85,38 @@ def stable_hash_str(s: str) -> str:
     return stable_hash_bytes(s.encode("utf-8"))
 
 
+def atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` so readers never observe a partial file.
+
+    The payload goes to a temporary file in the destination directory and is
+    then renamed into place, which is atomic on every supported platform.  A run
+    interrupted mid-write therefore leaves either the previous file or none at
+    all, never a truncated one for the next run to choke on.
+
+    Args:
+        path: Destination file path.
+        data: Bytes to write.
+
+    Returns:
+        None. This method updates state or performs side effects only.
+
+    Raises:
+        OSError: If the temporary file cannot be written or renamed.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(handle, "wb") as stream:
+            stream.write(data)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
 def dump_json(path: Path, obj: Dict[str, Any]) -> None:
     """Dump json used by the qbalance workflow.
 
@@ -94,10 +128,10 @@ def dump_json(path: Path, obj: Dict[str, Any]) -> None:
         None. This method updates state or performs side effects only.
 
     Raises:
-        None.
+        OSError: If the file cannot be written.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(obj, indent=2, sort_keys=True), encoding="utf-8")
+    payload = json.dumps(obj, indent=2, sort_keys=True)
+    atomic_write_bytes(path, payload.encode("utf-8"))
 
 
 def load_json(path: Path) -> Dict[str, Any]:

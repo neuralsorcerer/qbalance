@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Mapping, cast
 
 
 def load_matrix(path: Path) -> Dict[str, Any]:
@@ -22,10 +22,72 @@ def load_matrix(path: Path) -> Dict[str, Any]:
         Dict[str, Any] with the computed result.
 
     Raises:
-        None.
+        ValueError: If the file cannot be read or is not a JSON object.
     """
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    return cast(Dict[str, Any], data)
+    source = Path(path)
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid matrix JSON in {source}: {exc}") from exc
+    except OSError as exc:
+        raise ValueError(f"Could not read matrix JSON from {source}: {exc}") from exc
+
+    if not isinstance(data, Mapping):
+        raise ValueError(f"Matrix JSON in {source} must be an object.")
+    return cast(Dict[str, Any], dict(data))
+
+
+def matrix_results(data: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    """Validate and return the result rows of a matrix payload.
+
+    Report rendering reads ``backend``, ``strategy`` and ``metrics`` off every
+    row.  Matrix files are user-supplied (hand-edited, or written by an older
+    release), so validate the shape here and fail with a precise message rather
+    than letting a ``KeyError`` escape from the middle of rendering.
+
+    Args:
+        data: Decoded matrix payload.
+
+    Returns:
+        The validated result rows.
+
+    Raises:
+        ValueError: If the payload has no usable ``results`` list, or a row is
+            missing or misformats ``backend``, ``strategy``, or ``metrics``.
+    """
+    results = data.get("results")
+    if not isinstance(results, list):
+        raise ValueError("Matrix JSON must contain a 'results' list.")
+
+    rows: List[Dict[str, Any]] = []
+    for index, row in enumerate(results):
+        if not isinstance(row, Mapping):
+            raise ValueError(f"Matrix result at index {index} must be an object.")
+        backend = row.get("backend")
+        if not isinstance(backend, str) or not backend:
+            raise ValueError(
+                f"Matrix result at index {index} has an invalid 'backend'."
+            )
+        strategy = row.get("strategy")
+        if not isinstance(strategy, Mapping):
+            raise ValueError(
+                f"Matrix result at index {index} must contain a 'strategy' object."
+            )
+        metrics = row.get("metrics", {})
+        if metrics is None:
+            metrics = {}
+        if not isinstance(metrics, Mapping):
+            raise ValueError(
+                f"Matrix result at index {index} has a non-object 'metrics'."
+            )
+        rows.append(
+            {
+                "backend": backend,
+                "strategy": dict(strategy),
+                "metrics": dict(metrics),
+            }
+        )
+    return rows
 
 
 _DEFAULT_ZNE_FACTORS = (1.0, 2.0, 3.0)
@@ -132,6 +194,8 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, float]:
 
     for row in rows:
         metrics = row.get("metrics", {})
+        if not isinstance(metrics, Mapping):
+            continue
         for key in keys:
             value = metrics.get(key)
             if value is None:

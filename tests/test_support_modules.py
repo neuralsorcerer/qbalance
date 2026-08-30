@@ -13,10 +13,12 @@ import types
 import pytest
 
 from qbalance import builtin_data, cache, plugins
+from qbalance import utils as utils_module
 from qbalance.backends import aer, fake
 from qbalance.backends import resolver as backend_resolver
 from qbalance.errors import OptionalDependencyError, QBalanceError
 from qbalance.utils import (
+    atomic_write_bytes,
     bit_index,
     default_cache_dir,
     dump_json,
@@ -375,3 +377,61 @@ def test_shares_bit_matches_unhashable_bits():
     assert shares_bit((left,), (types.SimpleNamespace(name="q0"),))
     assert not shares_bit((left,), (right,))
     assert not shares_bit((), (left,))
+
+
+def test_atomic_write_bytes_replaces_without_leaving_partial_files(tmp_path):
+    target = tmp_path / "sub" / "payload.bin"
+
+    atomic_write_bytes(target, b"first")
+    assert target.read_bytes() == b"first"
+
+    atomic_write_bytes(target, b"second")
+    assert target.read_bytes() == b"second"
+    assert [p.name for p in target.parent.iterdir()] == ["payload.bin"]
+
+
+def test_atomic_write_bytes_keeps_the_previous_file_on_failure(tmp_path, monkeypatch):
+    target = tmp_path / "payload.bin"
+    atomic_write_bytes(target, b"original")
+
+    def boom(src, dst):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(utils_module.os, "replace", boom)
+    with pytest.raises(OSError):
+        atomic_write_bytes(target, b"replacement")
+
+    assert target.read_bytes() == b"original"
+    assert [p.name for p in tmp_path.iterdir()] == ["payload.bin"]
+
+
+def test_dump_json_is_atomic(tmp_path, monkeypatch):
+    """Regression: a half-written meta.json used to abort every later run."""
+    target = tmp_path / "meta.json"
+    dump_json(target, {"a": 1})
+    assert load_json(target) == {"a": 1}
+
+    def boom(src, dst):
+        raise OSError("rename failed")
+
+    monkeypatch.setattr(utils_module.os, "replace", boom)
+    with pytest.raises(OSError):
+        dump_json(target, {"a": 2})
+
+    assert load_json(target) == {"a": 1}
+
+
+def test_get_logger_does_not_double_emit_when_the_host_configures_logging():
+    """Regression: a handler per module plus propagation printed twice."""
+    import logging
+
+    from qbalance.logging import LOGGER_NAME, get_logger
+
+    package_logger = logging.getLogger(LOGGER_NAME)
+    module_logger = get_logger("qbalance.for_test")
+
+    # Only the package logger carries qbalance's handler, if any.
+    assert module_logger.handlers == []
+    assert len(package_logger.handlers) <= 1
+    # Records still reach the package logger's level configuration.
+    assert module_logger.getEffectiveLevel() <= logging.WARNING

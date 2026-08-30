@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import types
 from typing import Any, cast
@@ -1627,3 +1628,74 @@ def test_adjust_threads_the_backend_spec_into_the_compile_cache_key(
 
     assert seen
     assert set(seen) == {"fake:generic:5"}
+
+
+def test_compile_cache_survives_a_corrupt_entry(tmp_path, monkeypatch):
+    """Regression: a half-written cache entry used to abort the whole run.
+
+    The compile cache lives in the platform cache directory and persists across
+    runs, so any interrupted run left a truncated ``meta.json`` or
+    ``compiled.qpy`` that made every later run fail with a raw JSON or QPY
+    error.  A cache only saves work; it must never be a failure mode.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.backends import resolve_backend
+
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    backend = resolve_backend("fake:generic:5")
+    spec = StrategySpec(optimization_level=1, routing_method="sabre")
+    cache_root = tmp_path / "cache"
+
+    def compile_once():
+        return wl._compile_cached(
+            qc, backend, spec, profile=False, cache_root=cache_root, backend_key="b"
+        )[1]["estimated_error"]
+
+    expected = compile_once()
+    assert compile_once() == expected  # served from cache
+
+    for corrupt in (b"{ truncated", b"", b"\x00\x01"):
+        for name in ("meta.json", "compiled.qpy"):
+            for path in cache_root.rglob(name):
+                path.write_bytes(corrupt)
+            assert compile_once() == expected
+            # The bad entry is healed by the recompile that replaced it.
+            assert compile_once() == expected
+
+    # A cache that cannot be written must not fail the compile either.
+    monkeypatch.setattr(
+        wl,
+        "save_compiled",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("no space left on device")),
+    )
+    shutil.rmtree(cache_root)
+    assert compile_once() == expected
+
+
+def test_save_compiled_writes_atomically_and_leaves_no_partials(tmp_path):
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.cache import get_entry, load_compiled, save_compiled
+
+    qc = QuantumCircuit(1)
+    qc.h(0)
+    entry = get_entry("a" * 64, root=tmp_path)
+
+    save_compiled(entry, qc, {"depth": 1})
+
+    assert sorted(p.name for p in entry.dir.iterdir()) == ["compiled.qpy", "meta.json"]
+    loaded, meta = load_compiled(entry)
+    assert meta["depth"] == 1
+    assert loaded.num_qubits == 1
+
+    # A circuit QPY cannot serialize must not leave a partial entry behind.
+    entry2 = get_entry("b" * 64, root=tmp_path)
+    with pytest.raises(Exception):
+        save_compiled(entry2, object(), {"depth": 1})
+    assert not entry2.dir.exists() or list(entry2.dir.iterdir()) == []

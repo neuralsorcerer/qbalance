@@ -33,7 +33,12 @@ from qbalance.search import BanditSearcher, default_candidate_strategies, pareto
 from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
-from qbalance.utils import bit_index, instruction_parts, validate_integral
+from qbalance.utils import (
+    bit_index,
+    instruction_parts,
+    stable_hash_str,
+    validate_integral,
+)
 
 log = get_logger(__name__)
 
@@ -296,12 +301,20 @@ class BalancedWorkload:
             None. This method updates state or performs side effects only.
 
         Raises:
-            FileExistsError: Raised when input validation fails or a dependent operation cannot be completed.
+            FileExistsError: Raised when the output directory exists and overwrite is False.
+            NotADirectoryError: Raised when the output path exists but is not a directory.
+            ValueError: Raised when overwriting would delete this workload's own dataset.
         """
         out_dir = Path(out_dir)
         if out_dir.exists():
             if not overwrite:
                 raise FileExistsError(f"{out_dir} exists (use overwrite=True)")
+            if not out_dir.is_dir():
+                # overwrite=True means "replace this workload directory", never
+                # "delete whatever file happens to sit at this path".
+                raise NotADirectoryError(
+                    f"Cannot overwrite {out_dir}: it exists and is not a directory."
+                )
             dataset_root = Path(self.dataset.root).resolve()
             out_resolved = out_dir.resolve()
             if dataset_root == out_resolved or out_resolved in dataset_root.parents:
@@ -1104,7 +1117,10 @@ def _compile_cached(
     try:
         fpr = fingerprint_circuit(circuit)
     except Exception:
-        fpr = str(hash(str(circuit)))
+        # builtins.hash of a str is salted per process (PYTHONHASHSEED), so it
+        # would give the same circuit a different key on every run and the
+        # cache could never hit across processes.
+        fpr = stable_hash_str(str(circuit))
     backend_name = getattr(backend, "name", None)
     if callable(backend_name):
         backend_name = backend.name()
@@ -1115,13 +1131,25 @@ def _compile_cached(
 
     key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
     entry = get_entry(key_hash, root=cache_root)
-    hit = load_compiled(entry)
+    try:
+        hit = load_compiled(entry)
+    except Exception as e:
+        # An entry left corrupt by an interrupted run (or written by an
+        # incompatible qiskit) must not abort this one; recompiling is always
+        # correct, and the next save overwrites the bad entry.
+        log.warning("Ignoring unreadable compile-cache entry %s: %s", entry.dir, e)
+        hit = None
     if hit is not None:
         c, m = hit
         return c, m
 
     compiled, m = compile_one(circuit, backend=backend, spec=spec, profile=profile)
-    save_compiled(entry, compiled, m)
+    try:
+        save_compiled(entry, compiled, m)
+    except Exception as e:
+        # The cache only saves work.  A read-only cache root, a full disk, or a
+        # circuit QPY cannot serialize must not fail the adjustment run.
+        log.warning("Could not write compile-cache entry %s: %s", entry.dir, e)
     return compiled, m
 
 

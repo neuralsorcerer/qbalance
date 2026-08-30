@@ -19,7 +19,7 @@ import numpy as np
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
-from qbalance.utils import dump_json, load_json
+from qbalance.utils import dump_json, load_json, stable_hash_str
 
 log = get_logger(__name__)
 
@@ -209,6 +209,13 @@ class CircuitDataset:
 DATASET_INDEX = "qbalance_dataset.json"
 _SAFE_ARTIFACT_STEM = re.compile(r"[^A-Za-z0-9._-]+")
 
+# Circuit names are arbitrary user data, but artifact stems become real
+# filenames.  Common filesystems cap a single path component at 255 bytes, and
+# the stem still has to fit a ``.qpy`` extension plus a de-duplicating ``_N``
+# suffix, so keep it comfortably short on every platform.
+_MAX_ARTIFACT_STEM = 120
+_STEM_DIGEST_LENGTH = 8
+
 
 def _sanitize_artifact_stem(value: str, *, fallback: str) -> str:
     """Return a filesystem-safe artifact stem.
@@ -218,7 +225,10 @@ def _sanitize_artifact_stem(value: str, *, fallback: str) -> str:
         fallback: Fallback stem when the source is empty after sanitization.
 
     Returns:
-        Sanitized stem safe for use as a single filename component.
+        Sanitized stem safe for use as a single filename component.  The stem
+        is ASCII-only and length-bounded; an over-long name is truncated and
+        given a short digest of the original so distinct names sharing a prefix
+        stay distinguishable.
 
     Raises:
         None.
@@ -226,7 +236,13 @@ def _sanitize_artifact_stem(value: str, *, fallback: str) -> str:
     # Normalize separators and common traversal patterns before replacing unsupported chars.
     stem = value.replace("/", "_").replace("\\", "_")
     stem = _SAFE_ARTIFACT_STEM.sub("_", stem).strip("._-")
-    return stem or fallback
+    stem = stem or fallback
+
+    if len(stem) > _MAX_ARTIFACT_STEM:
+        digest = stable_hash_str(value)[:_STEM_DIGEST_LENGTH]
+        keep = _MAX_ARTIFACT_STEM - _STEM_DIGEST_LENGTH - 1
+        stem = f"{stem[:keep].rstrip('._-')}-{digest}"
+    return stem
 
 
 def _is_safe_artifact_path(artifact: str) -> bool:

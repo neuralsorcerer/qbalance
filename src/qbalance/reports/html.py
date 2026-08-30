@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from qbalance.errors import OptionalDependencyError
-from qbalance.reports.common import aggregate, load_matrix, sort_value, strategy_key
+from qbalance.reports.common import (
+    aggregate,
+    load_matrix,
+    matrix_results,
+    sort_value,
+    strategy_key,
+)
 
 
 def render_html(matrix_json: Path, out_dir: Path) -> Path:
@@ -26,6 +32,7 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
 
     Raises:
         OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        ValueError: Raised when the matrix JSON cannot be read or has an unusable shape.
     """
     try:
         from jinja2 import Template
@@ -37,7 +44,7 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     data = load_matrix(matrix_json)
-    results = data["results"]
+    results = matrix_results(data)
 
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(
         lambda: defaultdict(list)

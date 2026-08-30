@@ -337,6 +337,10 @@ def compile_cmd(
     if out.exists():
         if not overwrite:
             raise typer.BadParameter(f"{out} exists (use --overwrite)")
+        if not out.is_dir():
+            # --overwrite replaces a previous output directory; it must never
+            # delete an unrelated file the user pointed at by mistake.
+            raise typer.BadParameter(f"{out} exists and is not a directory")
         import shutil
 
         shutil.rmtree(out)

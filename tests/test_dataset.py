@@ -764,3 +764,36 @@ def test_load_circuits_raises_optional_dependency_error_when_qiskit_missing(
 
     with pytest.raises(OptionalDependencyError, match="qiskit"):
         dataset.load_circuits()
+
+
+def test_save_dataset_bounds_long_circuit_names(tmp_path):
+    """Regression: circuit names become filenames and must fit the filesystem.
+
+    A 300-character circuit name produced a 304-character artifact filename,
+    which most filesystems reject with ENAMETOOLONG, so saving crashed with a
+    raw OSError instead of writing the dataset.
+    """
+    from qiskit import QuantumCircuit
+
+    circuits = []
+    for name in ("x" * 300, "y" * 300, "a" * 200 + "ONE", "a" * 200 + "TWO", "short"):
+        qc = QuantumCircuit(1, 1, name=name)
+        qc.h(0)
+        qc.measure(0, 0)
+        circuits.append(qc)
+
+    ds = save_dataset(tmp_path / "ds", circuits, overwrite=True)
+
+    artifacts = [record.artifact for record in ds.records]
+    assert len(set(artifacts)) == len(circuits)
+    for artifact in artifacts:
+        assert len(artifact.encode("utf-8")) <= 255
+        assert (tmp_path / "ds" / artifact).is_file()
+    # Long names sharing a prefix must not collapse onto one truncated stem.
+    assert artifacts[2] != artifacts[3]
+    # Short names keep their readable stem.
+    assert artifacts[4] == "short.qpy"
+
+    reloaded = load_dataset(tmp_path / "ds")
+    assert reloaded.names() == ds.names()
+    assert len(reloaded.load_circuits()) == len(circuits)

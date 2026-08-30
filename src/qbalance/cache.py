@@ -13,7 +13,13 @@ from typing import Any, Dict, Optional, Tuple
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.transpile.suppression import normalize_measurement_flip_map
-from qbalance.utils import default_cache_dir, dump_json, load_json, stable_hash_bytes
+from qbalance.utils import (
+    atomic_write_bytes,
+    default_cache_dir,
+    dump_json,
+    load_json,
+    stable_hash_bytes,
+)
 
 
 @dataclass
@@ -137,11 +143,18 @@ def save_compiled(entry: CacheEntry, circuit: Any, meta: Dict) -> None:
     Raises:
         OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
     """
-    entry.dir.mkdir(parents=True, exist_ok=True)
     try:
         from qiskit import qpy
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required for cache save") from e
-    with (entry.dir / "compiled.qpy").open("wb") as f:
-        qpy.dump(circuit, f)
+
+    # Serialize before touching disk: a circuit QPY cannot represent then fails
+    # here, leaving no partial artifact behind.
+    buffer = io.BytesIO()
+    qpy.dump(circuit, buffer)
+
+    entry.dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_bytes(entry.dir / "compiled.qpy", buffer.getvalue())
+    # meta.json is written last: load_compiled requires both files, so a run
+    # interrupted between them leaves an entry that simply reads as a miss.
     dump_json(entry.dir / "meta.json", meta)

@@ -9,7 +9,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from qbalance.reports.common import aggregate, load_matrix, sort_value, strategy_key
+from qbalance.reports.common import (
+    aggregate,
+    load_matrix,
+    matrix_results,
+    sort_value,
+    strategy_key,
+)
 
 
 def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
@@ -23,12 +29,12 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
         Path with the computed result.
 
     Raises:
-        None.
+        ValueError: Raised when the matrix JSON cannot be read or has an unusable shape.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     data = load_matrix(matrix_json)
-    results = data["results"]
+    results = matrix_results(data)
 
     # group by backend -> strategy
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}

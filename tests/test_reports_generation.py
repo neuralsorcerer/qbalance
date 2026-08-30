@@ -145,3 +145,52 @@ def test_strategy_key_keeps_the_default_strategy_labels_stable():
     )
     # Legacy matrix files carry only a subset of the fields.
     assert report_common.strategy_key({"optimization_level": 1}) == "opt1"
+
+
+def test_report_rendering_rejects_malformed_matrix_files(tmp_path):
+    """Regression: rendering leaked raw KeyError/TypeError from mid-render.
+
+    Matrix files are user-supplied, so every other qbalance loader validates
+    them and raises a precise ValueError; report rendering did not.
+    """
+    import pytest
+
+    cases = [
+        ({}, "results"),
+        ({"results": "nope"}, "results"),
+        ([], "object"),
+        ({"results": ["notadict"]}, "index 0"),
+        ({"results": [{"strategy": {}, "metrics": {}}]}, "backend"),
+        ({"results": [{"backend": "b", "metrics": {}}]}, "strategy"),
+        ({"results": [{"backend": "b", "strategy": "s", "metrics": {}}]}, "strategy"),
+        ({"results": [{"backend": "b", "strategy": {}, "metrics": "m"}]}, "metrics"),
+    ]
+    for index, (payload, needle) in enumerate(cases):
+        path = tmp_path / f"m{index}.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        with pytest.raises(ValueError) as excinfo:
+            report_md.render_markdown(path, tmp_path / "out")
+        assert needle in str(excinfo.value)
+
+    broken = tmp_path / "broken.json"
+    broken.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError):
+        report_md.render_markdown(broken, tmp_path / "out")
+    with pytest.raises(ValueError):
+        report_md.render_markdown(tmp_path / "absent.json", tmp_path / "out")
+
+
+def test_report_rendering_accepts_rows_without_metrics(tmp_path):
+    payload = {
+        "results": [
+            {"backend": "b", "strategy": {"optimization_level": 1}},
+            {"backend": "b", "strategy": {"optimization_level": 2}, "metrics": None},
+        ]
+    }
+    path = tmp_path / "m.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    out = report_md.render_markdown(path, tmp_path / "out")
+
+    assert out.exists()
+    assert "opt1" in out.read_text(encoding="utf-8")
