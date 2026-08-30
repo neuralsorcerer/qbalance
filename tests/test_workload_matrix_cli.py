@@ -93,7 +93,9 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
         "apply_mthree_mitigation",
         lambda backend, counts, measured_qubits, shots: {"00": 1.0},
     )
-    monkeypatch.setattr(wl, "fold_global", lambda compiled, f: compiled)
+    monkeypatch.setattr(
+        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+    )
     monkeypatch.setattr(
         wl, "zne_extrapolate_counts", lambda factors, counts_pf, degree: {"00": 1.0}
     )
@@ -169,7 +171,7 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(
         matrix_mod, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
     )
-    monkeypatch.setattr(matrix_mod, "fold_global", lambda c, f: c)
+    monkeypatch.setattr(matrix_mod, "fold_global_for_backend", lambda c, backend, f: c)
     monkeypatch.setattr(
         matrix_mod,
         "zne_extrapolate_counts",
@@ -232,7 +234,7 @@ def test_additional_branch_coverage(monkeypatch, tmp_path):
 
     from qbalance.backends import resolver as resolver_mod
 
-    resolver_mod._PLUGINS = None
+    monkeypatch.setattr(resolver_mod, "_PLUGINS", None)
     monkeypatch.setattr(
         resolver_mod, "_load_backend_plugins", lambda: {"x": lambda s: s}
     )
@@ -1371,7 +1373,9 @@ def test_workload_adjust_accepts_integral_types_and_cache_root_string(
     monkeypatch.setattr(wl, "resolve_backend", lambda b: object())
     seen_cache_roots = []
 
-    def fake_compile_cached(circuit, backend, spec, profile, cache_root):
+    def fake_compile_cached(
+        circuit, backend, spec, profile, cache_root, backend_key=None
+    ):
         seen_cache_roots.append(cache_root)
         return circuit, {
             "depth": 1,
@@ -1410,7 +1414,9 @@ def test_bandit_skips_non_finite_observations(monkeypatch, tmp_path):
     specs = [StrategySpec(optimization_level=0), StrategySpec(optimization_level=1)]
     monkeypatch.setattr(wl, "default_candidate_strategies", lambda **k: specs)
 
-    def fake_compile_cached(circuit, backend, spec, profile, cache_root):
+    def fake_compile_cached(
+        circuit, backend, spec, profile, cache_root, backend_key=None
+    ):
         if spec.optimization_level == 0:
             return circuit, {"depth": float("inf")}
         return circuit, {"depth": 1, "two_qubit_ops": 0, "estimated_error": 0.0}
@@ -1538,3 +1544,86 @@ def test_strategy_failure_reason_marks_requested_runtime_failures():
         )
         is None
     )
+
+
+def test_compile_cache_key_separates_backends_sharing_a_display_name(tmp_path):
+    """Regression: backend display names are not unique cache identities.
+
+    ``fake:generic:5:1`` and ``fake:generic:5:7`` both report the name
+    ``generic_backend_5q`` while carrying different calibration data, so keying
+    the compile cache on the name alone served one backend's compiled circuit
+    and calibration-derived metrics for the other.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.backends import resolve_backend
+
+    first = resolve_backend("fake:generic:5:1")
+    second = resolve_backend("fake:generic:5:7")
+    assert first.name == second.name
+
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+    spec = StrategySpec(optimization_level=1, routing_method="sabre")
+
+    cache_root = tmp_path / "cache"
+    _, first_metrics = wl._compile_cached(
+        qc,
+        first,
+        spec,
+        profile=False,
+        cache_root=cache_root,
+        backend_key="fake:generic:5:1",
+    )
+    _, second_metrics = wl._compile_cached(
+        qc,
+        second,
+        spec,
+        profile=False,
+        cache_root=cache_root,
+        backend_key="fake:generic:5:7",
+    )
+
+    assert first_metrics["estimated_error"] != second_metrics["estimated_error"]
+
+    # The same backend must still hit the cache.
+    _, repeat_metrics = wl._compile_cached(
+        qc,
+        first,
+        spec,
+        profile=False,
+        cache_root=cache_root,
+        backend_key="fake:generic:5:1",
+    )
+    assert repeat_metrics["estimated_error"] == first_metrics["estimated_error"]
+
+
+def test_adjust_threads_the_backend_spec_into_the_compile_cache_key(
+    monkeypatch, tmp_path
+):
+    seen: list = []
+    real_compile_cached = wl._compile_cached
+
+    def recording_compile_cached(*args, **kwargs):
+        seen.append(kwargs.get("backend_key"))
+        return real_compile_cached(*args, **kwargs)
+
+    monkeypatch.setattr(wl, "_compile_cached", recording_compile_cached)
+
+    dataset_dir = tmp_path / "ds"
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    save_dataset(dataset_dir, _make_tiny()[:1], overwrite=True)
+
+    wl.Workload.from_path(dataset_dir).set_target("fake:generic:5").adjust(
+        strategies=[StrategySpec(optimization_level=0)],
+        cache_root=tmp_path / "cache",
+    )
+
+    assert seen
+    assert set(seen) == {"fake:generic:5"}

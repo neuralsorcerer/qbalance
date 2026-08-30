@@ -83,3 +83,65 @@ def test_aggregate_skips_non_finite_values():
     assert aggregated["two_qubit_ops"] == 4.0
     assert aggregated["estimated_error"] == 0.2
     assert aggregated["compile_time_s"] == 1.0
+
+
+def test_strategy_key_separates_behaviourally_distinct_strategies():
+    """Regression: report rows are grouped by this key.
+
+    ``zne_factors``/``zne_degree``, transpiler seeds, translation methods and
+    resilience levels used to be absent from the key, so distinct runs were
+    merged into a single averaged row.
+    """
+    from qbalance.strategies import StrategySpec
+
+    specs = [
+        StrategySpec(optimization_level=2, zne=True, zne_factors=(1.0, 2.0, 3.0)),
+        StrategySpec(
+            optimization_level=2, zne=True, zne_factors=(1.0, 3.0, 5.0), zne_degree=2
+        ),
+        StrategySpec(optimization_level=2, seed_transpiler=0),
+        StrategySpec(optimization_level=2, seed_transpiler=99),
+        StrategySpec(optimization_level=2, translation_method="translator"),
+        StrategySpec(optimization_level=2, translation_method="synthesis"),
+        StrategySpec(optimization_level=2, resilience_level=0),
+        StrategySpec(optimization_level=2, resilience_level=2),
+        StrategySpec(optimization_level=2, measurement_twirling=True),
+        StrategySpec(
+            optimization_level=2, measurement_twirling=True, seed_suppression=5
+        ),
+    ]
+
+    keys = [report_common.strategy_key(spec.model_dump()) for spec in specs]
+    assert len(set(keys)) == len(specs)
+
+
+def test_strategy_key_keeps_the_default_strategy_labels_stable():
+    from qbalance.strategies import StrategySpec
+
+    assert (
+        report_common.strategy_key(
+            StrategySpec(optimization_level=1, routing_method="sabre").model_dump()
+        )
+        == "opt1,route=sabre"
+    )
+    assert (
+        report_common.strategy_key(
+            StrategySpec(
+                optimization_level=2,
+                routing_method="sabre",
+                pauli_twirling=True,
+                num_twirls=8,
+            ).model_dump()
+        )
+        == "opt2,route=sabre,twirl8"
+    )
+    assert (
+        report_common.strategy_key(
+            StrategySpec(
+                optimization_level=1, cutting=True, max_subcircuit_qubits=4
+            ).model_dump()
+        )
+        == "opt1,cut4"
+    )
+    # Legacy matrix files carry only a subset of the fields.
+    assert report_common.strategy_key({"optimization_level": 1}) == "opt1"

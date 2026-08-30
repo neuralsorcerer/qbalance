@@ -315,7 +315,9 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
         "apply_mthree_mitigation",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("m3")),
     )
-    monkeypatch.setattr(wl, "fold_global", lambda compiled, f: compiled)
+    monkeypatch.setattr(
+        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+    )
     monkeypatch.setattr(
         wl,
         "zne_extrapolate_counts",

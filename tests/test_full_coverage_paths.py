@@ -76,7 +76,11 @@ def test_finalize_full_coverage_paths(monkeypatch, tmp_path):
     conv = types.ModuleType("qiskit.converters")
     conv.circuit_to_dag = lambda c: c
     monkeypatch.setitem(sys.modules, "qiskit.converters", conv)
-    monkeypatch.setattr(pipeline, "_generate_pm", lambda backend, spec: _PM(_Circ()))
+    monkeypatch.setattr(
+        pipeline,
+        "_generate_pm",
+        lambda backend, spec, initial_layout=None: _PM(_Circ()),
+    )
     monkeypatch.setattr(
         pipeline,
         "noise_aware_initial_layout",
@@ -136,7 +140,9 @@ def test_finalize_full_coverage_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(
         wl, "apply_mthree_mitigation", lambda *a, **k: {"00": 0.8, "11": 0.2}
     )
-    monkeypatch.setattr(wl, "fold_global", lambda compiled, f: compiled)
+    monkeypatch.setattr(
+        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+    )
     monkeypatch.setattr(
         wl, "zne_extrapolate_counts", lambda *a, **k: {"00": 0.7, "11": 0.3}
     )

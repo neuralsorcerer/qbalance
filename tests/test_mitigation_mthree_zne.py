@@ -146,3 +146,179 @@ def test_fold_global_preserves_terminal_barriers_after_measurements():
         "measure",
         "barrier",
     ]
+
+
+def test_zne_extrapolation_restores_the_target_parity_mass():
+    """Regression: an empty parity class must share the target mass, not repeat it.
+
+    Every key of a parity class with no sampled mass used to be assigned the
+    full target mass, so a reference distribution carrying two zero-count keys
+    of that class produced twice the intended mass and an extrapolated
+    observable that no longer matched the fit.
+    """
+    factors = [1.0, 2.0, 3.0]
+    counts_per_factor = [
+        {"00": 0, "11": 0, "01": 50, "10": 50},
+        {"00": 50, "11": 50},
+        {"01": 50, "10": 50},
+    ]
+
+    probs = zne.zne_extrapolate_counts(factors, counts_per_factor, degree=1)
+
+    assert pytest.approx(sum(probs.values())) == 1.0
+    assert all(value >= 0.0 for value in probs.values())
+    even_mass = sum(
+        value for bitstr, value in probs.items() if zne._parity(bitstr) == 0
+    )
+    # The linear fit through (-1, +1, -1) extrapolates to -1/3 at zero noise.
+    assert even_mass == pytest.approx((1.0 + (-1.0 / 3.0)) / 2.0)
+    assert 2.0 * even_mass - 1.0 == pytest.approx(-1.0 / 3.0)
+
+
+def test_zne_extrapolation_handles_a_missing_parity_class():
+    factors = [1.0, 2.0, 3.0]
+    counts_per_factor = [
+        {"00": 50, "11": 50},
+        {"01": 50, "10": 50},
+        {"00": 50, "11": 50},
+    ]
+
+    probs = zne.zne_extrapolate_counts(factors, counts_per_factor, degree=1)
+
+    assert pytest.approx(sum(probs.values())) == 1.0
+    even_mass = sum(
+        value for bitstr, value in probs.items() if zne._parity(bitstr) == 0
+    )
+    assert even_mass == pytest.approx((1.0 + (1.0 / 3.0)) / 2.0)
+
+
+def test_fold_global_accepts_measurement_twirl_frame_changes():
+    """Regression: measurement twirling interleaves X gates with the measurements.
+
+    Rejecting any non-measure instruction after the first measurement made
+    ``zne=True`` with ``measurement_twirling=True`` fail for every circuit.
+    """
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.x(0)
+    qc.measure(0, 0)
+    qc.x(1)
+    qc.measure(1, 1)
+
+    folded = zne.fold_global(qc, 3.0)
+
+    assert [inst.operation.name for inst in folded.data] == [
+        "h",
+        "cx",
+        "x",
+        "x",
+        "cx",
+        "h",
+        "h",
+        "cx",
+        "x",
+        "measure",
+        "x",
+        "measure",
+    ]
+
+
+def test_fold_global_still_rejects_post_measurement_computation():
+    from qiskit import QuantumCircuit
+
+    mid_circuit = QuantumCircuit(1, 1)
+    mid_circuit.h(0)
+    mid_circuit.measure(0, 0)
+    mid_circuit.h(0)
+    mid_circuit.measure(0, 0)
+    with pytest.raises(ValueError):
+        zne.fold_global(mid_circuit, 3.0)
+
+    unmeasured_qubit = QuantumCircuit(2, 1)
+    unmeasured_qubit.h(0)
+    unmeasured_qubit.measure(0, 0)
+    unmeasured_qubit.x(1)
+    with pytest.raises(ValueError):
+        zne.fold_global(unmeasured_qubit, 3.0)
+
+
+def test_fold_global_preserves_the_circuit_unitary():
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import Operator
+
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.t(1)
+    qc.ry(0.7, 0)
+
+    for scale in (1.0, 2.0, 3.0, 5.0):
+        folded = zne.fold_global(qc, scale)
+        assert Operator(folded).equiv(Operator(qc))
+
+
+def test_fold_global_for_backend_returns_a_runnable_circuit():
+    """Regression: ``U.inverse()`` introduces gates outside the backend basis."""
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.strategies import StrategySpec
+    from qbalance.transpile.pipeline import compile_one
+
+    backend = GenericBackendV2(num_qubits=5, seed=5)
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+
+    compiled, _ = compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(optimization_level=2, routing_method="sabre"),
+        profile=False,
+    )
+    supported = set(backend.target.operation_names)
+    assert set(compiled.count_ops()) <= supported
+
+    folded = zne.fold_global_for_backend(compiled, backend, 3.0)
+
+    assert set(folded.count_ops()) <= supported
+    assert folded.num_qubits == compiled.num_qubits
+    assert folded.num_clbits == compiled.num_clbits
+
+    def measurement_map(circuit):
+        return {
+            circuit.find_bit(inst.clbits[0])
+            .index: circuit.find_bit(inst.qubits[0])
+            .index
+            for inst in circuit.data
+            if inst.operation.name == "measure"
+        }
+
+    assert measurement_map(folded) == measurement_map(compiled)
+    # Folding must still scale the two-qubit gate count.
+    assert folded.count_ops()["cx"] > compiled.count_ops()["cx"]
+    # Scale 1.0 is a no-op and must not be re-transpiled.
+    assert zne.fold_global_for_backend(compiled, backend, 1.0) is compiled
+
+
+def test_fold_global_for_backend_leaves_unknown_backends_untouched():
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1)
+    qc.h(0)
+    qc.measure(0, 0)
+
+    folded = zne.fold_global_for_backend(qc, object(), 3.0)
+
+    assert [inst.operation.name for inst in folded.data] == [
+        "h",
+        "h",
+        "h",
+        "measure",
+    ]

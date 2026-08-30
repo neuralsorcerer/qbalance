@@ -29,6 +29,11 @@ log = get_logger(__name__)
 
 _DIRECTIVE_NAMES = {"barrier", "delay"}
 
+# qbalance-specific layout name.  Qiskit does not know this method; it is
+# realized by handing the computed layout to the preset pass manager as an
+# ``initial_layout`` instead.
+NOISE_AWARE_LAYOUT = "qbalance_noise_aware"
+
 
 def _count_two_qubit_ops(circuit: Any) -> int:
     """Count two-qubit gate operations, excluding scheduling directives.
@@ -78,12 +83,46 @@ def _append_stage(pass_manager: Any, stage: Any) -> Any:
         raise
 
 
-def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
-    """Internal helper that generate pm.
+def _preset_layout_method(spec: StrategySpec) -> str | None:
+    """Return the Qiskit preset layout method requested by a strategy.
+
+    ``qbalance_noise_aware`` is not a Qiskit layout plugin, so it maps to "no
+    preset layout method"; the noise-aware layout reaches the preset pass
+    manager through ``initial_layout``.
+    """
+    if spec.layout_method in (None, NOISE_AWARE_LAYOUT):
+        return None
+    return spec.layout_method
+
+
+def _supports_preset_pass_manager(backend: Any) -> bool:
+    """Return True when Qiskit's preset pass manager can target ``backend``.
+
+    Lightweight stubs and pre-BackendV2 objects do not carry the transpiler
+    ``Target`` the preset generator needs; those fall back to the
+    translation-only stage pipeline below.
+    """
+    try:
+        from qiskit.providers import BackendV2
+        from qiskit.transpiler import Target
+    except Exception:  # pragma: no cover - qiskit always provides these
+        return False
+
+    if isinstance(backend, BackendV2):
+        return True
+    return isinstance(getattr(backend, "target", None), Target)
+
+
+def _generate_stage_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
+    """Build a translation-only pass manager for backends without a Target.
+
+    This fallback cannot honor ``optimization_level`` or perform routing, so it
+    is used only when :func:`_supports_preset_pass_manager` rejects the backend.
 
     Args:
         backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
         spec: Strategy/backend specification controlling compilation behavior.
+        initial_layout (default: None): Layout applied before translation, when available.
 
     Returns:
         Computed value produced by this routine.
@@ -131,6 +170,57 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
     return pm
 
 
+def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
+    """Build the compilation pass manager for one strategy.
+
+    Qiskit's preset pass manager is what actually honors ``optimization_level``,
+    ``layout_method``, ``routing_method``, ``translation_method`` and
+    ``seed_transpiler``, and what maps the circuit onto the backend coupling
+    map.  Backends that cannot be described to it (BackendV1-style objects and
+    test stubs) fall back to the translation-only stage pipeline.
+
+    Args:
+        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
+        spec: Strategy/backend specification controlling compilation behavior.
+        initial_layout (default: None): Explicit initial layout, used for the
+            ``qbalance_noise_aware`` layout method.
+
+    Returns:
+        Pass manager that compiles a circuit for ``backend`` under ``spec``.
+
+    Raises:
+        OptionalDependencyError: Raised when qiskit pass-manager builders are unavailable.
+        TranspilerError: Raised when the strategy names an unknown layout,
+            routing, or translation method.
+    """
+    if _supports_preset_pass_manager(backend):
+        try:
+            from qiskit.transpiler.preset_passmanagers import (
+                generate_preset_pass_manager,
+            )
+        except Exception as e:  # pragma: no cover
+            raise OptionalDependencyError(
+                "qiskit preset pass managers are required (qiskit>=1.0)"
+            ) from e
+
+        return generate_preset_pass_manager(
+            optimization_level=spec.optimization_level,
+            backend=backend,
+            layout_method=_preset_layout_method(spec),
+            routing_method=spec.routing_method,
+            translation_method=spec.translation_method,
+            seed_transpiler=spec.seed_transpiler,
+            initial_layout=initial_layout,
+        )
+
+    log.warning(
+        "Backend %s exposes no transpiler Target; falling back to translation-only "
+        "compilation, which ignores optimization_level, layout, and routing.",
+        getattr(backend, "name", None) or backend.__class__.__name__,
+    )
+    return _generate_stage_pm(backend, spec, initial_layout=initial_layout)
+
+
 def compile_one(
     circuit: Any,
     backend: Any,
@@ -174,15 +264,19 @@ def compile_one(
     best_metrics = None
 
     for tw in twirled_ensemble:
-        pm = _generate_pm(backend, spec)
-        # noise-aware init layout per circuit
-        if spec.layout_method == "qbalance_noise_aware":
+        # Noise-aware layout is computed per circuit and handed to the pass
+        # manager as an initial layout, so build the pass manager only once.
+        initial_layout = None
+        if spec.layout_method == NOISE_AWARE_LAYOUT:
             try:
-                il = noise_aware_initial_layout(backend, tw)
-                if il is not None:
-                    pm = _generate_pm(backend, spec, initial_layout=il)
-            except Exception:
-                pass
+                initial_layout = noise_aware_initial_layout(backend, tw)
+            except Exception as e:
+                log.warning(
+                    "Noise-aware layout failed (continuing with the default layout): %s",
+                    e,
+                )
+                initial_layout = None
+        pm = _generate_pm(backend, spec, initial_layout=initial_layout)
 
         cb = make_callback(profile_report) if profile else None
         t0 = time.time()

@@ -21,6 +21,7 @@ from qbalance.utils import (
     default_cache_dir,
     dump_json,
     load_json,
+    shares_bit,
     stable_hash_bytes,
     stable_hash_str,
 )
@@ -164,12 +165,16 @@ def test_backend_resolver_load_and_resolve(monkeypatch):
 
     eps = _EPS({"qbalance.backends": [_EP("ok", good_loader), _EP("bad", bad_loader)]})
     monkeypatch.setattr(backend_resolver, "entry_points", lambda: eps)
-    backend_resolver._PLUGINS = None
+    # monkeypatch restores the module-level plugin cache after the test; a bare
+    # assignment would leak the stub table into every later test.
+    monkeypatch.setattr(backend_resolver, "_PLUGINS", None)
 
     plugins_map = backend_resolver._load_backend_plugins()
     assert "ok" in plugins_map
 
-    backend_resolver._PLUGINS = {"ok": lambda spec: f"resolved:{spec}"}
+    monkeypatch.setattr(
+        backend_resolver, "_PLUGINS", {"ok": lambda spec: f"resolved:{spec}"}
+    )
     assert backend_resolver.resolve_backend("ok:foo") == "resolved:ok:foo"
     obj = object()
     assert backend_resolver.resolve_backend(obj) is obj
@@ -339,3 +344,34 @@ def test_main_entrypoint_runs_cli(monkeypatch):
     monkeypatch.delitem(sys.modules, "qbalance.__main__", raising=False)
     __import__("qbalance.__main__")
     assert called["v"] == 1
+
+
+def test_bit_index_reports_a_negative_resolved_index():
+    """Regression: the negative-index guard was swallowed by its own except."""
+
+    class NegativeFinder:
+        @staticmethod
+        def find_bit(bit):
+            _ = bit
+            return types.SimpleNamespace(index=-3)
+
+    with pytest.raises(ValueError):
+        bit_index(NegativeFinder(), object())
+
+    class BrokenFinder:
+        @staticmethod
+        def find_bit(bit):
+            raise RuntimeError("no lookup")
+
+    # An unusable find_bit still falls through to the attribute probes.
+    assert bit_index(BrokenFinder(), types.SimpleNamespace(_index=4)) == 4
+
+
+def test_shares_bit_matches_unhashable_bits():
+    left = types.SimpleNamespace(name="q0")
+    right = types.SimpleNamespace(name="q1")
+
+    assert shares_bit((left,), (right, left))
+    assert shares_bit((left,), (types.SimpleNamespace(name="q0"),))
+    assert not shares_bit((left,), (right,))
+    assert not shares_bit((), (left,))

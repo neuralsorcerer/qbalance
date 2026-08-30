@@ -345,3 +345,186 @@ def test_measurement_flip_map_normalization_ignores_invalid_and_even_flips():
     assert suppression.apply_measurement_untwirl_counts(
         {"00": 2, "01": 3}, {0: 1, 2: 1}
     ) == {"01": 2, "00": 3}
+
+
+def test_compile_one_honors_optimization_level_and_respects_coupling_map():
+    """Regression: compile knobs must reach Qiskit and the result must be routed.
+
+    A translation-only pass manager silently ignored ``optimization_level``,
+    ``routing_method`` and ``seed_transpiler`` and emitted circuits with
+    two-qubit gates on non-adjacent physical qubits.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.transpiler import CouplingMap
+
+    backend = GenericBackendV2(
+        num_qubits=5, coupling_map=CouplingMap.from_line(5), seed=11
+    )
+    edges = {tuple(edge) for edge in backend.coupling_map}
+
+    qc = QuantumCircuit(5, 5, name="star")
+    qc.h(0)
+    for target in (1, 2, 3, 4):
+        qc.cx(0, target)
+    qc.measure(range(5), range(5))
+
+    depths = {}
+    for level in (0, 1, 2, 3):
+        compiled, metrics = pipeline.compile_one(
+            qc,
+            backend=backend,
+            spec=StrategySpec(
+                optimization_level=level, routing_method="sabre", layout_method="sabre"
+            ),
+            profile=False,
+        )
+        violations = [
+            instruction.operation.name
+            for instruction in compiled.data
+            if len(instruction.qubits) == 2
+            and instruction.operation.name not in ("barrier", "delay")
+            and tuple(compiled.find_bit(bit).index for bit in instruction.qubits)
+            not in edges
+        ]
+        assert violations == []
+        assert compiled.num_qubits == backend.num_qubits
+        depths[level] = metrics["depth"]
+
+    # The knobs must actually change the compilation result.
+    assert len(set(depths.values())) > 1
+
+
+def test_compile_one_noise_aware_layout_is_applied_and_routed():
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.transpiler import CouplingMap
+
+    backend = GenericBackendV2(
+        num_qubits=5, coupling_map=CouplingMap.from_line(5), seed=11
+    )
+    edges = {tuple(edge) for edge in backend.coupling_map}
+
+    qc = QuantumCircuit(4, 4, name="chain")
+    qc.h(0)
+    for a, b in ((0, 1), (1, 2), (2, 3), (0, 3)):
+        qc.cx(a, b)
+    qc.measure(range(4), range(4))
+
+    compiled, _ = pipeline.compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(
+            optimization_level=2,
+            layout_method=pipeline.NOISE_AWARE_LAYOUT,
+            routing_method="sabre",
+        ),
+        profile=False,
+    )
+
+    assert compiled.num_qubits == backend.num_qubits
+    for instruction in compiled.data:
+        if len(instruction.qubits) == 2 and instruction.operation.name not in (
+            "barrier",
+            "delay",
+        ):
+            pair = tuple(compiled.find_bit(bit).index for bit in instruction.qubits)
+            assert pair in edges
+
+
+def test_compile_one_rejects_unknown_transpiler_methods():
+    """An unusable strategy must fail loudly rather than silently degrade."""
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.transpiler.exceptions import TranspilerError
+
+    backend = GenericBackendV2(num_qubits=3, seed=3)
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+
+    with pytest.raises(TranspilerError):
+        pipeline.compile_one(
+            qc,
+            backend=backend,
+            spec=StrategySpec(routing_method="definitely_not_a_router"),
+            profile=False,
+        )
+
+
+def test_measurement_twirling_skips_measurement_reused_by_a_later_instruction(
+    monkeypatch,
+):
+    """Regression: a flip is only correctable when nothing later observes it.
+
+    Measuring the same qubit twice used to record one flip per classical bit
+    while the inserted ``X`` gates compounded, so untwirling corrupted the
+    later bit.  The same applies when a later measurement overwrites the
+    classical bit that carries the correction.
+    """
+    from qiskit import QuantumCircuit
+
+    monkeypatch.setattr(
+        suppression.np.random,
+        "default_rng",
+        lambda seed=None: types.SimpleNamespace(integers=lambda a, b: 1),
+    )
+
+    repeated_qubit = QuantumCircuit(1, 2)
+    repeated_qubit.h(0)
+    repeated_qubit.measure(0, 0)
+    repeated_qubit.measure(0, 1)
+    twirled, flip_map = suppression.apply_measurement_twirling(repeated_qubit, seed=0)
+    assert [inst.operation.name for inst in twirled.data] == [
+        "h",
+        "measure",
+        "x",
+        "measure",
+    ]
+    assert flip_map == {1: 1}
+
+    overwritten_clbit = QuantumCircuit(2, 1)
+    overwritten_clbit.h(0)
+    overwritten_clbit.measure(0, 0)
+    overwritten_clbit.measure(1, 0)
+    twirled, flip_map = suppression.apply_measurement_twirling(
+        overwritten_clbit, seed=0
+    )
+    assert [inst.operation.name for inst in twirled.data] == [
+        "h",
+        "measure",
+        "x",
+        "measure",
+    ]
+    assert flip_map == {0: 1}
+
+
+def test_measurement_twirling_still_twirls_independent_and_delayed_measurements(
+    monkeypatch,
+):
+    from qiskit import QuantumCircuit
+
+    monkeypatch.setattr(
+        suppression.np.random,
+        "default_rng",
+        lambda seed=None: types.SimpleNamespace(integers=lambda a, b: 1),
+    )
+
+    independent = QuantumCircuit(2, 2)
+    independent.h(0)
+    independent.cx(0, 1)
+    independent.barrier()
+    independent.measure(0, 0)
+    independent.measure(1, 1)
+    _, flip_map = suppression.apply_measurement_twirling(independent, seed=0)
+    assert flip_map == {0: 1, 1: 1}
+
+    delayed = QuantumCircuit(1, 1)
+    delayed.h(0)
+    delayed.measure(0, 0)
+    delayed.delay(16, 0)
+    _, flip_map = suppression.apply_measurement_twirling(delayed, seed=0)
+    assert flip_map == {0: 1}

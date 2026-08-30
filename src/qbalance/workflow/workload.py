@@ -27,7 +27,7 @@ from qbalance.diagnostics.distribution import cvm_1d, emd_1d, ks_1d
 from qbalance.execution import run_counts
 from qbalance.logging import get_logger
 from qbalance.mitigation.mthree import apply_mthree_mitigation
-from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
+from qbalance.mitigation.zne import fold_global_for_backend, zne_extrapolate_counts
 from qbalance.objectives import Objective, default_objective
 from qbalance.search import BanditSearcher, default_candidate_strategies, pareto_front
 from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
@@ -698,7 +698,12 @@ class Workload:
         baseline_spec = StrategySpec(optimization_level=1, routing_method="sabre")
         for qc, rec in zip(circuits, self.dataset.records):
             compiled, m = _compile_cached(
-                qc, backend, baseline_spec, profile=profile, cache_root=cache_root
+                qc,
+                backend,
+                baseline_spec,
+                profile=profile,
+                cache_root=cache_root,
+                backend_key=self.backend_spec,
             )
             baseline_metrics[rec.name] = m
 
@@ -721,6 +726,7 @@ class Workload:
                     seed=seed,
                     profile=profile,
                     cache_root=cache_root,
+                    backend_key=self.backend_spec,
                 )
                 if metrics is not None:
                     record_evals.append((spec, metrics))
@@ -820,6 +826,7 @@ def _evaluate_candidate(
     seed: int,
     profile: bool,
     cache_root: Optional[Path],
+    backend_key: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Compile and optionally execute one candidate strategy for one circuit.
 
@@ -840,7 +847,12 @@ def _evaluate_candidate(
             return None
 
     compiled, m = _compile_cached(
-        working, backend, spec, profile=profile, cache_root=cache_root
+        working,
+        backend,
+        spec,
+        profile=profile,
+        cache_root=cache_root,
+        backend_key=backend_key,
     )
 
     # optional execution for mitigation or if execute=True
@@ -871,7 +883,7 @@ def _evaluate_candidate(
                     factors = list(spec.zne_factors)
                     counts_pf = []
                     for f in factors:
-                        c_fold = fold_global(compiled, f)
+                        c_fold = fold_global_for_backend(compiled, backend, f)
                         cts = run_counts(
                             backend,
                             c_fold,
@@ -1064,8 +1076,9 @@ def _compile_cached(
     spec: StrategySpec,
     profile: bool,
     cache_root: Optional[Path],
+    backend_key: Optional[str] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
-    # Cache key depends on circuit fingerprint + backend name + spec
+    # Cache key depends on circuit fingerprint + backend identity + spec
 
     """Internal helper that compile cached.
 
@@ -1075,6 +1088,12 @@ def _compile_cached(
         spec: Strategy/backend specification controlling compilation behavior.
         profile: Whether pass-level transpiler profiling is enabled.
         cache_root: Cache root value consumed by this routine.
+        backend_key (default: None): Backend spec string that resolved to
+            ``backend``.  Backend display names are not unique -- every
+            ``fake:generic:N:SEED`` shares one name while carrying different
+            calibration data -- so the resolving spec is included in the cache
+            key to keep calibration-derived metrics from leaking across
+            backends.
 
     Returns:
         Tuple[Any, Dict[str, Any]] with the computed result.
@@ -1090,7 +1109,8 @@ def _compile_cached(
     if callable(backend_name):
         backend_name = backend.name()
     backend_name = str(backend_name or backend.__class__.__name__)
-    key = f"{backend_name}:{fpr}:{spec.model_dump_json()}:profile={profile}"
+    backend_id = f"{backend_key if backend_key is not None else ''}|{backend_name}"
+    key = f"{backend_id}:{fpr}:{spec.model_dump_json()}:profile={profile}"
     import hashlib
 
     key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()

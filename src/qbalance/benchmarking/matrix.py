@@ -15,7 +15,7 @@ from qbalance.backends import resolve_backend
 from qbalance.dataset import load_dataset
 from qbalance.execution import run_counts
 from qbalance.logging import get_logger
-from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
+from qbalance.mitigation.zne import fold_global_for_backend, zne_extrapolate_counts
 from qbalance.strategies import StrategySpec
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
@@ -111,7 +111,7 @@ def run_matrix(
                         if zne_factors:
                             counts_pf = []
                             for f in zne_factors:
-                                c_fold = fold_global(compiled, f)
+                                c_fold = fold_global_for_backend(compiled, backend, f)
                                 cts = run_counts(
                                     backend, c_fold, shots=shots, seed_simulator=seed
                                 )

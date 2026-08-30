@@ -28,8 +28,25 @@ def load_matrix(path: Path) -> Dict[str, Any]:
     return cast(Dict[str, Any], data)
 
 
+_DEFAULT_ZNE_FACTORS = (1.0, 2.0, 3.0)
+
+
+def _format_zne_factors(factors: Any) -> str:
+    """Render ZNE noise factors compactly for a report row label."""
+    try:
+        return "|".join(f"{float(factor):g}" for factor in factors)
+    except (TypeError, ValueError):
+        return str(factors)
+
+
 def strategy_key(spec: Dict[str, Any]) -> str:
-    """Strategy key used by the qbalance workflow.
+    """Return the report row label for one strategy.
+
+    Report rows are grouped by this key, so two strategies that compile or
+    execute differently must never produce the same one.  Knobs that do not
+    change behavior under the rest of the spec (for example ``zne_degree`` when
+    ``zne`` is off) are deliberately left out so labels stay readable; those
+    strategies really do describe the same experiment.
 
     Args:
         spec: Strategy/backend specification controlling compilation behavior.
@@ -44,22 +61,41 @@ def strategy_key(spec: Dict[str, Any]) -> str:
     parts.append(f"opt{spec.get('optimization_level')}")
     lm = spec.get("layout_method")
     rm = spec.get("routing_method")
+    tm = spec.get("translation_method")
     if lm:
         parts.append(f"layout={lm}")
     if rm:
         parts.append(f"route={rm}")
+    if tm:
+        parts.append(f"xlate={tm}")
+    seed_transpiler = spec.get("seed_transpiler", 0)
+    if seed_transpiler != 0:
+        parts.append(f"seedt={seed_transpiler}")
     if spec.get("pauli_twirling"):
         parts.append(f"twirl{spec.get('num_twirls',1)}")
     if spec.get("dynamical_decoupling"):
         parts.append(f"dd={spec.get('dd_sequence','XY4')}")
     if spec.get("measurement_twirling"):
         parts.append("meas_twirl")
+    if spec.get("pauli_twirling") or spec.get("measurement_twirling"):
+        seed_suppression = spec.get("seed_suppression", 0)
+        if seed_suppression != 0:
+            parts.append(f"seeds={seed_suppression}")
     if spec.get("mthree"):
         parts.append("mthree")
     if spec.get("zne"):
         parts.append("zne")
+        zne_degree = spec.get("zne_degree", 1)
+        if zne_degree != 1:
+            parts.append(f"zdeg={zne_degree}")
+        zne_factors = spec.get("zne_factors", _DEFAULT_ZNE_FACTORS)
+        if tuple(zne_factors or ()) != _DEFAULT_ZNE_FACTORS:
+            parts.append(f"zf={_format_zne_factors(zne_factors)}")
     if spec.get("cutting"):
         parts.append(f"cut{spec.get('max_subcircuit_qubits')}")
+    resilience_level = spec.get("resilience_level")
+    if resilience_level is not None:
+        parts.append(f"res={resilience_level}")
     return ",".join(parts) if parts else "default"
 
 

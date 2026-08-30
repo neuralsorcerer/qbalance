@@ -14,9 +14,13 @@ import numpy as np
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
-from qbalance.utils import bit_index, instruction_parts
+from qbalance.utils import bit_index, instruction_parts, shares_bit
 
 log = get_logger(__name__)
+
+# Operations that cannot observe a measurement twirl inserted before them:
+# they neither change the qubit state nor read the classical bit.
+_TWIRL_TRANSPARENT_OPS = {"barrier", "delay"}
 
 
 def normalize_measurement_flip_map(flip_map: Any) -> Dict[int, int]:
@@ -255,12 +259,33 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
     return pm
 
 
-def _is_terminal_measurement(data: list[Any], index: int) -> bool:
-    """Return true when no later operation can depend on an uncorrected result."""
-    terminal_safe_ops = {"barrier", "delay", "measure"}
+def _is_terminal_measurement(
+    data: list[Any],
+    index: int,
+    qargs: tuple[Any, ...] = (),
+    cargs: tuple[Any, ...] = (),
+) -> bool:
+    """Return true when no later operation can observe the inserted flip.
+
+    A measurement twirl inserts an ``X`` immediately before the measurement and
+    undoes it by flipping the recorded classical bit.  That rewrite is only
+    equivalent when nothing after the measurement can see either half of it:
+
+    * no later instruction may act on the measured qubit -- a second
+      measurement of the same qubit would read the flipped post-measurement
+      state while the flip map only records one flip per classical bit, and any
+      later gate would act on a conjugated state; and
+    * no later instruction may write the classical bit that carries the
+      correction.
+
+    Barriers and delays neither change the state nor read the bit, so they stay
+    transparent.
+    """
     for later_entry in data[index + 1 :]:
-        later_inst, _, _ = instruction_parts(later_entry)
-        if getattr(later_inst, "name", "") not in terminal_safe_ops:
+        later_inst, later_qargs, later_cargs = instruction_parts(later_entry)
+        if getattr(later_inst, "name", "") in _TWIRL_TRANSPARENT_OPS:
+            continue
+        if shares_bit(qargs, later_qargs) or shares_bit(cargs, later_cargs):
             return False
     return True
 
@@ -305,7 +330,7 @@ def apply_measurement_twirling(
                 getattr(inst, "name", "") == "measure"
                 and len(qargs) == 1
                 and len(cargs) == 1
-                and _is_terminal_measurement(data, index)
+                and _is_terminal_measurement(data, index, qargs, cargs)
             )
             if should_twirl:
                 cb = bit_index(circuit, cargs[0])
@@ -326,7 +351,7 @@ def apply_measurement_twirling(
             getattr(inst, "name", "") == "measure"
             and len(qargs) == 1
             and len(cargs) == 1
-            and _is_terminal_measurement(data, index)
+            and _is_terminal_measurement(data, index, qargs, cargs)
         ):
             cb = bit_index(qc, cargs[0])
             flip = int(rng.integers(0, 2))

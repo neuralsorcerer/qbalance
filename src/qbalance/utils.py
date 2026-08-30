@@ -140,6 +140,30 @@ def instruction_parts(entry: Any) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]
     return inst, tuple(qargs), tuple(cargs)
 
 
+def shares_bit(bits: Any, other: Any) -> bool:
+    """Return True when two qubit/clbit collections have a bit in common.
+
+    Uses linear identity/equality comparison rather than set intersection:
+    bit objects are not guaranteed to be hashable (lightweight stubs commonly
+    are not), and instruction bit tuples are short enough that the scan is free.
+
+    Args:
+        bits: First collection of qubit or clbit objects.
+        other: Second collection of qubit or clbit objects.
+
+    Returns:
+        True when at least one bit appears in both collections.
+
+    Raises:
+        None.
+    """
+    for bit in bits:
+        for candidate in other:
+            if bit is candidate or bit == candidate:
+                return True
+    return False
+
+
 def bit_index(circuit: Any, bit: Any) -> int:
     """Return a stable bit index for Qiskit bit objects and lightweight stubs.
 
@@ -156,13 +180,17 @@ def bit_index(circuit: Any, bit: Any) -> int:
     """
     finder = getattr(circuit, "find_bit", None)
     if callable(finder):
+        # Only lookup/conversion failures fall through to the attribute probes
+        # below; a successfully resolved but negative index is an error and must
+        # not be masked by the fallback path.
         try:
-            index = int(finder(bit).index)
+            index: int | None = int(finder(bit).index)
+        except Exception:
+            index = None
+        if index is not None:
             if index < 0:
                 raise ValueError("bit index must be non-negative")
             return index
-        except Exception:
-            pass
 
     for attr in ("index", "_index"):
         raw_index = getattr(bit, attr, None)
