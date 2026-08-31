@@ -1790,3 +1790,72 @@ def test_a_skipped_cutting_candidate_says_why(monkeypatch, caplog):
     assert metrics is None
     assert "cannot cut" in caplog.text
     assert "Skipping candidate" in caplog.text
+
+
+def test_adjust_is_reproducible_across_cold_caches(tmp_path):
+    """A fixed seed must reproduce selections and compile metrics exactly.
+
+    Two runs share a seed but not a cache, so every circuit is genuinely
+    recompiled.  Only ``compile_time_s`` (wall clock) and the default
+    objective's ``0.1 * compile_time_s`` term may differ, which is why this
+    checks a time-free objective for bit equality.
+    """
+    pytest.importorskip("qiskit")
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+    from qbalance.objectives import Objective
+
+    dataset_dir = tmp_path / "ds"
+    save_dataset(dataset_dir, _make_tiny(), overwrite=True)
+    objective = Objective(
+        weights={"depth": 1.0, "two_qubit_ops": 2.0, "estimated_error": 10.0}
+    )
+
+    def run(cache_name):
+        workload = wl.Workload.from_path(dataset_dir).set_target("fake:generic:5")
+        balanced = workload.adjust(
+            objective=objective,
+            search="bandit",
+            pareto=True,
+            max_candidates=8,
+            seed=42,
+            cache_root=tmp_path / cache_name,
+        )
+        out_dir = tmp_path / f"out-{cache_name}"
+        balanced.save(out_dir, overwrite=True)
+        payload = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
+        return _without_compile_time(payload), balanced
+
+    first, first_workload = run("cache-a")
+    second, _ = run("cache-b")
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+    # A different seed must actually explore differently.
+    other = (
+        wl.Workload.from_path(dataset_dir)
+        .set_target("fake:generic:5")
+        .adjust(
+            objective=objective,
+            search="bandit",
+            pareto=True,
+            max_candidates=8,
+            seed=7,
+            cache_root=tmp_path / "cache-c",
+        )
+    )
+    assert [s.spec for s in other.evaluation_history["qft4"]] != [
+        s.spec for s in first_workload.evaluation_history["qft4"]
+    ]
+
+
+def _without_compile_time(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_compile_time(item)
+            for key, item in value.items()
+            if key != "compile_time_s"
+        }
+    if isinstance(value, list):
+        return [_without_compile_time(item) for item in value]
+    return value

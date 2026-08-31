@@ -23,7 +23,7 @@ api-references
 
 ## Citation
 
-If you use qbalance in work, please cite the project metadata in [`CITATION.cff`](../CITATION.cff). The accompanying paper is available on arXiv: [QBalance: A Reproducible Multi-Objective Workflow for Quantum Compilation, Noise Suppression, and Error-Mitigation Strategy Selection](https://arxiv.org/abs/2605.02966) ([DOI: 10.48550/arXiv.2605.02966](https://doi.org/10.48550/arXiv.2605.02966)).
+If you use qbalance in work, please cite the project metadata in [`CITATION.cff`](https://github.com/neuralsorcerer/qbalance/blob/main/CITATION.cff). The accompanying paper is available on arXiv: [QBalance: A Reproducible Multi-Objective Workflow for Quantum Compilation, Noise Suppression, and Error-Mitigation Strategy Selection](https://arxiv.org/abs/2605.02966) ([DOI: 10.48550/arXiv.2605.02966](https://doi.org/10.48550/arXiv.2605.02966)).
 
 ## Core flow
 

@@ -294,6 +294,18 @@ Interpretation:
 
 For each objective term, qbalance ignores a term when the metric is missing, non-numeric, or non-finite. In selection fallback logic, if no finite objective term contributes, the candidate is treated as effectively worst-case (score $+\infty$).
 
+### 2b) Reproducibility of `objective_score`
+
+Compilation itself is deterministic: with a fixed `seed`, two cold-cache runs produce identical strategy selections and identical `depth`, `two_qubit_ops` and `estimated_error` values. The default objective, however, weights `compile_time_s` at `0.1`, and compile time is wall-clock, so `objective_score` varies slightly between runs and can in principle reorder two candidates whose other metrics are nearly tied. Drop the `compile_time_s` term to make scores and selection bit-reproducible:
+
+```python
+from qbalance import Objective
+
+objective = Objective(
+    weights={"depth": 1.0, "two_qubit_ops": 2.0, "estimated_error": 10.0}
+)
+```
+
 ### 3) Pareto pre-filtering
 
 With `pareto=True`, qbalance first computes a non-dominated set on:

@@ -102,7 +102,7 @@ Methods:
 | `shots` | `1024` | Positive integer execution-shot count. Boolean values are rejected. |
 | `profile` | `False` | Enable pass-level transpiler profiling. |
 | `cache_root` | `None` | Optional compiled-circuit cache root. `str` and `Path` values are accepted and normalized to `Path`. |
-| `seed` | `0` | Integer seed for deterministic candidate ordering and execution helpers. Boolean values are rejected. |
+| `seed` | `0` | Integer seed for deterministic candidate ordering and execution helpers. Boolean values are rejected. A fixed seed reproduces selections and compile metrics exactly; `objective_score` still varies slightly under the default objective because it weights wall-clock `compile_time_s`. |
 | `strategies` | `None` | Explicit iterable of strategies. If provided, `max_candidates` is ignored and the supplied order is used for grid search. |
 | `allow_regression` | `True` | Boolean safety rail. When `False`, final selection falls back to the baseline strategy if the best feasible candidate has a finite-safe objective score worse than the finite-safe baseline score. Equal scores and incomparable baselines do not trigger fallback. |
 
