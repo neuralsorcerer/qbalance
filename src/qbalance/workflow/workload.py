@@ -855,8 +855,16 @@ def _evaluate_candidate(
             working, _cut_meta = find_cuts_best_effort(
                 working, spec.max_subcircuit_qubits
             )
-        except Exception:
-            # if cutting fails, skip this candidate
+        except Exception as e:
+            # A candidate skipped here leaves no trace in the evaluation history
+            # or the rankings, so say why: silence here is what let a broken
+            # cutting integration look like "cutting simply was not selected".
+            log.warning(
+                "Skipping candidate: circuit cutting failed for "
+                "max_subcircuit_qubits=%s: %s",
+                spec.max_subcircuit_qubits,
+                e,
+            )
             return None
 
     compiled, m = _compile_cached(

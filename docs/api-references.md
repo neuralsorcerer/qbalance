@@ -48,7 +48,7 @@ Important validation rules:
 - `num_twirls >= 1`.
 - `zne_degree >= 0`; when `zne=True`, it must also be at least `1` and smaller than `len(zne_factors)`.
 - When `zne=True`, `zne_factors` must be non-empty, finite, sorted, all `>= 1.0`, and include `1.0`.
-- When `cutting=True`, `max_subcircuit_qubits` is required.
+- When `cutting=True`, `max_subcircuit_qubits` is required. Cutting is incomplete: `qbalance.cutting.find_cuts_best_effort` returns a circuit of QPD placeholder gates that no backend basis can express, and `qiskit-addon-cutting` rejects circuits carrying classical bits, so a `cutting=True` candidate is skipped (with the reason logged) rather than evaluated.
 - If `max_subcircuit_qubits` is provided, it must be an integer `>= 1`.
 - `resilience_level` must be `None`, `0`, `1`, or `2`.
 - Unknown fields are rejected. A misspelled key such as `optimisation_level` would otherwise be dropped silently, leaving a default strategy and a run that reports several visibly different entries as one identical configuration.

@@ -29,18 +29,21 @@ from tests.system_stubs import _Circ
 
 def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
 
-    cutting_mod = types.ModuleType("qiskit_addon_cutting.cutting")
-    cutting_mod.DeviceConstraints = lambda max_subcircuit_width: types.SimpleNamespace(
-        max_subcircuit_width=max_subcircuit_width
+    # Stub the real API surface: find_cuts, OptimizationParameters and
+    # DeviceConstraints live at the qiskit_addon_cutting package root, and the
+    # constraint is spelled qubits_per_subcircuit.
+    cutting_mod = types.ModuleType("qiskit_addon_cutting")
+    cutting_mod.DeviceConstraints = lambda qubits_per_subcircuit: types.SimpleNamespace(
+        qubits_per_subcircuit=qubits_per_subcircuit
     )
     cutting_mod.OptimizationParameters = lambda max_backjumps, max_gamma: (
         types.SimpleNamespace(max_backjumps=max_backjumps, max_gamma=max_gamma)
     )
     cutting_mod.find_cuts = lambda circuit, optimization, constraints: (
         circuit,
-        {"w": constraints.max_subcircuit_width},
+        {"w": constraints.qubits_per_subcircuit},
     )
-    monkeypatch.setitem(sys.modules, "qiskit_addon_cutting.cutting", cutting_mod)
+    monkeypatch.setitem(sys.modules, "qiskit_addon_cutting", cutting_mod)
 
     qc = _Circ()
     cut, meta = addon_cutting.find_cuts_best_effort(qc, max_subcircuit_qubits=1)
@@ -1699,3 +1702,91 @@ def test_save_compiled_writes_atomically_and_leaves_no_partials(tmp_path):
     with pytest.raises(Exception):
         save_compiled(entry2, object(), {"depth": 1})
     assert not entry2.dir.exists() or list(entry2.dir.iterdir()) == []
+
+
+def test_find_cuts_best_effort_uses_the_real_addon_api():
+    """Regression: the wrapper called qiskit-addon-cutting two ways it never had.
+
+    It imported from a ``qiskit_addon_cutting.cutting`` submodule that does not
+    exist and passed ``DeviceConstraints(max_subcircuit_width=...)`` instead of
+    ``qubits_per_subcircuit``.  Worse, the import error was reported as a missing
+    optional dependency, sending users to reinstall a package they already had.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+
+    from qbalance.cutting.addon_cutting import find_cuts_best_effort
+
+    circuit = QuantumCircuit(6)
+    circuit.h(0)
+    for control, target in [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (0, 5),
+        (1, 4),
+        (2, 5),
+    ]:
+        circuit.cx(control, target)
+
+    cut, meta = find_cuts_best_effort(circuit, max_subcircuit_qubits=3)
+
+    assert cut.num_qubits == circuit.num_qubits
+    assert isinstance(meta, dict)
+    assert "sampling_overhead" in meta
+    # Cutting must have actually replaced gates with QPD placeholders.
+    assert any(name.startswith("qpd") for name in cut.count_ops())
+
+
+def test_missing_cutting_dependency_is_reported_as_such(monkeypatch):
+    import builtins
+
+    from qbalance.cutting import addon_cutting
+    from qbalance.errors import OptionalDependencyError
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "qiskit_addon_cutting":
+            raise ImportError("no cutting addon")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    monkeypatch.delitem(sys.modules, "qiskit_addon_cutting", raising=False)
+
+    with pytest.raises(
+        OptionalDependencyError, match="qiskit-addon-cutting is required"
+    ):
+        addon_cutting.find_cuts_best_effort(object(), 3)
+
+
+def test_a_skipped_cutting_candidate_says_why(monkeypatch, caplog):
+    """Regression: a skipped candidate left no trace at all.
+
+    It is absent from evaluation_history and from the rankings, so a broken
+    cutting integration looked exactly like "cutting was simply not selected".
+    """
+    monkeypatch.setattr(
+        wl,
+        "find_cuts_best_effort",
+        lambda circuit, width: (_ for _ in ()).throw(RuntimeError("cannot cut")),
+    )
+
+    with caplog.at_level("WARNING", logger="qbalance.workflow.workload"):
+        metrics = wl._evaluate_candidate(
+            object(),
+            object(),
+            StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=3),
+            objective=default_objective(),
+            execute=False,
+            shots=10,
+            seed=0,
+            profile=False,
+            cache_root=None,
+        )
+
+    assert metrics is None
+    assert "cannot cut" in caplog.text
+    assert "Skipping candidate" in caplog.text

@@ -21,13 +21,15 @@ A strategy is represented by `qbalance.StrategySpec`. It is immutable and combin
 | `zne` | `bool` | `False` | Enables zero-noise extrapolation during execution workflows. |
 | `zne_factors` | `tuple[float, ...]` | `(1.0, 2.0, 3.0)` | Must be finite, sorted, include `1.0`, and be `>= 1.0` when `zne=True`. |
 | `zne_degree` | `int` | `1` | Must be non-negative generally and `1 <= degree < len(zne_factors)` when `zne=True`. |
-| `cutting` | `bool` | `False` | Enables best-effort circuit cutting before compilation. |
+| `cutting` | `bool` | `False` | Requests best-effort circuit cutting before compilation. See the note below: such candidates are currently always skipped. |
 | `max_subcircuit_qubits` | `int | None` | `None` | Required when `cutting=True`; if provided, must be `>= 1`. |
 | `resilience_level` | `int | None` | `None` | Optional IBM Runtime-style level; valid values are `0`, `1`, or `2`. Carried through to artifacts as metadata; the local compile/execute path does not apply it. |
 
 Boolean values are rejected for integer-like fields even though Python treats `bool` as a subclass of `int`.
 
 Unknown fields are rejected as well, so a misspelled key fails loudly instead of silently producing a default strategy.
+
+> **Cutting is incomplete.** `find_cuts` returns a circuit containing QPD placeholder gates (`qpd_1q`/`qpd_2q`). Executing them requires the full cutting workflow — partition the problem, generate subexperiments, run each, then reconstruct expectation values — which qbalance does not implement; it hands the cut circuit straight to compilation, and no backend basis can express a QPD gate. `qiskit-addon-cutting` also rejects circuits that carry classical bits, which every measured dataset circuit does. A `cutting=True` candidate is therefore skipped, with the reason logged, and takes no part in selection.
 
 ## Default candidate generation
 
