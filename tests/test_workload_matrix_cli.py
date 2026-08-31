@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import sys
 import types
@@ -1859,3 +1860,90 @@ def _without_compile_time(value):
     if isinstance(value, list):
         return [_without_compile_time(item) for item in value]
     return value
+
+
+def test_reporting_survives_a_workload_with_no_selections(tmp_path):
+    """Regression: summary() and covars() crashed on an empty workload.
+
+    ``adjust`` legitimately returns no selections for an empty dataset or an
+    empty ``split`` half, but the distance helpers reject empty samples, so
+    reporting raised "Input samples must be non-empty" from deep inside the
+    diagnostics -- and ``save`` failed after already writing results.json,
+    leaving a partial output directory.
+    """
+    pytest.importorskip("qiskit")
+
+    from qbalance.dataset import load_dataset, save_dataset
+
+    dataset_dir = tmp_path / "empty"
+    save_dataset(dataset_dir, [], overwrite=True)
+    assert len(load_dataset(dataset_dir)) == 0
+
+    balanced = (
+        wl.Workload.from_path(dataset_dir)
+        .set_target("fake:generic:5")
+        .adjust(cache_root=tmp_path / "cache")
+    )
+    assert balanced.selections == {}
+
+    summary = balanced.summary()
+    assert "circuits: 0" in summary
+    assert "dist[depth]: n/a" in summary
+    assert "dist[two_qubit_ops]: n/a" in summary
+
+    covars = balanced.covars()
+    assert set(covars) == {"depth", "two_qubit_ops", "estimated_error"}
+    assert all(math.isnan(value) for row in covars.values() for value in row.values())
+
+    out_dir = tmp_path / "out"
+    balanced.save(out_dir, overwrite=True)
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "dataset",
+        "results.json",
+        "summary.txt",
+    ]
+    assert wl.load_balanced_workload(out_dir).selections == {}
+
+
+def test_reporting_survives_an_empty_dataset_split(tmp_path):
+    pytest.importorskip("qiskit")
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import load_dataset, save_dataset
+
+    save_dataset(tmp_path / "full", _make_tiny(), overwrite=True)
+    train, test = load_dataset(tmp_path / "full").split(seed=0, frac_train=0.0)
+    assert len(train) == 0 and len(test) == 3
+
+    balanced = (
+        wl.Workload.from_dataset(train)
+        .set_target("fake:generic:5")
+        .adjust(cache_root=tmp_path / "cache")
+    )
+    balanced.save(tmp_path / "out", overwrite=True)
+    assert (tmp_path / "out" / "summary.txt").exists()
+
+
+def test_non_empty_workloads_still_report_numeric_distances(tmp_path):
+    pytest.importorskip("qiskit")
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    save_dataset(tmp_path / "ds", _make_tiny(), overwrite=True)
+    balanced = (
+        wl.Workload.from_path(tmp_path / "ds")
+        .set_target("fake:generic:5")
+        .adjust(max_candidates=4, seed=0, cache_root=tmp_path / "cache")
+    )
+
+    distance_lines = [
+        line for line in balanced.summary().splitlines() if "dist[" in line
+    ]
+    assert distance_lines
+    assert all("n/a" not in line for line in distance_lines)
+    assert all(
+        not math.isnan(value)
+        for row in balanced.covars().values()
+        for value in row.values()
+    )

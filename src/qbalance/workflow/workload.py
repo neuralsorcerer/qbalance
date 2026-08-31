@@ -117,6 +117,12 @@ class BalancedWorkload:
         for k in ["depth", "two_qubit_ops"]:
             x1 = [_finite_float_or_default(m.get(k), 0.0) for m in base_ms]
             x2 = [_finite_float_or_default(m.get(k), 0.0) for m in sel_ms]
+            if not x1 or not x2:
+                # A workload with no selections (an empty dataset, or an empty
+                # split) has nothing to compare; the distance helpers reject
+                # empty samples, and reporting must not fail on an empty run.
+                lines.append(f"  dist[{k}]: n/a (no comparable samples)")
+                continue
             lines.append(
                 f"  dist[{k}]: EMD={emd_1d(x1, x2):.4g}  CVM={cvm_1d(x1, x2):.4g}  KS={ks_1d(x1, x2):.4g}"
             )
@@ -287,6 +293,12 @@ class BalancedWorkload:
         for k in ["depth", "two_qubit_ops", "estimated_error"]:
             x1 = [_finite_float_or_default(m.get(k), 0.0) for m in base_ms]
             x2 = [_finite_float_or_default(m.get(k), 0.0) for m in sel_ms]
+            if not x1 or not x2:
+                # Match ``agg``: an empty sample set reports NaN rather than
+                # raising out of the distance helpers.
+                nan = float("nan")
+                out[k] = {"emd": nan, "cvm": nan, "ks": nan}
+                continue
             out[k] = {"emd": emd_1d(x1, x2), "cvm": cvm_1d(x1, x2), "ks": ks_1d(x1, x2)}
         return out
 
