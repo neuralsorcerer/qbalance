@@ -457,3 +457,41 @@ def test_resolve_backend_accepts_the_same_spacing_its_plugins_do():
 
     with pytest.raises(QBalanceError, match="Unknown backend kind"):
         resolve_backend("definitely_not_a_kind:1")
+
+
+def test_atomic_write_bytes_is_safe_under_concurrent_writers(tmp_path):
+    """Concurrent runs share one compile cache, so a torn file must be impossible.
+
+    Several writers race on the same destination; every observed value must be
+    one writer's complete payload, never a mixture, and no temporary file may
+    survive.
+    """
+    import threading
+
+    target = tmp_path / "entry.bin"
+    payloads = [bytes([index]) * 4096 for index in range(1, 9)]
+    observed: list[bytes] = []
+    barrier = threading.Barrier(len(payloads))
+    errors: list[BaseException] = []
+
+    def writer(payload):
+        try:
+            barrier.wait()
+            for _ in range(20):
+                atomic_write_bytes(target, payload)
+                if target.exists():
+                    observed.append(target.read_bytes())
+        except BaseException as exc:  # pragma: no cover - surfaced via assert
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(p,)) for p in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert observed
+    complete = set(payloads)
+    assert all(value in complete for value in observed)
+    assert [p.name for p in tmp_path.iterdir()] == ["entry.bin"]
