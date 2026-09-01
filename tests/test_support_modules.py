@@ -430,6 +430,50 @@ def test_atomic_write_bytes_retries_transient_replace_permission_errors(
     assert [p.name for p in tmp_path.iterdir()] == ["payload.bin"]
 
 
+def test_atomic_write_bytes_serializes_replacements_of_the_same_path(
+    tmp_path, monkeypatch
+):
+    """Windows replacements must not race one another before retrying readers."""
+    import threading
+
+    target = tmp_path / "payload.bin"
+    real_replace = utils_module.os.replace
+    barrier = threading.Barrier(4)
+    state_lock = threading.Lock()
+    active_replacements = 0
+    most_active_replacements = 0
+
+    def observed_replace(src, dst):
+        nonlocal active_replacements, most_active_replacements
+        with state_lock:
+            active_replacements += 1
+            most_active_replacements = max(
+                most_active_replacements, active_replacements
+            )
+        try:
+            # Give another writer a chance to overlap if path locking regresses.
+            threading.Event().wait(0.005)
+            real_replace(src, dst)
+        finally:
+            with state_lock:
+                active_replacements -= 1
+
+    monkeypatch.setattr(utils_module.os, "replace", observed_replace)
+
+    def writer(payload):
+        barrier.wait()
+        atomic_write_bytes(target, payload)
+
+    threads = [threading.Thread(target=writer, args=(bytes([i]),)) for i in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert most_active_replacements == 1
+    assert target.read_bytes() in {bytes([i]) for i in range(4)}
+
+
 def test_dump_json_is_atomic(tmp_path, monkeypatch):
     """Regression: a half-written meta.json used to abort every later run."""
     target = tmp_path / "meta.json"

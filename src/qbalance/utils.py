@@ -10,12 +10,24 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
 import time
 from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, cast
 
 from platformdirs import user_cache_dir
+
+
+# Concurrent replacements of the same destination can deny one another access
+# on Windows.  A fixed set of locks avoids an unbounded path-to-lock registry;
+# unrelated paths only serialize in the uncommon event of a hash collision.
+_ATOMIC_WRITE_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
+def _atomic_write_lock(path: Path) -> threading.Lock:
+    normalized_path = os.path.normcase(os.path.abspath(path))
+    return _ATOMIC_WRITE_LOCKS[hash(normalized_path) % len(_ATOMIC_WRITE_LOCKS)]
 
 
 def validate_integral(
@@ -104,30 +116,29 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     Raises:
         OSError: If the temporary file cannot be written or renamed.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, tmp_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(handle, "wb") as stream:
-            stream.write(data)
-        # Windows can temporarily deny a replacement while another thread (or
-        # process) has the destination open for reading.  Retrying the same
-        # completed temporary file preserves atomicity while allowing that
-        # short-lived handle to close.  A persistent permissions problem is
-        # still reported to the caller after the bounded retry period.
-        for attempt in range(8):
-            try:
-                os.replace(tmp_path, path)
-                break
-            except PermissionError:
-                if attempt == 7:
-                    raise
-                time.sleep(min(0.001 * (2**attempt), 0.05))
-    except BaseException:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    with _atomic_write_lock(path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle, tmp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(handle, "wb") as stream:
+                stream.write(data)
+            # A reader or another process can still hold the destination open
+            # briefly on Windows.  Retry the same completed temporary file so
+            # the replacement remains atomic.
+            for attempt in range(8):
+                try:
+                    os.replace(tmp_path, path)
+                    break
+                except PermissionError:
+                    if attempt == 7:
+                        raise
+                    time.sleep(min(0.001 * (2**attempt), 0.05))
+        except BaseException:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
 
 def dump_json(path: Path, obj: Dict[str, Any]) -> None:
