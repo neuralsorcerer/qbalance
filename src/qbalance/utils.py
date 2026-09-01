@@ -18,7 +18,6 @@ from typing import Any, Dict, cast
 
 from platformdirs import user_cache_dir
 
-
 # Concurrent replacements of the same destination can deny one another access
 # on Windows.  A fixed set of locks avoids an unbounded path-to-lock registry;
 # unrelated paths only serialize in the uncommon event of a hash collision.
