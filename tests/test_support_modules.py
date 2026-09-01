@@ -405,6 +405,31 @@ def test_atomic_write_bytes_keeps_the_previous_file_on_failure(tmp_path, monkeyp
     assert [p.name for p in tmp_path.iterdir()] == ["payload.bin"]
 
 
+def test_atomic_write_bytes_retries_transient_replace_permission_errors(
+    tmp_path, monkeypatch
+):
+    """Windows may briefly lock a destination while another reader closes it."""
+    target = tmp_path / "payload.bin"
+    real_replace = utils_module.os.replace
+    attempts = 0
+
+    def intermittently_locked(src, dst):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise PermissionError("destination is temporarily locked")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(utils_module.os, "replace", intermittently_locked)
+    monkeypatch.setattr(utils_module.time, "sleep", lambda _delay: None)
+
+    atomic_write_bytes(target, b"complete payload")
+
+    assert attempts == 3
+    assert target.read_bytes() == b"complete payload"
+    assert [p.name for p in tmp_path.iterdir()] == ["payload.bin"]
+
+
 def test_dump_json_is_atomic(tmp_path, monkeypatch):
     """Regression: a half-written meta.json used to abort every later run."""
     target = tmp_path / "meta.json"

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, cast
@@ -111,7 +112,19 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(handle, "wb") as stream:
             stream.write(data)
-        os.replace(tmp_path, path)
+        # Windows can temporarily deny a replacement while another thread (or
+        # process) has the destination open for reading.  Retrying the same
+        # completed temporary file preserves atomicity while allowing that
+        # short-lived handle to close.  A persistent permissions problem is
+        # still reported to the caller after the bounded retry period.
+        for attempt in range(8):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(min(0.001 * (2**attempt), 0.05))
     except BaseException:
         tmp_path.unlink(missing_ok=True)
         raise
