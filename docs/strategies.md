@@ -7,7 +7,7 @@ A strategy is represented by `qbalance.StrategySpec`. It is immutable and combin
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `optimization_level` | `int` | `1` | Qiskit preset optimization level, `0..3`. |
-| `layout_method` | `str | None` | `None` | Qiskit layout method or `"qbalance_noise_aware"`. |
+| `layout_method` | `str | None` | `None` | Qiskit layout method or `"qbalance_noise_aware"`. See the note below before using the noise-aware layout on sparse hardware. |
 | `routing_method` | `str | None` | `None` | Qiskit routing method, commonly `"sabre"`. |
 | `translation_method` | `str | None` | `None` | Qiskit translation method. |
 | `seed_transpiler` | `int | None` | `0` | Transpiler seed. |
@@ -28,6 +28,8 @@ A strategy is represented by `qbalance.StrategySpec`. It is immutable and combin
 Boolean values are rejected for integer-like fields even though Python treats `bool` as a subclass of `int`.
 
 Unknown fields are rejected as well, so a misspelled key fails loudly instead of silently producing a default strategy.
+
+> **`qbalance_noise_aware` ignores connectivity.** The layout ranks physical qubits by calibration quality alone (readout error, T1, T2) and assigns the busiest logical qubits to the best-scoring ones, without consulting the coupling map. On a well-connected device that is roughly neutral (depth 63 vs 61 on an all-to-all 20-qubit backend), but on sparse hardware the chosen qubits are typically not adjacent — on a 127-qubit heavy-hex snapshot it selected eight qubits with no adjacent pair at all — so routing has to bridge them with swaps: depth 594 vs 72 and 442 vs 66 two-qubit gates against the default layout. Candidate search correctly rejects such candidates on the objective, but prefer a Qiskit layout method when targeting sparse devices.
 
 > **Cutting is incomplete.** `find_cuts` returns a circuit containing QPD placeholder gates (`qpd_1q`/`qpd_2q`). Executing them requires the full cutting workflow — partition the problem, generate subexperiments, run each, then reconstruct expectation values — which qbalance does not implement; it hands the cut circuit straight to compilation, and no backend basis can express a QPD gate. `qiskit-addon-cutting` also rejects circuits that carry classical bits, which every measured dataset circuit does. A `cutting=True` candidate is therefore skipped, with the reason logged, and takes no part in selection.
 

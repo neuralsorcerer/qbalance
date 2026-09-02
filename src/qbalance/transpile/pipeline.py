@@ -263,11 +263,15 @@ def compile_one(
     best = None
     best_metrics = None
 
+    # Only the noise-aware layout varies per twirled circuit; every other
+    # strategy yields the same pass manager, and building one for a large
+    # backend is not free, so build it once for the whole ensemble.
+    uses_noise_aware_layout = spec.layout_method == NOISE_AWARE_LAYOUT
+    shared_pm = None if uses_noise_aware_layout else _generate_pm(backend, spec)
+
     for tw in twirled_ensemble:
-        # Noise-aware layout is computed per circuit and handed to the pass
-        # manager as an initial layout, so build the pass manager only once.
-        initial_layout = None
-        if spec.layout_method == NOISE_AWARE_LAYOUT:
+        if uses_noise_aware_layout:
+            initial_layout = None
             try:
                 initial_layout = noise_aware_initial_layout(backend, tw)
             except Exception as e:
@@ -275,8 +279,9 @@ def compile_one(
                     "Noise-aware layout failed (continuing with the default layout): %s",
                     e,
                 )
-                initial_layout = None
-        pm = _generate_pm(backend, spec, initial_layout=initial_layout)
+            pm = _generate_pm(backend, spec, initial_layout=initial_layout)
+        else:
+            pm = shared_pm
 
         cb = make_callback(profile_report) if profile else None
         t0 = time.time()

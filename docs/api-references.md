@@ -51,6 +51,7 @@ Important validation rules:
 - When `cutting=True`, `max_subcircuit_qubits` is required. Cutting is incomplete: `qbalance.cutting.find_cuts_best_effort` returns a circuit of QPD placeholder gates that no backend basis can express, and `qiskit-addon-cutting` rejects circuits carrying classical bits, so a `cutting=True` candidate is skipped (with the reason logged) rather than evaluated.
 - If `max_subcircuit_qubits` is provided, it must be an integer `>= 1`.
 - `resilience_level` must be `None`, `0`, `1`, or `2`.
+- `layout_method="qbalance_noise_aware"` ranks physical qubits by calibration quality only and does not consult the coupling map, so on sparse hardware the qubits it picks are usually not adjacent and routing inflates the circuit substantially. Prefer a Qiskit layout method for sparse devices.
 - Unknown fields are rejected. A misspelled key such as `optimisation_level` would otherwise be dropped silently, leaving a default strategy and a run that reports several visibly different entries as one identical configuration.
 
 ### `load_strategy_specs(path: Path | str) -> list[StrategySpec]`

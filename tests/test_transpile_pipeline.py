@@ -627,3 +627,67 @@ def _repeated_measurement_circuit():
     qc.measure(0, 0)
     qc.measure(0, 1)
     return qc
+
+
+def test_twirled_ensembles_reuse_one_pass_manager(monkeypatch):
+    """Building a preset pass manager for a large backend is not free.
+
+    Only the noise-aware layout varies per twirled circuit, so an eight-twirl
+    strategy must build one pass manager, not eight identical ones.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=5, seed=2)
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+
+    builds = []
+    real_generate = pipeline._generate_pm
+
+    def counting(backend_arg, spec_arg, initial_layout=None):
+        builds.append(initial_layout)
+        return real_generate(backend_arg, spec_arg, initial_layout=initial_layout)
+
+    monkeypatch.setattr(pipeline, "_generate_pm", counting)
+
+    _, metrics = pipeline.compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(
+            optimization_level=1,
+            routing_method="sabre",
+            pauli_twirling=True,
+            num_twirls=8,
+        ),
+        profile=False,
+    )
+    assert len(builds) == 1
+    assert metrics["depth"] > 0
+
+    # The noise-aware layout is per circuit, so it must still rebuild each time.
+    builds.clear()
+    ensemble = []
+
+    def capture(circuit, num_twirls, seed, target):
+        ensemble.extend([circuit] * num_twirls)
+        return list(ensemble)
+
+    monkeypatch.setattr(pipeline, "apply_pauli_twirling", capture)
+    pipeline.compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(
+            optimization_level=1,
+            routing_method="sabre",
+            layout_method=pipeline.NOISE_AWARE_LAYOUT,
+            pauli_twirling=True,
+            num_twirls=4,
+        ),
+        profile=False,
+    )
+    assert len(builds) == 4
