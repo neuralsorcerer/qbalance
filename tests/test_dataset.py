@@ -797,3 +797,51 @@ def test_save_dataset_bounds_long_circuit_names(tmp_path):
     reloaded = load_dataset(tmp_path / "ds")
     assert reloaded.names() == ds.names()
     assert len(reloaded.load_circuits()) == len(circuits)
+
+
+def test_load_circuits_names_the_record_behind_an_unreadable_artifact(tmp_path):
+    """A corrupt artifact should say which record it belongs to.
+
+    Every other failure this loader can hit -- missing artifact, unsafe path,
+    unsupported format -- names the offending record, but a truncated or
+    corrupt QPY file surfaced a bare struct error with no clue which file was
+    at fault. Interrupted copies and partially extracted bundles make that a
+    realistic way to meet a dataset.
+    """
+    from qiskit import QuantumCircuit
+
+    circuits = []
+    for name in ("first", "second", "third"):
+        qc = QuantumCircuit(1, 1, name=name)
+        qc.h(0)
+        qc.measure(0, 0)
+        circuits.append(qc)
+    save_dataset(tmp_path / "ds", circuits, overwrite=True)
+
+    artifact = tmp_path / "ds" / "second.qpy"
+    healthy = artifact.read_bytes()
+
+    for payload in (b"", healthy[:20], b"NOTQPY" + b"\x00" * 64):
+        artifact.write_bytes(payload)
+        with pytest.raises(ValueError) as excinfo:
+            load_dataset(tmp_path / "ds").load_circuits()
+        message = str(excinfo.value)
+        assert "index 1" in message
+        assert "'second'" in message
+        assert "second.qpy" in message
+
+    artifact.write_bytes(healthy)
+    assert len(load_dataset(tmp_path / "ds").load_circuits()) == 3
+
+
+def test_load_circuits_still_rejects_an_unknown_format(tmp_path):
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.h(0)
+    qc.measure(0, 0)
+    dataset = save_dataset(tmp_path / "ds", [qc], overwrite=True)
+    dataset.records[0].format = "exe"
+
+    with pytest.raises(ValueError, match="Unknown circuit format"):
+        dataset.load_circuits()

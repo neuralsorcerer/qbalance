@@ -139,18 +139,31 @@ class CircuitDataset:
             raise OptionalDependencyError("qiskit is required to load circuits") from e
 
         circuits: List[Any] = []
-        for rec in self.records:
+        for index, rec in enumerate(self.records):
             path = self.root / rec.artifact
-            if rec.format == "qpy":
-                with path.open("rb") as f:
-                    loaded = qpy.load(f)
-                if not loaded:
-                    raise ValueError(f"Empty QPY file: {path}")
-                circuits.append(loaded[0])
-            elif rec.format == "qasm":
-                circuits.append(QuantumCircuit.from_qasm_file(str(path)))
-            else:
+            if rec.format not in ("qpy", "qasm"):
                 raise ValueError(f"Unknown circuit format: {rec.format}")
+
+            # A truncated or corrupt artifact (an interrupted copy, a partially
+            # extracted bundle) otherwise surfaces as a bare struct error with
+            # no clue which file is at fault, while every other failure this
+            # loader can hit names the offending record.
+            try:
+                if rec.format == "qpy":
+                    with path.open("rb") as f:
+                        loaded = qpy.load(f)
+                    if not loaded:
+                        raise ValueError(f"Empty QPY file: {path}")
+                    circuits.append(loaded[0])
+                else:
+                    circuits.append(QuantumCircuit.from_qasm_file(str(path)))
+            except ValueError:
+                raise
+            except Exception as e:
+                raise ValueError(
+                    f"Record at index {index} ({rec.name!r}) has an unreadable "
+                    f"{rec.format} artifact {rec.artifact!r}: {e}"
+                ) from e
         return circuits
 
     def split(
