@@ -205,11 +205,11 @@ Built-in entry points include:
 - `fake`: `fake:generic:<num_qubits>` (optionally `fake:generic:<num_qubits>:<calibration_seed>`; calibration data is seeded deterministically, seed 0 by default) and `fake:ibm:<name>` device snapshots via `qiskit-ibm-runtime` where available.
 - `aer`: qiskit-aer backends when the `aer` extra is installed.
 
-Third-party packages can register `qbalance.backends` entry points. `qbalance plugins list` shows discovered plugin groups.
+Third-party packages can register `qbalance.backends` entry points, and those are loaded and used: registering `mock` makes `mock:5` resolvable wherever a backend spec is accepted. `qbalance plugins list` shows discovered registrations for all three groups, but only this one is resolved at runtime — the `qbalance.objectives` and `qbalance.reports` groups are inventory only, so a registration there is listed and cannot yet be invoked.
 
 ## Reports
 
 - `qbalance.reports.markdown.render_markdown(matrix_json, out_dir) -> Path`
 - `qbalance.reports.html.render_html(matrix_json, out_dir) -> Path`
 
-Markdown reports require only base dependencies. HTML reports require the optional report dependencies.
+Markdown reports require only base dependencies. HTML reports require the optional report dependencies. Both renderers are called directly; the `qbalance.reports` entry-point group is not consulted when choosing one.

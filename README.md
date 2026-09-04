@@ -510,9 +510,16 @@ python -m qbalance compile ./circuits \
 
 Entry-point groups:
 
-- `qbalance.backends`
-- `qbalance.objectives`
-- `qbalance.reports`
+- `qbalance.backends` — **resolved at runtime.** A third-party package that registers
+  here extends backend spec strings: register `mock` and `-b mock:5` resolves through
+  your loader everywhere a backend spec is accepted.
+- `qbalance.objectives` — inventory only.
+- `qbalance.reports` — inventory only.
+
+Only the backend group is loaded. Nothing resolves an objective or a report by plugin
+name today: objectives come from `default_objective()` or `load_objective(path)`, and
+`qbalance report` calls the markdown and HTML renderers directly. Registrations in
+those two groups appear in `plugins list` but cannot yet be invoked.
 
 Inspect active registrations with:
 

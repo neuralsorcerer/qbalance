@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import sys
 import types
 
@@ -564,3 +565,41 @@ def test_atomic_write_bytes_is_safe_under_concurrent_writers(tmp_path):
     complete = set(payloads)
     assert all(value in complete for value in observed)
     assert [p.name for p in tmp_path.iterdir()] == ["entry.bin"]
+
+
+def test_only_the_backend_entry_point_group_is_resolved(monkeypatch):
+    """Pin which plugin groups actually extend behavior.
+
+    ``plugins list`` reports three entry-point groups, but only
+    ``qbalance.backends`` is loaded: a registration there becomes a usable
+    backend spec, while the objectives and reports groups are inventory that
+    nothing resolves by name. The docs say so, so a test should notice if that
+    ever changes in either direction.
+    """
+    from qbalance.backends import resolver as backend_resolver
+
+    listed = plugins.list_plugins()
+    assert set(listed) == {
+        "qbalance.backends",
+        "qbalance.objectives",
+        "qbalance.reports",
+    }
+
+    # A backend registration is loaded and drives spec resolution.
+    sentinel = object()
+    monkeypatch.setattr(backend_resolver, "_PLUGINS", None)
+    monkeypatch.setattr(
+        backend_resolver,
+        "_load_backend_plugins",
+        lambda: {"mock": lambda spec: (sentinel, spec)},
+    )
+    assert backend_resolver.resolve_backend("mock:5") == (sentinel, "mock:5")
+
+    # Nothing in the package loads the other two groups.
+    source_root = pathlib.Path(backend_resolver.__file__).resolve().parents[1]
+    loaders = [
+        path
+        for path in source_root.rglob("*.py")
+        if ".load()" in path.read_text(encoding="utf-8")
+    ]
+    assert [p.name for p in loaders] == ["resolver.py"]
