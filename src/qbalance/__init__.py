@@ -4,6 +4,10 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _installed_version
+
+from qbalance._version import __version__ as _fallback_version
 from qbalance.dataset import CircuitDataset, load_data, load_dataset, save_dataset
 from qbalance.objectives import Objective, default_objective, load_objective
 from qbalance.strategies import (
@@ -18,7 +22,16 @@ from qbalance.workflow.workload import (
     load_balanced_workload,
 )
 
+try:
+    # Prefer the installed distribution metadata, which is authoritative for
+    # the environment actually in use; _version.py is the in-tree fallback for
+    # running straight from a source checkout.
+    __version__ = _installed_version("qbalance")
+except PackageNotFoundError:  # pragma: no cover - only without an install
+    __version__ = _fallback_version
+
 __all__ = [
+    "__version__",
     "CircuitDataset",
     "load_dataset",
     "save_dataset",

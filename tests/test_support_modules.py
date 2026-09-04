@@ -603,3 +603,30 @@ def test_only_the_backend_entry_point_group_is_resolved(monkeypatch):
         if ".load()" in path.read_text(encoding="utf-8")
     ]
     assert [p.name for p in loaders] == ["resolver.py"]
+
+
+def test_package_exposes_a_version_consistent_with_its_metadata():
+    """Regression: qbalance.__version__ did not exist.
+
+    ``_version.py`` was written to hold it but nothing imported the module, so
+    the near-universal ``package.__version__`` convention was unavailable and
+    the file was dead. The assertions also catch the version in
+    ``_version.py`` drifting from the one ``pyproject.toml`` ships, which
+    nothing else enforces.
+    """
+    import qbalance
+    from qbalance._version import __version__ as in_tree_version
+
+    assert hasattr(qbalance, "__version__")
+    assert "__version__" in qbalance.__all__
+    assert qbalance.__version__ == in_tree_version
+
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as installed_version
+
+    try:
+        distribution_version = installed_version("qbalance")
+    except PackageNotFoundError:  # pragma: no cover - source checkout only
+        pytest.skip("qbalance is not installed in this environment")
+    assert qbalance.__version__ == distribution_version
+    assert in_tree_version == distribution_version
