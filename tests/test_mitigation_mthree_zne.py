@@ -70,25 +70,25 @@ def test_mthree_and_zne(monkeypatch):
     assert "00 1" in spaced
     assert pytest.approx(sum(spaced.values())) == 1.0
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must have same length"):
         zne.zne_extrapolate_counts([1.0], [{"0": 1}, {"1": 1}])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="factors must be finite"):
         zne.zne_extrapolate_counts([1.0, float("nan")], [{"0": 1}, {"0": 1}])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="distinct values"):
         zne.zne_extrapolate_counts([1.0, 1.0], [{"0": 1}, {"0": 1}], degree=1)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="factors must be >= 1.0"):
         zne.zne_extrapolate_counts([0.5, 1.0], [{"0": 1}, {"0": 1}])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-negative integer"):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"0": 1}, {"0": 1}], degree=-1)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-negative integers"):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"0": -1}, {"0": 1}])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-empty mappings"):
         zne.zne_extrapolate_counts([1.0, 2.0], [{}, {"0": 1}])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-negative integer"):
         zne.zne_extrapolate_counts([1.0], [{"0": 1}], degree=True)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least one shot"):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"0": 0}, {"0": 1}])
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="only binary digits"):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"0x0": 1}, {"0": 1}])
 
 
@@ -117,7 +117,7 @@ def test_fold_global_rejects_invalid_scale_and_nonterminal_measurement():
     qc.h(0)
 
     for bad_scale in (0.5, float("nan"), float("inf"), True, "bad"):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="finite real value"):
             zne.fold_global(qc, bad_scale)  # type: ignore[arg-type]
 
     measured = QuantumCircuit(1, 1)
@@ -125,7 +125,7 @@ def test_fold_global_rejects_invalid_scale_and_nonterminal_measurement():
     measured.measure(0, 0)
     measured.x(0)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="all measurements are terminal"):
         zne.fold_global(measured, 3.0)
 
 
