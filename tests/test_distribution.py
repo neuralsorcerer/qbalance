@@ -322,3 +322,27 @@ def test_distance_metrics_stay_exact_at_subnormal_magnitudes():
     assert emd_1d(x1, x2) == pytest.approx(2e-300, rel=1e-12, abs=0.0)
     assert cvm_1d(x1, x2) == pytest.approx(1.5e-300, rel=1e-12, abs=0.0)
     assert ks_1d(x1, x2) == pytest.approx(1.0, rel=1e-12, abs=0.0)
+
+
+def test_integrate_piecewise_constant_allows_a_flat_grid_segment():
+    """ "Non-decreasing" admits repeated grid points, which contribute nothing.
+
+    Only a decreasing grid is an error.  Rejecting a zero-width interval too
+    would turn a legitimate duplicate support point into a hard failure, and
+    the existing test only covers the decreasing case.
+    """
+    values = np.array([1.0, 2.0, 3.0])
+    grid = np.array([0.0, 1.0, 1.0])
+
+    # 1.0 over [0, 1], then 2.0 over a zero-width interval.
+    assert distribution._integrate_piecewise_constant(values, grid) == pytest.approx(
+        1.0, rel=1e-12, abs=0.0
+    )
+
+    # A wholly flat grid encloses no area at all.
+    assert (
+        distribution._integrate_piecewise_constant(
+            np.array([1.0, 2.0]), np.array([5.0, 5.0])
+        )
+        == 0.0
+    )
