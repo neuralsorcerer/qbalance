@@ -16,6 +16,9 @@ from qbalance.logging import get_logger
 
 log = get_logger(__name__)
 
+# Names accepted by get_builtin_dataset_dir; each becomes a path component.
+_BUILTIN_DATASETS = frozenset({"tiny"})
+
 
 def _make_tiny() -> List[Any]:
     """Internal helper that make tiny.
@@ -70,15 +73,17 @@ def get_builtin_dataset_dir(name: str) -> Path:
     Raises:
         KeyError: Raised when input validation fails or a dependent operation cannot be completed.
     """
+    # Validate before the name reaches the filesystem.  It is joined straight
+    # into a path, so "/abs" would discard the data directory entirely and
+    # "../.." would climb out of it -- and mkdir(parents=True) ran before the
+    # name was ever checked, creating those directories on the way to raising.
+    if name not in _BUILTIN_DATASETS:
+        raise KeyError(f"Unknown built-in dataset: {name}")
+
     root = Path(user_data_dir("qbalance")) / "datasets" / name
     if (root / "qbalance_dataset.json").exists():
         return root
     root.parent.mkdir(parents=True, exist_ok=True)
 
-    if name == "tiny":
-        circuits = _make_tiny()
-    else:
-        raise KeyError(f"Unknown built-in dataset: {name}")
-
-    save_dataset(root, circuits, overwrite=True)
+    save_dataset(root, _make_tiny(), overwrite=True)
     return root

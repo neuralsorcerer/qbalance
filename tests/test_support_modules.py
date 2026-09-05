@@ -720,3 +720,34 @@ def test_default_cache_dir_does_not_duplicate_the_app_name(monkeypatch):
     assert utils_module.default_cache_dir("qbalance") == pathlib.Path(
         "/base/Caches/qbalance"
     )
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../escaped", "..", "/absolute/path", "nested/name", "", "tiny/../other"],
+)
+def test_builtin_dataset_name_is_validated_before_touching_the_filesystem(
+    tmp_path, monkeypatch, name
+):
+    """An unknown name must not create anything on the way to being rejected.
+
+    The name is joined straight into a path, so "/abs" discards the data
+    directory entirely and ".." climbs out of it.  The rejection used to come
+    *after* mkdir(parents=True), so those directories were created first and
+    only then did the KeyError arrive.
+    """
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    monkeypatch.setattr(builtin_data, "user_data_dir", lambda app: str(data_root))
+
+    def _must_not_save(*args, **kwargs):
+
+        raise AssertionError("save_dataset must not run for an unknown dataset")
+
+    monkeypatch.setattr(builtin_data, "save_dataset", _must_not_save)
+
+    with pytest.raises(KeyError, match="Unknown built-in dataset"):
+        builtin_data.get_builtin_dataset_dir(name)
+
+    # Nothing anywhere under tmp_path gained a directory.
+    assert [p for p in tmp_path.rglob("*") if p.is_dir()] == [data_root]
