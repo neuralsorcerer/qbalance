@@ -79,7 +79,11 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
             )
         model.append({"backend": backend, "rows": rows})
 
-    tpl = Template("""<!doctype html>
+    # Backend names and strategy keys come from the matrix file, which is data
+    # the report's reader did not necessarily write.  Without autoescape those
+    # land in the document as live markup.
+    tpl = Template(
+        """<!doctype html>
 <html>
 <head>
 <meta charset="utf-8"/>
@@ -115,7 +119,9 @@ code { background: #f3f3f3; padding: 1px 4px; border-radius: 4px; }
 </table>
 {% endfor %}
 </body>
-</html>""")
+</html>""",
+        autoescape=True,
+    )
     html = tpl.render(model=model, matrix_name=Path(matrix_json).name)
     out = out_dir / "report.html"
     out.write_text(html, encoding="utf-8")

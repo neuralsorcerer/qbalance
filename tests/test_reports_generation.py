@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 import types
 
@@ -43,9 +44,12 @@ def test_reports_generation(tmp_path, monkeypatch):
     jinja2 = types.ModuleType("jinja2")
 
     class Tpl:
-        def __init__(self, text):
+        def __init__(self, text, autoescape=False):
 
             self.text = text
+            # render_html must ask for autoescaping; the real Template
+            # defaults to off, which would emit the matrix file as markup.
+            assert autoescape is True
 
         def render(self, **kwargs):
 
@@ -234,3 +238,77 @@ def test_strategy_key_labels_zne_factors_only_when_they_differ():
         for value in (None, [], ())
     }
     assert empty_labels == {"opt1,zne,zf="}
+
+
+def _matrix_with(tmp_path, backend, strategy):
+    """Write a one-row matrix file and return its path."""
+    path = tmp_path / "matrix.json"
+    path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "backend": backend,
+                        "strategy": strategy,
+                        "metrics": {
+                            "depth": 3,
+                            "two_qubit_ops": 1,
+                            "estimated_error": 0.01,
+                            "compile_time_s": 0.1,
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_html_report_escapes_markup_from_the_matrix_file(tmp_path):
+    """A matrix file is data, not markup.
+
+    Backend names and the spec fields strategy keys are built from are
+    free-form strings, and a report is often generated from someone else's
+    matrix file -- a CI artifact, a shared benchmark.  Interpolating them raw
+    puts live markup into a document the reader opens in a browser.
+    """
+    matrix = _matrix_with(
+        tmp_path,
+        "<img src=x onerror=alert(1)>",
+        {"optimization_level": 1, "layout_method": "<script>alert('x')</script>"},
+    )
+
+    out = report_html.render_html(matrix, tmp_path / "out")
+    rendered = out.read_text(encoding="utf-8")
+
+    assert "<script>alert" not in rendered
+    assert "<img src=x onerror" not in rendered
+    # The text is still shown, just inert.
+    assert "&lt;script&gt;" in rendered
+    assert "&lt;img src=x onerror=alert(1)&gt;" in rendered
+
+
+def test_markdown_report_keeps_a_pipe_inside_one_cell(tmp_path):
+    """An unescaped pipe would split the row and misalign the table."""
+    matrix = _matrix_with(
+        tmp_path, "bk", {"optimization_level": 1, "layout_method": "a|b"}
+    )
+
+    out = report_md.render_markdown(matrix, tmp_path / "out")
+    rows = [
+        line
+        for line in out.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `")
+    ]
+
+    assert len(rows) == 1
+    # Split on unescaped pipes only, the way a table parser does.
+    cells = re.split(r"(?<!\\)\|", rows[0].strip())
+    assert [c for c in cells if c.strip()] == [
+        " `opt1,layout=a\\|b` ",
+        " 3 ",
+        " 1 ",
+        " 0.01 ",
+        " 0.1 ",
+    ]

@@ -18,6 +18,15 @@ from qbalance.reports.common import (
 )
 
 
+def _table_cell(value: str) -> str:
+    """Escape a value so it stays inside its own markdown table cell.
+
+    Strategy keys are built from free-form spec fields, so an unescaped pipe
+    splits the row into an extra column and misaligns the whole table.
+    """
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+
 def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
     """Render markdown used by the qbalance workflow.
 
@@ -65,7 +74,7 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
         )
         for sk, agg in items:
             lines.append(
-                f"| `{sk}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} |"
+                f"| `{_table_cell(sk)}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} |"
             )
         lines.append("")
     out = out_dir / "report.md"
