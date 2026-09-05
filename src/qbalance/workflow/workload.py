@@ -34,6 +34,7 @@ from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
 from qbalance.utils import (
+    atomic_write_bytes,
     backend_display_name,
     bit_index,
     instruction_parts,
@@ -368,8 +369,10 @@ class BalancedWorkload:
                 for name, strategies in self.evaluation_history.items()
             },
         }
-        (out_dir / "results.json").write_text(
-            json.dumps(results, indent=2), encoding="utf-8"
+        # Read back by load_balanced_workload, so a partial write must not be
+        # left behind for the next run to choke on.
+        atomic_write_bytes(
+            out_dir / "results.json", json.dumps(results, indent=2).encode("utf-8")
         )
         (out_dir / "summary.txt").write_text(self.summary() + "\n", encoding="utf-8")
 

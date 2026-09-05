@@ -2595,3 +2595,45 @@ def test_to_download_cleanup_does_not_mask_the_original_failure(tmp_path, monkey
 
     with pytest.raises(RuntimeError, match="archive failed"):
         balanced.to_download(tmp_path / "out.zip")
+
+
+def test_matrix_output_is_written_atomically(tmp_path, monkeypatch):
+    """A failed write must not destroy the previous results file.
+
+    The matrix runs compiles (and optionally executions) across every backend
+    x circuit x strategy before writing anything, and the file it produces is
+    read back by ``qbalance report``.  A plain write truncates the destination
+    the moment it opens, so an interrupted write loses the old results and
+    leaves a partial file the next step rejects.
+    """
+    dsroot = tmp_path / "ds_atomic"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    monkeypatch.setattr(dataset, "load_circuits", lambda: [object()])
+
+    monkeypatch.setattr(matrix_mod, "load_dataset", lambda d: dataset)
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_one",
+        lambda qc, backend, spec, profile: (qc, {"depth": 1.0}),
+    )
+
+    out_json = tmp_path / "matrix.json"
+    out_json.write_text("previous results", encoding="utf-8")
+
+    import qbalance.utils as utils_mod
+
+    def _failing_replace(src, dst):
+
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(utils_mod.os, "replace", _failing_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        matrix_mod.run_matrix(dsroot, ["b"], [StrategySpec()], out_json)
+
+    # The previous file is untouched and no partial artifact is left beside it.
+    assert out_json.read_text(encoding="utf-8") == "previous results"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ds_atomic", "matrix.json"]

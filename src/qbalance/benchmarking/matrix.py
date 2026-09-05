@@ -19,7 +19,7 @@ from qbalance.mitigation.zne import fold_global_for_backend, zne_extrapolate_cou
 from qbalance.strategies import StrategySpec
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
-from qbalance.utils import validate_integral
+from qbalance.utils import atomic_write_bytes, validate_integral
 
 log = get_logger(__name__)
 
@@ -146,5 +146,7 @@ def run_matrix(
         },
         "results": [asdict(r) for r in results],
     }
-    out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    # Read back by `qbalance report`, and written at the end of a run that
+    # may have taken hours; a truncated file fails the next step outright.
+    atomic_write_bytes(out_json, json.dumps(payload, indent=2).encode("utf-8"))
     return out_json
