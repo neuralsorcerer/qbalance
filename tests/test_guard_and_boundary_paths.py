@@ -271,3 +271,48 @@ def test_zne_extrapolate_rejects_a_non_integer_degree():
     for bad in (True, 1.5, "1"):
         with pytest.raises(ValueError, match="non-negative integer"):
             zne_extrapolate_counts([1.0, 2.0], [{"0": 1}, {"0": 1}], degree=bad)
+
+
+def test_fold_global_rounds_the_scale_up_to_an_odd_factor():
+    """Global folding builds U (U-dagger U)^r, so the factor must be odd.
+
+    ``reps`` is ``(k - 1) // 2``.  An even ``k`` therefore folds one
+    repetition short -- k=2 collapses to no folding at all -- which scales the
+    noise by the wrong amount and quietly biases the extrapolation instead of
+    failing.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.mitigation.zne import fold_global
+
+    circuit = QuantumCircuit(1)
+    circuit.h(0)
+    circuit.t(0)
+    base_ops = len(circuit.data)
+
+    for scale, factor in ((2.0, 3), (3.0, 3), (4.0, 5)):
+        folded = fold_global(circuit, scale)
+        assert folded.name.endswith(f"_fold{factor}")
+        assert len(folded.data) == factor * base_ops
+
+    # scale 1.0 is a no-op and returns the circuit itself.
+    assert fold_global(circuit, 1.0) is circuit
+
+
+def test_rebase_skips_a_circuit_whose_width_differs_from_the_backend():
+    """Re-basing needs an identity layout, which needs matching widths.
+
+    ``initial_layout=range(circuit.num_qubits)`` only describes the backend
+    when the two agree, so a mismatch has to be left alone rather than
+    silently re-laid-out onto different physical qubits.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.mitigation.zne import _rebase_to_backend
+
+    backend = GenericBackendV2(num_qubits=5, seed=1)
+    narrow = QuantumCircuit(2)
+    narrow.h(0)
+
+    assert _rebase_to_backend(narrow, backend) is narrow

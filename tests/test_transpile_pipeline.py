@@ -255,6 +255,16 @@ def test_compile_one_dd_with_backendv2_target(caplog):
     assert metrics["dd_applied"] is True
     assert "DD insertion failed" not in caplog.text
 
+    # The same compile without the flag must report the metric as False;
+    # otherwise "dd_applied" says nothing about whether DD actually ran.
+    _, plain_metrics = pipeline.compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(dynamical_decoupling=False),
+        profile=False,
+    )
+    assert plain_metrics["dd_applied"] is False
+
 
 def test_dd_sequence_compatibility_helpers():
     class XGate:
