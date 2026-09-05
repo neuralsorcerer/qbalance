@@ -415,3 +415,28 @@ def test_compile_cmd_overwrite_refuses_to_delete_a_non_directory(tmp_path):
     run(out_dir, overwrite=False)
     run(out_dir, overwrite=True)
     assert (out_dir / "meta.json").exists()
+
+
+def test_cli_help_keeps_the_extra_name_in_install_hints():
+    """Rich markup must not eat the extra out of an install hint.
+
+    Typer renders option help as Rich markup, where ``[aer]`` and ``[report]``
+    parse as style tags and are deleted.  That silently turns "install
+    qbalance[aer]" into "install qbalance" -- removing the one piece of
+    information the hint exists to carry, and leaving an unbalanced paren.
+    """
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    runner = CliRunner()
+
+    def rendered(*args):
+
+        result = runner.invoke(app, list(args), env={"COLUMNS": "200"})
+        assert result.exit_code == 0
+        # Strip the box drawing and collapse the wrapping Rich applies.
+        return " ".join(result.output.replace("│", " ").split())
+
+    assert "qbalance[aer]" in rendered("adjust", "--help")
+    assert "qbalance[report]" in rendered("report", "--help")

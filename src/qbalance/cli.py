@@ -85,7 +85,7 @@ def adjust_cmd(
     execute: bool = typer.Option(
         False,
         "--execute",
-        help="Execute circuits (needs runnable backend or qbalance[aer])",
+        help="Execute circuits (needs runnable backend or qbalance\\[aer])",
     ),
     shots: int = typer.Option(1024, "--shots"),
     profile: bool = typer.Option(False, "--profile", help="Enable per-pass profiling"),
@@ -114,7 +114,7 @@ def adjust_cmd(
         pareto (default: typer.Option(False, '--pareto', help='Use Pareto-front selection')): Pareto value consumed by this routine.
         max_candidates (default: typer.Option(24, '--max-candidates')): Max candidates value consumed by this routine.
         strategies_json (default: None): Optional JSON file defining explicit candidate strategies.
-        execute (default: typer.Option(False, '--execute', help='Execute circuits (needs runnable backend or qbalance[aer])')): Whether to run compiled circuits and collect counts.
+        execute (default: typer.Option(False, '--execute', help='Execute circuits (needs runnable backend or qbalance\\[aer])')): Whether to run compiled circuits and collect counts.
         shots (default: typer.Option(1024, '--shots')): Number of shots used when executing circuits on a backend.
         profile (default: typer.Option(False, '--profile', help='Enable per-pass profiling')): Whether pass-level transpiler profiling is enabled.
         overwrite (default: typer.Option(False, '--overwrite')): Whether existing files/directories may be replaced.
@@ -233,7 +233,7 @@ def report_cmd(
     matrix_json: Path = typer.Argument(...),
     out: Path = typer.Option(..., "--out", "-o"),
     html: bool = typer.Option(
-        False, "--html", help="Also emit HTML (requires qbalance[report])"
+        False, "--html", help="Also emit HTML (requires qbalance\\[report])"
     ),
 ):
     """Report cmd used by the qbalance workflow.
@@ -241,7 +241,7 @@ def report_cmd(
     Args:
         matrix_json (default: typer.Argument(...)): Matrix json value consumed by this routine.
         out (default: typer.Option(..., '--out', '-o')): Destination path for generated output files.
-        html (default: typer.Option(False, '--html', help='Also emit HTML (requires qbalance[report])')): Html value consumed by this routine.
+        html (default: typer.Option(False, '--html', help='Also emit HTML (requires qbalance\\[report])')): Html value consumed by this routine.
 
     Returns:
         Computed value produced by this routine.
