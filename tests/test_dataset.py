@@ -1073,3 +1073,33 @@ def test_dataset_round_trip_preserves_circuits_through_real_qpy(tmp_path):
         i.operation.params[0] for i in loaded[0].data if i.operation.name == "rz"
     )
     assert restored_angle == angle
+
+
+def test_save_dataset_survives_a_failure_removing_its_backup(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A committed save must not fail because the backup could not be removed.
+
+    This cleanup runs only after the commit succeeded, so the new dataset is
+    already in place.  Letting the removal raise turns a completed save into a
+    reported failure and sends the caller looking for a problem that is not
+    there; a leftover backup directory is the lesser evil.
+    """
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+    save_dataset(dataset_dir, [_DummyCircuit("old")])
+
+    import qbalance.dataset as dataset_mod
+
+    def _rmtree(path, ignore_errors=False):
+
+        if ignore_errors:
+            return
+        raise OSError("rmtree refused")
+
+    monkeypatch.setattr(dataset_mod.shutil, "rmtree", _rmtree)
+
+    result = save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
+
+    assert result.records[0].name == "new"
+    assert load_dataset(dataset_dir).records[0].name == "new"
