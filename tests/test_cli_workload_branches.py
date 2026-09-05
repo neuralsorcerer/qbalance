@@ -440,3 +440,25 @@ def test_cli_help_keeps_the_extra_name_in_install_hints():
 
     assert "qbalance[aer]" in rendered("adjust", "--help")
     assert "qbalance[report]" in rendered("report", "--help")
+
+
+def test_cli_echoes_a_path_containing_brackets_verbatim(tmp_path):
+    """A path the CLI reports back must be the path it actually wrote.
+
+    Confirmation lines interpolate user-supplied paths into a Rich markup
+    string, where a bracketed segment starting with a letter parses as a style
+    tag and disappears -- so ``run[cache]/ds`` was reported as ``run/ds``,
+    handing the user a path that does not exist.
+    """
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    out = tmp_path / "run[cache]" / "ds"
+    result = CliRunner().invoke(
+        app, ["dataset", "examples", "-o", str(out)], env={"COLUMNS": "220"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.is_dir()
+    assert "run[cache]" in " ".join(result.output.split())

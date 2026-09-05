@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from qbalance.benchmarking.matrix import run_matrix
@@ -59,7 +60,10 @@ def dataset_cmd(
         raise typer.BadParameter("Only 'examples' is supported right now")
     circuits = _make_tiny()
     ds = save_dataset(out, circuits, overwrite=overwrite)
-    console.print(f"[green]Wrote dataset[/green] {ds.root} with {len(ds)} circuits")
+    console.print(
+        f"[green]Wrote dataset[/green] {escape(str(ds.root))} "
+        f"with {len(ds)} circuits"
+    )
 
 
 @app.command("adjust")
@@ -225,7 +229,7 @@ def matrix_cmd(
         seed=seed,
         profile=profile,
     )
-    console.print(f"[green]Wrote[/green] {p}")
+    console.print(f"[green]Wrote[/green] {escape(str(p))}")
 
 
 @app.command("report")
@@ -250,10 +254,10 @@ def report_cmd(
         None.
     """
     md = render_markdown(matrix_json, out)
-    console.print(f"[green]Wrote[/green] {md}")
+    console.print(f"[green]Wrote[/green] {escape(str(md))}")
     if html:
         h = render_html(matrix_json, out)
-        console.print(f"[green]Wrote[/green] {h}")
+        console.print(f"[green]Wrote[/green] {escape(str(h))}")
 
 
 @app.command("plugins")
@@ -363,7 +367,7 @@ def compile_cmd(
             with (out / "compiled" / f"{artifact_stem}.qpy").open("wb") as f:
                 qpy.dump(c, f)
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    console.print(f"[green]Wrote[/green] {out}")
+    console.print(f"[green]Wrote[/green] {escape(str(out))}")
 
 
 if __name__ == "__main__":
