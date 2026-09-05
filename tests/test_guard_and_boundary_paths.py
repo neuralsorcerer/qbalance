@@ -365,3 +365,33 @@ def test_zne_does_not_invent_a_parity_class_with_no_mass():
     # The mirror: an all-even reference clamps the odd target to exactly 0.0.
     all_even = zne_extrapolate_counts([1.0, 2.0], [{"0": 10}, {"0": 10}], degree=1)
     assert sorted(all_even) == ["0"]
+
+
+def test_backend_basis_gates_falls_back_to_the_backend_configuration():
+    """BackendV1-style objects describe their basis through configuration().
+
+    Those backends have no Target, so this fallback is the only thing that
+    constrains translation for them; returning None instead lets the
+    translator pick its own basis without any error.
+    """
+    import types as _types
+
+    class V1Style:
+        def configuration(self):
+
+            return _types.SimpleNamespace(basis_gates=["cx", "  ", "rz", "x"])
+
+    class NoBasis:
+        def configuration(self):
+
+            return _types.SimpleNamespace(basis_gates=[])
+
+    class Broken:
+        def configuration(self):
+
+            raise RuntimeError("no configuration")
+
+    assert _backend_basis_gates(V1Style(), None) == ["cx", "rz", "x"]
+    assert _backend_basis_gates(NoBasis(), None) is None
+    assert _backend_basis_gates(Broken(), None) is None
+    assert _backend_basis_gates(object(), None) is None

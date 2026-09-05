@@ -21,6 +21,7 @@ from qbalance.dataset import (
     CircuitRecord,
     _build_unique_artifact,
     _build_unique_name,
+    _is_safe_artifact_path,
     _normalize_metadata_entry,
     load_data,
     load_dataset,
@@ -950,3 +951,36 @@ def test_save_dataset_creates_missing_parent_directories(
     assert dataset_dir.is_dir()
     assert dataset.records[0].artifact == "only.qpy"
     assert (dataset_dir / "only.qpy").is_file()
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "",  # no name at all
+        "/abs/c0.qpy",  # absolute
+        "\\abs\\c0.qpy",
+        "nested/c0.qpy",  # more than one component
+        "..",  # traversal
+        ".",
+        "../c0.qpy",
+        "c0.qpy\x00",  # embedded NUL
+    ],
+)
+def test_is_safe_artifact_path_rejects_anything_but_a_plain_filename(artifact):
+    """The guard has to stand on its own, not on its caller's checks.
+
+    ``load_dataset`` validates the record before calling this, so exercising
+    the helper directly is what pins its standalone contract -- notably the
+    component-count check, which the caller's own screening never reaches.
+
+    The separator rejection runs first, so the later ``is_absolute()`` check
+    is unreachable on POSIX (an absolute path must contain "/") and stays
+    dead defence in depth; the absolute cases below are therefore rejected by
+    the separator rule, not by that branch.
+    """
+    assert _is_safe_artifact_path(artifact) is False
+
+
+@pytest.mark.parametrize("artifact", ["c0.qpy", "circuit_1.qpy", "a.b-c_d.qpy"])
+def test_is_safe_artifact_path_accepts_a_plain_filename(artifact):
+    assert _is_safe_artifact_path(artifact) is True
