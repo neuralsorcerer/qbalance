@@ -144,6 +144,11 @@ def test_noise_layout_suppression_and_pipeline(monkeypatch):
     )
     assert out is not None
     assert met["estimated_error"] == 0.123
+    # profile=True has to install the callback on the pass-manager run; the
+    # key is present either way, so an empty report is what exposes a run
+    # that silently dropped it.
+    assert met["pass_profile"]["passes"]
+    assert met["pass_profile"]["total_time_s"] > 0.0
 
 
 def test_noise_aware_helpers_support_qiskit_bits_without_public_index():

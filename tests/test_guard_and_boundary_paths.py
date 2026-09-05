@@ -260,3 +260,14 @@ def test_stage_pass_manager_adds_layout_passes_only_when_given_a_layout():
     assert "ApplyLayout" in with_layout
     assert "SetLayout" not in without_layout
     assert "ApplyLayout" not in without_layout
+
+
+def test_zne_extrapolate_rejects_a_non_integer_degree():
+    """Degree is a polynomial order, so bools and floats are not degrees.
+
+    ``bool`` is a subclass of ``int``, so the explicit bool check is the only
+    thing that keeps ``degree=True`` from being read as a linear fit.
+    """
+    for bad in (True, 1.5, "1"):
+        with pytest.raises(ValueError, match="non-negative integer"):
+            zne_extrapolate_counts([1.0, 2.0], [{"0": 1}, {"0": 1}], degree=bad)
