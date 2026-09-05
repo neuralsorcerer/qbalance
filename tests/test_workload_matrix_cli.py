@@ -2329,3 +2329,96 @@ def test_compile_cache_key_separates_backends_sharing_a_class(tmp_path, monkeypa
 
     assert len(keys) == 2
     assert keys[0] != keys[1]
+
+
+def test_loading_rejects_an_empty_selection_name(tmp_path):
+    """An empty selection name is not a circuit name.
+
+    It would otherwise be reported as "references circuits not present in the
+    dataset", which points the reader at the dataset instead of the malformed
+    key that is actually at fault.
+    """
+    out_dir = tmp_path / "saved"
+    (out_dir / "dataset").mkdir(parents=True)
+    (out_dir / "dataset" / "qbalance_dataset.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {
+                        "name": "c0",
+                        "artifact": "c0.qpy",
+                        "format": "qpy",
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "dataset" / "c0.qpy").write_bytes(b"artifact")
+    (out_dir / "results.json").write_text(
+        json.dumps(
+            {
+                "backend_spec": "fake:generic:2",
+                "objective": {"depth": 1.0},
+                "selections": {
+                    "": {"spec": StrategySpec().model_dump(), "metrics": {}}
+                },
+                "baseline_metrics": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="non-empty strings"):
+        wl.load_balanced_workload(out_dir)
+
+
+def test_regression_guard_is_off_by_default(tmp_path, monkeypatch):
+    """adjust() explores freely unless the caller opts into the safety rail.
+
+    The guard replaces a worse-than-baseline selection with the baseline, so
+    turning it on by default would silently change what every caller ships.
+    """
+    from tests.system_stubs import _Circ
+
+    guarded: list[int] = []
+
+    def _record_guard(
+        baseline_spec, baseline_metrics, chosen_spec, chosen_metrics, obj
+    ):
+
+        guarded.append(1)
+        return chosen_spec, chosen_metrics
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_guard"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(wl, "_guard_against_regression", _record_guard)
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [StrategySpec()],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust(
+        search="grid", max_candidates=1
+    )
+
+    assert guarded == []
