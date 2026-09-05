@@ -438,3 +438,124 @@ def test_featurize_encodes_each_layout_method_in_its_own_slot():
     # The routing slot must not move when only the layout changes.
     assert sabre[2] == 0.0
     assert _featurize(StrategySpec(routing_method="sabre"))[2] == 1.0
+
+
+def test_bandit_posterior_matches_the_closed_form():
+    """The surrogate is a Bayesian ridge, and its shape alone proves nothing.
+
+    Precision is ``alpha*I + X^T X / sigma2`` and the mean solves
+    ``precision @ mean == X^T y / sigma2``.  Dropping the noise term, or
+    returning covariance where precision is expected, keeps every dimension
+    correct while changing what the bandit believes.
+    """
+    alpha, sigma2 = 2.0, 0.5
+    searcher = BanditSearcher(alpha=alpha, sigma2=sigma2)
+
+    # With no data the posterior is exactly the prior.
+    mean, precision = searcher._posterior()
+    dim = _featurize(StrategySpec()).shape[0]
+    assert np.allclose(mean, np.zeros(dim))
+    assert np.allclose(precision, alpha * np.eye(dim))
+
+    specs = [
+        StrategySpec(optimization_level=1),
+        StrategySpec(optimization_level=3, routing_method="sabre"),
+        StrategySpec(optimization_level=2, pauli_twirling=True, num_twirls=4),
+    ]
+    scores = [3.0, 1.0, 2.0]
+    for spec, score in zip(specs, scores):
+        searcher.observe(spec, score)
+
+    mean, precision = searcher._posterior()
+
+    X = np.vstack([_featurize(s) for s in specs])
+    y = np.asarray(scores)
+    expected_precision = alpha * np.eye(dim) + X.T @ X / sigma2
+    assert np.allclose(precision, expected_precision)
+    # State the mean as the equation it solves, not as a second inversion.
+    assert np.allclose(precision @ mean, X.T @ y / sigma2)
+
+
+def test_bandit_sampling_uses_the_posterior_covariance():
+    """propose draws with covariance precision^-1, via a Cholesky solve.
+
+    For ``precision = L @ L.T``, ``solve(L.T, z)`` has covariance
+    ``L^-T L^-1 == precision^-1``.  Sampling with ``L``, or solving against
+    ``L`` rather than its transpose, still yields a plausible-looking draw --
+    from the wrong distribution.  Both mistakes are invisible to a test that
+    only checks shapes.
+    """
+    # Observations spanning many features, so the precision carries real
+    # off-diagonal structure: on coordinates no observation touches the block
+    # is exactly alpha*I, whose Cholesky factor is diagonal, and there
+    # solve(L, z) and solve(L.T, z) agree.
+    searcher = BanditSearcher(alpha=1.5, sigma2=2.0)
+    for spec, score in (
+        (StrategySpec(optimization_level=1, routing_method="sabre"), 1.0),
+        (StrategySpec(optimization_level=3, zne=True, mthree=True), 4.0),
+        (
+            StrategySpec(
+                optimization_level=2,
+                layout_method="sabre",
+                dynamical_decoupling=True,
+            ),
+            2.0,
+        ),
+        (
+            StrategySpec(
+                optimization_level=0,
+                pauli_twirling=True,
+                num_twirls=4,
+                measurement_twirling=True,
+            ),
+            3.0,
+        ),
+    ):
+        searcher.observe(spec, score)
+
+    mean, precision = searcher._posterior()
+    chol = np.linalg.cholesky(precision)
+    transform = np.linalg.solve(chol.T, np.eye(precision.shape[0]))
+    assert np.allclose(transform @ transform.T, np.linalg.inv(precision))
+
+    z = np.random.default_rng(0).standard_normal(precision.shape[0])
+    drawn = mean + np.linalg.solve(chol.T, z)
+    wrong_draws = (mean + chol @ z, mean + np.linalg.solve(chol, z))
+
+    # These two specs differ in exactly one feature, so the choice between
+    # them is the sign of that single coordinate of the sampled weights.
+    pool = [StrategySpec(), StrategySpec(layout_method="sabre")]
+    features = np.vstack([_featurize(c) for c in pool])
+    assert np.count_nonzero(features[1] - features[0]) == 1
+
+    expected = pool[int(np.argmin(features @ drawn))]
+
+    # Guard: the assertion below proves nothing unless each wrong transform
+    # would really choose the other candidate.
+    for wrong in wrong_draws:
+        assert pool[int(np.argmin(features @ wrong))] is not expected
+
+    class _FixedRng:
+        def standard_normal(self, size):
+
+            assert size == z.shape[0]
+            return z.copy()
+
+    assert searcher.propose(pool, rng=_FixedRng()) is expected
+
+
+def test_bandit_proposal_is_deterministic_for_a_given_seed():
+    """Reproducibility is a documented property of the search."""
+    specs = [
+        StrategySpec(optimization_level=level, seed_transpiler=level)
+        for level in range(4)
+    ]
+
+    def run():
+
+        searcher = BanditSearcher()
+        for spec, score in zip(specs, (4.0, 1.0, 3.0, 2.0)):
+            searcher.observe(spec, score)
+        return searcher.propose(specs, rng=np.random.default_rng(7))
+
+    assert run() == run()
