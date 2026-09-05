@@ -845,3 +845,26 @@ def test_estimate_circuit_error_matches_the_independent_error_product():
     without_barrier.cx(0, 1)
     without_barrier.measure([0, 1], [0, 1])
     assert nal.estimate_circuit_error(NoCalibration(), without_barrier) == error
+
+
+def test_compile_one_does_not_profile_by_default():
+    """Profiling is opt-in; it installs a callback and adds a report.
+
+    Turning it on by default would put a pass_profile section into every
+    compiled artifact and pay for the instrumentation on every call.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=2)
+    qc = QuantumCircuit(2)
+    qc.h(0)
+    qc.cx(0, 1)
+
+    _, metrics = pipeline.compile_one(qc, backend=backend, spec=StrategySpec())
+    assert "pass_profile" not in metrics
+
+    _, profiled = pipeline.compile_one(
+        qc, backend=backend, spec=StrategySpec(), profile=True
+    )
+    assert profiled["pass_profile"]["passes"]

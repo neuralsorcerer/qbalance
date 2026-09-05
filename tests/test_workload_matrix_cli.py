@@ -2559,3 +2559,39 @@ def test_save_refuses_to_overwrite_a_directory_holding_the_source_dataset(tmp_pa
         balanced.save(dataset_root.parent, overwrite=True)
 
     assert (dataset_root / "c0.qpy").is_file()
+
+
+def test_to_download_cleanup_does_not_mask_the_original_failure(tmp_path, monkeypatch):
+    """Discarding the staging tree must not replace the real error.
+
+    The cleanup runs in a finally while the failure that caused it is already
+    propagating; without ignore_errors a failing rmtree is what the caller
+    sees instead.  Same contract as save_dataset and atomic_write_bytes.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_dl_mask")
+
+    real_rmtree = wl.shutil.rmtree
+    armed = {"on": False}
+
+    def _explode(*a, **k):
+
+        # save() has finished staging by now, so only the cleanup that runs
+        # while this error propagates should see the failing rmtree.
+        armed["on"] = True
+        raise RuntimeError("archive failed")
+
+    def _rmtree(path, ignore_errors=False):
+
+        if not armed["on"]:
+            # save() clears its own target with a plain rmtree, and that call
+            # is supposed to work -- and to fail loudly if it cannot.
+            return real_rmtree(path, ignore_errors=ignore_errors)
+        if ignore_errors:
+            return
+        raise OSError("rmtree refused")
+
+    monkeypatch.setattr(wl.zipfile, "ZipFile", _explode)
+    monkeypatch.setattr(wl.shutil, "rmtree", _rmtree)
+
+    with pytest.raises(RuntimeError, match="archive failed"):
+        balanced.to_download(tmp_path / "out.zip")
