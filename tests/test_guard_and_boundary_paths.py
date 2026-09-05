@@ -316,3 +316,32 @@ def test_rebase_skips_a_circuit_whose_width_differs_from_the_backend():
     narrow.h(0)
 
     assert _rebase_to_backend(narrow, backend) is narrow
+
+
+def test_fold_global_rejects_a_measurement_that_is_not_terminal():
+    """Folding replays the circuit, so a re-used measurement bit is not safe.
+
+    A measurement is terminal only if nothing afterwards touches either the
+    qubit it measured or the clbit it wrote.  Requiring both to be re-used
+    before objecting would let ``U (U-dagger U)^r`` replay a mid-circuit
+    measurement and quietly produce a different computation.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.mitigation.zne import fold_global
+
+    # The clbit is written twice, from different qubits.
+    shared_clbit = QuantumCircuit(2, 1)
+    shared_clbit.h(0)
+    shared_clbit.measure(0, 0)
+    shared_clbit.measure(1, 0)
+
+    # The qubit is measured twice, into different clbits.
+    shared_qubit = QuantumCircuit(1, 2)
+    shared_qubit.h(0)
+    shared_qubit.measure(0, 0)
+    shared_qubit.measure(0, 1)
+
+    for circuit in (shared_clbit, shared_qubit):
+        with pytest.raises(ValueError, match="all measurements are terminal"):
+            fold_global(circuit, 3.0)

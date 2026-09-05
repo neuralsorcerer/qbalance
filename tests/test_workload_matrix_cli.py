@@ -2470,3 +2470,17 @@ def test_adjust_does_not_use_pareto_selection_by_default(tmp_path, monkeypatch):
     )
 
     assert "c0" in balanced.selections
+
+
+def test_adjust_requires_a_positive_candidate_budget(tmp_path):
+    """A zero or negative budget evaluates nothing and cannot select."""
+    dsroot = tmp_path / "ds_budget"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    workload = wl.Workload.from_dataset(ds).set_target("fake:generic:2")
+
+    for budget in (0, -1):
+        with pytest.raises(ValueError, match="max_candidates must be a positive"):
+            workload.adjust(max_candidates=budget)
