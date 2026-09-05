@@ -214,3 +214,49 @@ def test_untwirl_ignores_a_classical_bit_beyond_the_key_width():
 def test_untwirl_preserves_register_separators():
     """Count keys with multiple registers carry spaces that are not bits."""
     assert apply_measurement_untwirl_counts({"00 0": 4}, {0: 1}) == {"00 1": 4}
+
+
+def test_stage_pass_manager_adds_layout_passes_only_when_given_a_layout():
+    """The fallback pipeline installs a layout only when it has both parts.
+
+    ``SetLayout``/``ApplyLayout`` need an initial layout *and* a target to
+    allocate ancillas against.  Appending them without a layout would apply a
+    null layout; skipping them when one was supplied silently discards the
+    noise-aware placement that was just computed.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.transpiler import Layout
+
+    from qbalance.strategies import StrategySpec
+    from qbalance.transpile.pipeline import _generate_stage_pm
+
+    backend = GenericBackendV2(num_qubits=3, seed=1)
+    circuit = QuantumCircuit(2)
+    layout = Layout.from_intlist([0, 1], *circuit.qregs)
+
+    def pass_names(pm):
+
+        # Qiskit 2.x exposes the schedule through the flow controller, whose
+        # tasks nest; leaves are the individual passes.
+        found = []
+
+        def walk(node):
+
+            tasks = getattr(node, "tasks", None)
+            if tasks is None:
+                found.append(type(node).__name__)
+                return
+            for task in tasks:
+                walk(task)
+
+        walk(pm.to_flow_controller())
+        return found
+
+    with_layout = pass_names(_generate_stage_pm(backend, StrategySpec(), layout))
+    without_layout = pass_names(_generate_stage_pm(backend, StrategySpec()))
+
+    assert "SetLayout" in with_layout
+    assert "ApplyLayout" in with_layout
+    assert "SetLayout" not in without_layout
+    assert "ApplyLayout" not in without_layout

@@ -2097,3 +2097,235 @@ def test_final_measurement_qubits_skips_malformed_measurements():
         ]
 
     assert wl._final_measurement_qubits(_MalformedCirc()) == [2]
+
+
+def test_selection_diagnostics_handles_a_metric_present_on_only_one_side(tmp_path):
+    """A metric missing from one side has no delta, and must not raise.
+
+    Baselines and selections are independent metric dicts, so a key can easily
+    exist on one and not the other -- subtracting them would raise TypeError
+    mid-report.
+    """
+    dsroot = tmp_path / "ds_one_sided"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={"c0": Strategy(spec=StrategySpec(), metrics={"depth": 4.0})},
+        baseline_metrics={"c0": {"two_qubit_ops": 7.0}},
+        objective=Objective({"depth": 1.0}),
+    )
+
+    deltas = balanced.selection_diagnostics()["c0"]["metric_deltas"]
+
+    assert deltas["depth"] == {
+        "baseline": None,
+        "selected": 4.0,
+        "delta": None,
+        "relative_delta": None,
+    }
+    assert deltas["two_qubit_ops"] == {
+        "baseline": 7.0,
+        "selected": None,
+        "delta": None,
+        "relative_delta": None,
+    }
+
+
+def _one_circuit_workload(tmp_path, name="ds_dl"):
+    """Build a minimal saveable BalancedWorkload."""
+    dsroot = tmp_path / name
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"artifact")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    return wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={"c0": Strategy(spec=StrategySpec(), metrics={"depth": 1.0})},
+        baseline_metrics={"c0": {"depth": 2.0}},
+        objective=Objective({"depth": 1.0}),
+    )
+
+
+def test_to_download_refuses_to_overwrite_by_default(tmp_path):
+    """Exporting must not silently destroy an existing archive."""
+    balanced = _one_circuit_workload(tmp_path)
+    zip_path = tmp_path / "workload.zip"
+    zip_path.write_bytes(b"precious")
+
+    with pytest.raises(FileExistsError):
+        balanced.to_download(zip_path)
+
+    assert zip_path.read_bytes() == b"precious"
+
+
+def test_to_download_overwrites_when_asked(tmp_path):
+    balanced = _one_circuit_workload(tmp_path, name="ds_dl2")
+    zip_path = tmp_path / "workload.zip"
+    zip_path.write_bytes(b"precious")
+
+    out = balanced.to_download(zip_path, overwrite=True)
+
+    assert out == zip_path
+    assert zip_path.read_bytes() != b"precious"
+
+
+def test_grid_search_never_consults_the_bandit(tmp_path, monkeypatch):
+    """Grid search evaluates every candidate; the bandit is for the other mode."""
+    from tests.system_stubs import _Circ
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_grid"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    class _BanditThatMustNotBeUsed:
+        def observe(self, *a, **k):
+
+            raise AssertionError("grid search must not consult the bandit")
+
+        def propose(self, *a, **k):
+
+            raise AssertionError("grid search must not consult the bandit")
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(wl, "BanditSearcher", _BanditThatMustNotBeUsed)
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [
+            StrategySpec(seed_transpiler=i) for i in range(3)
+        ],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    balanced = (
+        wl.Workload.from_dataset(ds)
+        .set_target("fake:generic:2")
+        .adjust(search="grid", max_candidates=3)
+    )
+
+    assert balanced.selection_diagnostics()["c0"]["evaluated_candidates"] == 3
+
+
+def test_candidate_is_not_cut_without_the_cutting_flag(tmp_path, monkeypatch):
+    """max_subcircuit_qubits alone must not trigger circuit cutting.
+
+    The width limit is meaningful only when cutting is requested; acting on it
+    by itself would cut circuits the caller never asked to cut, and a cutting
+    failure silently drops the candidate.
+    """
+    from tests.system_stubs import _Circ
+
+    def _must_not_cut(*a, **k):
+
+        raise AssertionError("cutting must not run when spec.cutting is False")
+
+    monkeypatch.setattr(wl, "find_cuts_best_effort", _must_not_cut)
+    monkeypatch.setattr(
+        wl, "_compile_cached", lambda *a, **k: (_Circ(), {"depth": 2.0})
+    )
+
+    metrics = wl._evaluate_candidate(
+        _Circ(),
+        types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+        StrategySpec(cutting=False, max_subcircuit_qubits=2),
+        objective=Objective({"depth": 1.0}),
+        execute=False,
+        shots=16,
+        seed=0,
+        profile=False,
+        cache_root=tmp_path,
+    )
+
+    assert metrics is not None
+
+
+def test_mitigation_receives_untwirled_counts(tmp_path, monkeypatch):
+    """Measurement twirling is undone before the counts reach mitigation.
+
+    Feeding twirled counts to mthree corrects the wrong bitstrings, which
+    degrades the result silently rather than raising.
+    """
+    from tests.system_stubs import _Circ
+
+    seen: dict[str, int] = {}
+
+    def _capture(backend, counts, **kwargs):
+
+        seen.update(counts)
+        return {"0": 1.0}
+
+    monkeypatch.setattr(
+        wl,
+        "_compile_cached",
+        lambda *a, **k: (_Circ(), {"measurement_flip_map": {0: 1}}),
+    )
+    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"0": 8, "1": 2})
+    monkeypatch.setattr(wl, "apply_mthree_mitigation", _capture)
+
+    wl._evaluate_candidate(
+        _Circ(),
+        types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+        StrategySpec(mthree=True),
+        objective=Objective({"depth": 1.0}),
+        execute=True,
+        shots=10,
+        seed=0,
+        profile=False,
+        cache_root=tmp_path,
+    )
+
+    # clbit 0 was flipped during twirling, so every key flips back.
+    assert seen == {"1": 8, "0": 2}
+
+
+def test_compile_cache_key_separates_backends_sharing_a_class(tmp_path, monkeypatch):
+    """Backend identity comes from the backend's name, not its Python class.
+
+    Every fake backend shares one class, so keying on the class name would let
+    calibration-derived metrics leak between different devices.
+    """
+    from tests.system_stubs import _Circ
+
+    keys: list[str] = []
+
+    def _record(key_hash, root=None):
+
+        keys.append(key_hash)
+        return types.SimpleNamespace(dir=tmp_path)
+
+    monkeypatch.setattr(wl, "get_entry", _record)
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+    monkeypatch.setattr(wl, "compile_one", lambda *a, **k: (_Circ(), {}))
+    monkeypatch.setattr(wl, "fingerprint_circuit", lambda c: "fingerprint")
+
+    class _Backend:
+        def __init__(self, label):
+
+            self._label = label
+
+        def name(self):
+
+            return self._label
+
+    for label in ("alpha", "beta"):
+        wl._compile_cached(_Circ(), _Backend(label), StrategySpec(), False, tmp_path)
+
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
