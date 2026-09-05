@@ -2484,3 +2484,28 @@ def test_adjust_requires_a_positive_candidate_budget(tmp_path):
     for budget in (0, -1):
         with pytest.raises(ValueError, match="max_candidates must be a positive"):
             workload.adjust(max_candidates=budget)
+
+
+def test_final_measurement_qubits_falls_back_to_the_full_width(tmp_path):
+    """With no recoverable mapping, every qubit is assumed measured in order.
+
+    Returning an empty list instead would hand mthree no qubits to correct,
+    which mis-mitigates silently rather than failing.  The width guard also
+    has to survive a backend stub that reports no width at all.
+    """
+    from tests.system_stubs import _I, _Q
+
+    class _NoMeasurements:
+        num_qubits = 3
+        data = [(_I("h"), [_Q(0)], []), (_I("cx"), [_Q(0), _Q(1)], [])]
+
+    class _NoWidth:
+        data = []
+
+    class _NullWidth:
+        num_qubits = None
+        data = []
+
+    assert wl._final_measurement_qubits(_NoMeasurements()) == [0, 1, 2]
+    assert wl._final_measurement_qubits(_NoWidth()) == []
+    assert wl._final_measurement_qubits(_NullWidth()) == []
