@@ -9,6 +9,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from qbalance.strategies import StrategySpec
 from qbalance.transpile import noise_aware_layout as nal
 from qbalance.transpile import pipeline, suppression
@@ -155,3 +157,62 @@ def test_finalize_full_coverage_paths(monkeypatch, tmp_path):
     metrics = bw.selections["c0"].metrics
     assert metrics["mitigated_top_prob"] == 0.8
     assert metrics["zne_top_prob"] == 0.7
+
+
+def test_execute_without_mitigation_still_records_raw_counts_metrics(
+    tmp_path, monkeypatch
+):
+    """``execute=True`` alone must run the circuit and record raw metrics.
+
+    Execution is gated on ``execute or spec.mthree or spec.zne``.  The
+    mitigation-driven arms of that condition are covered elsewhere; this pins
+    the plain ``execute=True`` arm, where the raw distribution metrics are the
+    only evidence the circuit ran at all.
+    """
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_exec_only"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [StrategySpec()],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"00": 9, "11": 1})
+    monkeypatch.setattr(
+        wl, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+    )
+
+    # Neither mitigation runs, so their metrics must be absent entirely.
+    def _unexpected(*a, **k):
+
+        raise AssertionError("mitigation must not run without mthree/zne")
+
+    monkeypatch.setattr(wl, "apply_mthree_mitigation", _unexpected)
+    monkeypatch.setattr(wl, "zne_extrapolate_counts", _unexpected)
+
+    bw = (
+        wl.Workload.from_dataset(ds)
+        .set_target("fake:generic:2")
+        .adjust(search="grid", execute=True, max_candidates=1)
+    )
+    metrics = bw.selections["c0"].metrics
+
+    assert metrics["raw_top_prob"] == 0.9
+    assert metrics["raw_counts_entropy"] == pytest.approx(0.4689955935892812)
+    assert "mitigated_top_prob" not in metrics
+    assert "zne_top_prob" not in metrics

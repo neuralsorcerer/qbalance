@@ -912,3 +912,23 @@ def test_save_dataset_reports_a_commit_failure_when_there_was_no_previous_datase
 
     assert not target.exists()
     assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_save_dataset_overwrite_removes_its_backup_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A successful overwrite must not leave its rollback copy behind.
+
+    ``save_dataset`` moves the previous dataset aside before committing the
+    new one so a failed write can be rolled back.  When the commit succeeds
+    that copy is garbage, and leaving it behind silently doubles the on-disk
+    size of every overwritten dataset.
+    """
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+
+    save_dataset(dataset_dir, [_DummyCircuit("old")])
+    save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
+
+    leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name != "dataset")
+    assert leftovers == []

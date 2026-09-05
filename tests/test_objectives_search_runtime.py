@@ -417,3 +417,24 @@ def test_objective_skips_non_finite_product_terms():
     obj = Objective({"huge": 1e308, "small": 2.0})
     score = obj.score({"huge": 1e308, "small": 3.0})
     assert score == 6.0
+
+
+def test_featurize_encodes_each_layout_method_in_its_own_slot():
+    """Layout choices must land in distinct, exact feature slots.
+
+    The bandit learns a linear model over these features, so a mis-encoded
+    layout flag does not fail loudly -- it just teaches the model the wrong
+    thing.  Pin the exact one-hot positions for the two layouts that get
+    their own slot.
+    """
+    sabre = _featurize(StrategySpec(layout_method="sabre"))
+    trivial = _featurize(StrategySpec(layout_method="trivial"))
+    noise_aware = _featurize(StrategySpec(layout_method="qbalance_noise_aware"))
+
+    assert (sabre[3], sabre[4]) == (1.0, 0.0)
+    assert (trivial[3], trivial[4]) == (0.0, 0.0)
+    assert (noise_aware[3], noise_aware[4]) == (0.0, 1.0)
+
+    # The routing slot must not move when only the layout changes.
+    assert sabre[2] == 0.0
+    assert _featurize(StrategySpec(routing_method="sabre"))[2] == 1.0

@@ -2034,3 +2034,66 @@ def test_save_creates_missing_parent_directories(tmp_path):
     assert not nested.parent.exists()
     balanced.save(nested, overwrite=False)
     assert (nested / "results.json").is_file()
+
+
+def test_selection_diagnostics_reports_relative_deltas(tmp_path):
+    """Relative deltas must be real ratios, and must skip a zero baseline.
+
+    ``relative_delta`` divides by the baseline magnitude, so the zero-baseline
+    guard is what keeps the diagnostics JSON-serializable instead of raising.
+    Exercise both sides of that guard with numbers, not just the all-``None``
+    degenerate case.
+    """
+    dsroot = tmp_path / "ds_rel_delta"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={
+            "c0": Strategy(
+                spec=StrategySpec(),
+                metrics={"depth": 8.0, "two_qubit_ops": 5.0},
+            )
+        },
+        baseline_metrics={"c0": {"depth": 10.0, "two_qubit_ops": 0.0}},
+        objective=Objective({"depth": 1.0}),
+    )
+
+    deltas = balanced.selection_diagnostics()["c0"]["metric_deltas"]
+
+    assert deltas["depth"] == {
+        "baseline": 10.0,
+        "selected": 8.0,
+        "delta": -2.0,
+        "relative_delta": -0.2,
+    }
+    # A zero baseline has no meaningful ratio; the delta still stands.
+    assert deltas["two_qubit_ops"] == {
+        "baseline": 0.0,
+        "selected": 5.0,
+        "delta": 5.0,
+        "relative_delta": None,
+    }
+
+
+def test_final_measurement_qubits_skips_malformed_measurements():
+    """Only one-qubit/one-clbit measurements define the clbit -> qubit map.
+
+    A measurement carrying more than one qubit or no clbit at all cannot say
+    which qubit feeds which classical bit.  Mapping one anyway would hand
+    mthree the wrong physical qubits and silently degrade the correction.
+    """
+    from tests.system_stubs import _I, _Q
+
+    class _MalformedCirc:
+        num_qubits = 3
+        data = [
+            (_I("measure"), [_Q(2)], [_Q(0)]),
+            (_I("measure"), [_Q(0), _Q(1)], [_Q(1)]),
+            (_I("measure"), [_Q(1)], []),
+            (_I("barrier"), [_Q(0)], []),
+        ]
+
+    assert wl._final_measurement_qubits(_MalformedCirc()) == [2]
