@@ -1,3 +1,9 @@
+# Copyright (c) Soumyadip Sarkar.
+# All rights reserved.
+#
+# This source code is licensed under the MIT license found in the
+# LICENSE file in the root directory of this source tree.
+
 from __future__ import annotations
 
 from typing import Iterable, Tuple
@@ -39,12 +45,15 @@ def _as_1d_float_array(x: Iterable[float], *, name: str) -> np.ndarray:
     try:
         values = np.asarray(x, dtype=float)
     except TypeError:
+        # Some iterables (for example generators) are not directly array-like.
+        # ``np.fromiter`` avoids creating an intermediate list for these cases.
         try:
             values = np.fromiter(x, dtype=float)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name} must contain only finite real numbers.") from exc
     except ValueError as exc:
         raise ValueError(f"{name} must contain only finite real numbers.") from exc
+
     if values.ndim != 1:
         raise ValueError(f"{name} must be a one-dimensional iterable of real numbers.")
     return values
@@ -70,26 +79,34 @@ def _to_np(
         raise ValueError("Input samples must be non-empty.")
     if not np.all(np.isfinite(values)):
         raise ValueError("Input samples must be finite real numbers.")
+
     if w is None:
         weights = np.full(values.shape, 1.0 / values.size, dtype=float)
-        return (values, weights)
+        return values, weights
+
     weights = _as_1d_float_array(w, name="Weights")
     if weights.shape != values.shape:
         raise ValueError("Weights must have the same length as samples.")
     if not np.all(np.isfinite(weights)):
         raise ValueError("Weights must be finite real numbers.")
+
+    # Clamp negative entries in place to avoid an extra allocation on large
+    # arrays while preserving all positive magnitudes.
     np.maximum(weights, 0.0, out=weights)
     max_weight = float(np.max(weights))
     if max_weight <= 0.0:
         weights = np.full(values.shape, 1.0 / values.size, dtype=float)
-        return (values, weights)
+        return values, weights
+
+    # Scale by the maximum first so summation cannot overflow for very large
+    # finite weights and tiny values are preserved proportionally.
     scaled = weights / max_weight
     total_scaled = float(np.sum(scaled, dtype=float))
-    if total_scaled < 0.0:
+    if total_scaled <= 0.0:
         weights = np.full(values.shape, 1.0 / values.size, dtype=float)
     else:
         weights = scaled / total_scaled
-    return (values, weights)
+    return values, weights
 
 
 def weighted_cdf(
@@ -111,18 +128,28 @@ def weighted_cdf(
     order = np.argsort(values)
     xs_sorted = values[order]
     ws_sorted = weights[order]
+
+    # Fast path: if support has fewer than two points there can be no
+    # duplicates to aggregate.
     if xs_sorted.size < 2:
-        return (xs_sorted, _normalized_cumsum(ws_sorted))
+        return xs_sorted, _normalized_cumsum(ws_sorted)
+
+    # Locate the start index of every run of identical sorted support values.
+    # Reusing these boundaries avoids an extra uniqueness pass over data that is
+    # already sorted and aggregates duplicate points in O(n).
     run_start = np.empty(xs_sorted.size, dtype=bool)
     run_start[0] = True
     run_start[1:] = xs_sorted[1:] != xs_sorted[:-1]
     first_idx = np.flatnonzero(run_start)
     if first_idx.size == xs_sorted.size:
-        return (xs_sorted, _normalized_cumsum(ws_sorted))
+        return xs_sorted, _normalized_cumsum(ws_sorted)
+
+    # Aggregate repeated support points so downstream CDF evaluation does not
+    # perform redundant binary-search work.
     unique_xs = xs_sorted[first_idx]
     summed_weights = np.add.reduceat(ws_sorted, first_idx)
     cdf = _normalized_cumsum(summed_weights)
-    return (unique_xs, cdf)
+    return unique_xs, cdf
 
 
 def _cdf_on_grid(grid: np.ndarray, xs: np.ndarray, cdf: np.ndarray) -> np.ndarray:
@@ -168,17 +195,24 @@ def _aligned_cdfs(
     """
     xs1, c1 = weighted_cdf(x1, w1)
     xs2, c2 = weighted_cdf(x2, w2)
+    # Fast path for equal supports avoids unnecessary concatenation,
+    # de-duplication, and repeated binary searches.
     if xs1.shape == xs2.shape and np.array_equal(xs1, xs2):
-        return (xs1, c1, c2)
+        return xs1, c1, c2
+
+    # If supports do not overlap, concatenate directly; if they touch at one
+    # endpoint, skip one duplicate boundary value.
     if xs1[-1] <= xs2[0]:
         grid = np.concatenate((xs1, xs2[1:] if xs1[-1] == xs2[0] else xs2))
     elif xs2[-1] <= xs1[0]:
         grid = np.concatenate((xs2, xs1[1:] if xs2[-1] == xs1[0] else xs1))
     else:
+        # ``np.union1d`` uses optimized NumPy routines and remains faster than
+        # Python-level merge loops for realistic support sizes.
         grid = np.union1d(xs1, xs2)
     cdf1 = _cdf_on_grid(grid, xs1, c1)
     cdf2 = _cdf_on_grid(grid, xs2, c2)
-    return (grid, cdf1, cdf2)
+    return grid, cdf1, cdf2
 
 
 def ks_1d(
@@ -224,26 +258,36 @@ def _integrate_piecewise_constant(values: np.ndarray, grid: np.ndarray) -> float
         raise ValueError("values and grid must contain only finite real numbers.")
     if grid.size < 2:
         return 0.0
+
     widths = np.diff(grid)
     if np.any(widths < 0.0):
         raise ValueError("grid must be monotonically non-decreasing.")
+
     left = values[:-1]
     max_left = float(np.max(np.abs(left)))
     max_width = float(np.max(np.abs(widths)))
     if max_left == 0.0 or max_width == 0.0:
         return 0.0
+
+    # Normalize both factors to avoid transient overflow in the element-wise
+    # products, then recover scale using an exponent-safe representation.
     scaled_left = left / max_left
     scaled_widths = widths / max_width
+
+    # Use wider accumulation when the platform provides it; otherwise fall back
+    # to float accumulation without changing semantics.
     sum_dtype = (
         np.longdouble if np.finfo(np.longdouble).max > np.finfo(float).max else float
     )
     scaled_sum = float(np.sum(scaled_left * scaled_widths, dtype=sum_dtype))
     if not np.isfinite(scaled_sum):
         raise ValueError("Integrated area is not finite; check value/grid scales.")
+
     left_mantissa, left_exp = np.frexp(max_left)
     width_mantissa, width_exp = np.frexp(max_width)
     scale_mantissa = left_mantissa * width_mantissa
     scale_exp = left_exp + width_exp
+
     with np.errstate(over="ignore", invalid="ignore"):
         area = float(np.ldexp(scale_mantissa * scaled_sum, scale_exp))
     if not np.isfinite(area):
