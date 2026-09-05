@@ -932,3 +932,21 @@ def test_save_dataset_overwrite_removes_its_backup_directory(
 
     leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name != "dataset")
     assert leftovers == []
+
+
+def test_save_dataset_creates_missing_parent_directories(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Callers pass a nested output path that need not exist yet.
+
+    The staging directory is created beside the destination, so the whole
+    parent chain has to exist before the temporary directory can be made.
+    """
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "deep" / "nested" / "dataset"
+
+    dataset = save_dataset(dataset_dir, [_DummyCircuit("only")])
+
+    assert dataset_dir.is_dir()
+    assert dataset.records[0].artifact == "only.qpy"
+    assert (dataset_dir / "only.qpy").is_file()
