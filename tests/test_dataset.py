@@ -1013,3 +1013,58 @@ def test_save_dataset_cleanup_does_not_mask_the_original_failure(
 
     with pytest.raises(ValueError, match="qpy dump failed"):
         save_dataset(tmp_path / "dataset", [_DummyCircuit("a")])
+
+
+def test_dataset_round_trip_preserves_circuits_through_real_qpy(tmp_path):
+    """What comes back must be what went in.
+
+    Most dataset tests stub qiskit's qpy with a JSON shim to exercise the
+    surrounding bookkeeping, which leaves the real serialization -- the whole
+    point of the format -- unchecked.  Save and reload through the genuine
+    encoder and compare structure, parameters and exact float payloads.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.circuit import Parameter
+
+    mixed = QuantumCircuit(3, 3, name="mixed")
+    mixed.h(0)
+    mixed.cx(0, 1)
+    angle = 0.12345678901234567
+    mixed.rz(angle, 2)
+    mixed.barrier()
+    mixed.measure([0, 1, 2], [0, 1, 2])
+
+    no_clbits = QuantumCircuit(2, name="no_clbits")
+    no_clbits.sx(0)
+    no_clbits.cz(0, 1)
+
+    parametric = QuantumCircuit(1, name="parametric")
+    parametric.rx(Parameter("theta"), 0)
+
+    circuits = [mixed, no_clbits, parametric]
+    metadata = [{"index": i, "nested": {"ok": True}} for i in range(len(circuits))]
+
+    save_dataset(tmp_path / "ds", circuits, metadata=metadata)
+    dataset = load_dataset(tmp_path / "ds")
+    loaded = dataset.load_circuits()
+
+    assert [r.metadata for r in dataset.records] == metadata
+    assert len(loaded) == len(circuits)
+    for original, restored in zip(circuits, loaded):
+        assert restored.name == original.name
+        assert (restored.num_qubits, restored.num_clbits) == (
+            original.num_qubits,
+            original.num_clbits,
+        )
+        assert [i.operation.name for i in restored.data] == [
+            i.operation.name for i in original.data
+        ]
+        assert sorted(map(str, restored.parameters)) == sorted(
+            map(str, original.parameters)
+        )
+
+    # Rotation angles must survive bit-exactly, not merely close.
+    restored_angle = next(
+        i.operation.params[0] for i in loaded[0].data if i.operation.name == "rz"
+    )
+    assert restored_angle == angle
