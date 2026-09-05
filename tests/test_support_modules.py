@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import types
@@ -648,3 +649,23 @@ def test_load_compiled_treats_a_half_written_entry_as_a_miss(tmp_path):
     (entry.dir / "meta.json").unlink()
     (entry.dir / "compiled.qpy").write_bytes(b"")
     assert cache.load_compiled(entry) is None
+
+
+def test_atomic_write_cleanup_does_not_mask_the_original_error(tmp_path, monkeypatch):
+    """Removing the temp file must never replace the failure being reported.
+
+    The cleanup runs while an exception is already propagating.  If the
+    temporary file is gone by then -- a concurrent sweep of stale ``.tmp``
+    files, say -- an unguarded unlink raises FileNotFoundError and the real
+    cause is lost.
+    """
+
+    def _vanish_then_fail(src, dst):
+
+        pathlib.Path(src).unlink()
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(os, "replace", _vanish_then_fail)
+
+    with pytest.raises(OSError, match="replace failed"):
+        utils_module.atomic_write_bytes(tmp_path / "out.bin", b"data")

@@ -2422,3 +2422,51 @@ def test_regression_guard_is_off_by_default(tmp_path, monkeypatch):
     )
 
     assert guarded == []
+
+
+def test_adjust_does_not_use_pareto_selection_by_default(tmp_path, monkeypatch):
+    """Pareto selection is opt-in.
+
+    It can pick a different strategy than the plain minimum-objective rule,
+    so turning it on by default would quietly change every caller's result.
+    """
+    from tests.system_stubs import _Circ
+
+    def _must_not_run(*a, **k):
+
+        raise AssertionError("pareto selection must be opt-in")
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_pareto_default"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(wl, "pareto_front", _must_not_run)
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [
+            StrategySpec(seed_transpiler=i) for i in range(2)
+        ],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    balanced = (
+        wl.Workload.from_dataset(ds)
+        .set_target("fake:generic:2")
+        .adjust(search="grid", max_candidates=2)
+    )
+
+    assert "c0" in balanced.selections
