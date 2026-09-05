@@ -630,3 +630,21 @@ def test_package_exposes_a_version_consistent_with_its_metadata():
         pytest.skip("qbalance is not installed in this environment")
     assert qbalance.__version__ == distribution_version
     assert in_tree_version == distribution_version
+
+
+def test_load_compiled_treats_a_half_written_entry_as_a_miss(tmp_path):
+    """A cache entry is only usable when both of its files are present.
+
+    An interrupted save leaves one of ``meta.json`` / ``compiled.qpy`` behind.
+    Recompiling is always correct; reading the surviving half and then failing
+    on the missing one would turn a stale cache into a hard error.
+    """
+    entry = cache.get_entry("abcdef0123", root=tmp_path)
+    entry.dir.mkdir(parents=True, exist_ok=True)
+
+    (entry.dir / "meta.json").write_text("{}", encoding="utf-8")
+    assert cache.load_compiled(entry) is None
+
+    (entry.dir / "meta.json").unlink()
+    (entry.dir / "compiled.qpy").write_bytes(b"")
+    assert cache.load_compiled(entry) is None
