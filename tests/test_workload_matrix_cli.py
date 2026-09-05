@@ -16,10 +16,12 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+import typer
 
 from qbalance import cli
 from qbalance.benchmarking import matrix as matrix_mod
 from qbalance.cutting import addon_cutting
+from qbalance.errors import OptionalDependencyError
 from qbalance.mitigation import zne
 from qbalance.objectives import Objective, default_objective
 from qbalance.reports import common as report_common
@@ -231,7 +233,7 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
         ),
     )
     cli.dataset_cmd("examples", tmp_path / "a", overwrite=True)
-    with pytest.raises(Exception):
+    with pytest.raises(typer.BadParameter, match="Only 'examples' is supported"):
         cli.dataset_cmd("bad", tmp_path / "a", overwrite=True)
 
 
@@ -306,7 +308,9 @@ def test_additional_branch_coverage(monkeypatch, tmp_path):
     monkeypatch.setitem(
         sys.modules, "qiskit.circuit", types.ModuleType("qiskit.circuit")
     )
-    with pytest.raises(Exception):
+    with pytest.raises(
+        OptionalDependencyError, match="qiskit is required for pauli twirling"
+    ):
         suppression.apply_pauli_twirling(_Circ())
 
     # candidates dedupe continue line via monkeypatched class equality
@@ -380,7 +384,7 @@ def test_cli_full_commands(monkeypatch, tmp_path):
     cli.matrix_cmd(tmp_path, ["b"], tmp_path / "m.json")
     cli.report_cmd(tmp_path / "m.json", tmp_path, html=True)
     cli.plugins_cmd("list")
-    with pytest.raises(Exception):
+    with pytest.raises(typer.BadParameter, match="Only 'list' supported"):
         cli.plugins_cmd("bad")
 
     out = tmp_path / "compiled_out"
@@ -397,7 +401,7 @@ def test_cli_full_commands(monkeypatch, tmp_path):
         measurement_twirling=False,
         overwrite=True,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(typer.BadParameter, match="use --overwrite"):
         cli.compile_cmd(
             tmp_path,
             "b",
@@ -1701,7 +1705,7 @@ def test_save_compiled_writes_atomically_and_leaves_no_partials(tmp_path):
 
     # A circuit QPY cannot serialize must not leave a partial entry behind.
     entry2 = get_entry("b" * 64, root=tmp_path)
-    with pytest.raises(Exception):
+    with pytest.raises(TypeError, match="not a supported data type"):
         save_compiled(entry2, object(), {"depth": 1})
     assert not entry2.dir.exists() or list(entry2.dir.iterdir()) == []
 
