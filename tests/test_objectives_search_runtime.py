@@ -559,3 +559,36 @@ def test_bandit_proposal_is_deterministic_for_a_given_seed():
         return searcher.propose(specs, rng=np.random.default_rng(7))
 
     assert run() == run()
+
+
+def test_objective_is_immutable_and_owns_its_weights():
+    """The docs promise an immutable objective; nothing checked it.
+
+    Immutability matters because one Objective is shared across every
+    candidate in a run: a rebind, or a caller mutating the dict it passed in,
+    would silently rescore work already done.
+    """
+    import dataclasses
+
+    weights = {"depth": 1.0}
+    objective = Objective(weights)
+
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        objective.weights = {"depth": 2.0}
+
+    # The objective copies the mapping, so the caller cannot reach inside it.
+    weights["depth"] = 99.0
+    assert objective.weights == {"depth": 1.0}
+    assert objective.score({"depth": 1.0}) == 1.0
+
+
+def test_strategy_spec_is_immutable():
+    """A spec is a cache key and a report identity, so it must not change."""
+    import pydantic
+
+    spec = StrategySpec(optimization_level=1)
+
+    with pytest.raises(pydantic.ValidationError):
+        spec.optimization_level = 3
+
+    assert spec.optimization_level == 1
