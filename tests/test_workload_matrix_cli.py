@@ -1947,3 +1947,90 @@ def test_non_empty_workloads_still_report_numeric_distances(tmp_path):
         for row in balanced.covars().values()
         for value in row.values()
     )
+
+
+def test_summary_reports_how_many_circuits_improved(tmp_path):
+    """Mutation testing found the improved count unasserted.
+
+    The summary line is the headline result of a run, so inverting the
+    comparison that produces it must not go unnoticed.
+    """
+    from qbalance.dataset import CircuitDataset
+    from qbalance.objectives import Objective
+
+    dataset = CircuitDataset(tmp_path, [])
+    objective = Objective(weights={"depth": 1.0})
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:5",
+        selections={
+            "better": Strategy(spec=StrategySpec(), metrics={"depth": 1.0}),
+            "worse": Strategy(spec=StrategySpec(), metrics={"depth": 9.0}),
+            "same": Strategy(spec=StrategySpec(), metrics={"depth": 5.0}),
+        },
+        baseline_metrics={
+            "better": {"depth": 5.0},
+            "worse": {"depth": 5.0},
+            "same": {"depth": 5.0},
+        },
+        objective=objective,
+    )
+
+    diagnostics = balanced.selection_diagnostics()
+    assert diagnostics["better"]["objective_improved"] is True
+    assert diagnostics["worse"]["objective_improved"] is False
+    assert (
+        diagnostics["same"]["objective_improved"] is True
+    )  # equal counts as no regression
+
+    line = next(
+        line for line in balanced.summary().splitlines() if "objective deltas" in line
+    )
+    assert "improved=2/3" in line
+
+
+def test_to_download_writes_a_fresh_zip_without_overwrite(tmp_path):
+    """Mutation testing found this path unexercised.
+
+    ``overwrite=False`` must only refuse when the zip already exists.
+    """
+    from qbalance.dataset import CircuitDataset
+
+    balanced = wl.BalancedWorkload(
+        dataset=CircuitDataset(tmp_path / "ds", []),
+        backend_spec="fake:generic:5",
+        selections={},
+    )
+    (tmp_path / "ds").mkdir()
+    (tmp_path / "ds" / "qbalance_dataset.json").write_text(
+        json.dumps({"version": 1, "records": []}), encoding="utf-8"
+    )
+
+    target = tmp_path / "bundle.zip"
+    assert not target.exists()
+    assert balanced.to_download(target, overwrite=False) == target
+    assert target.is_file()
+
+    with pytest.raises(FileExistsError):
+        balanced.to_download(target, overwrite=False)
+
+
+def test_save_creates_missing_parent_directories(tmp_path):
+    """Mutation testing found nested output paths unexercised."""
+    from qbalance.dataset import CircuitDataset
+
+    dataset_dir = tmp_path / "ds"
+    dataset_dir.mkdir()
+    (dataset_dir / "qbalance_dataset.json").write_text(
+        json.dumps({"version": 1, "records": []}), encoding="utf-8"
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=CircuitDataset(dataset_dir, []),
+        backend_spec="fake:generic:5",
+        selections={},
+    )
+
+    nested = tmp_path / "a" / "b" / "c"
+    assert not nested.parent.exists()
+    balanced.save(nested, overwrite=False)
+    assert (nested / "results.json").is_file()

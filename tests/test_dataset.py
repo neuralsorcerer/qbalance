@@ -845,3 +845,70 @@ def test_load_circuits_still_rejects_an_unknown_format(tmp_path):
 
     with pytest.raises(ValueError, match="Unknown circuit format"):
         dataset.load_circuits()
+
+
+def test_save_dataset_cleans_up_when_a_first_write_fails(tmp_path, monkeypatch):
+    """Mutation testing found the no-previous-dataset failure branch unexercised.
+
+    The rollback path distinguishes "a backup was taken" from "there was
+    nothing to back up"; only the former was covered.
+    """
+    import qiskit
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.h(0)
+    qc.measure(0, 0)
+
+    target = tmp_path / "fresh"
+    assert not target.exists()
+
+    def exploding_dump(circuit, stream, *args, **kwargs):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(qiskit.qpy, "dump", exploding_dump)
+    with pytest.raises(RuntimeError, match="write failed"):
+        save_dataset(target, [qc], overwrite=True)
+
+    # Nothing was created, and no temporary directory was left behind.
+    assert not target.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_save_dataset_reports_a_commit_failure_when_there_was_no_previous_dataset(
+    tmp_path, monkeypatch
+):
+    """The rollback branch must not try to restore a backup it never took.
+
+    When no dataset existed, a failing commit has nothing to roll back; the
+    original error has to reach the caller rather than a FileNotFoundError from
+    restoring a non-existent backup.
+    """
+    from qiskit import QuantumCircuit
+
+    import qbalance.dataset as dataset_module
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.h(0)
+    qc.measure(0, 0)
+
+    target = tmp_path / "fresh"
+    assert not target.exists()
+
+    real_replace = dataset_module.os.replace
+
+    def failing_replace(src, dst):
+        # Fail only the commit itself. A restore would come from the .backup
+        # path, and must not be attempted here because nothing was backed up:
+        # letting it through would surface a FileNotFoundError instead of the
+        # real error.
+        if str(dst) == str(target) and not str(src).endswith(".backup"):
+            raise OSError("commit failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dataset_module.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="commit failed"):
+        save_dataset(target, [qc], overwrite=True)
+
+    assert not target.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []

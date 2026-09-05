@@ -691,3 +691,71 @@ def test_twirled_ensembles_reuse_one_pass_manager(monkeypatch):
         profile=False,
     )
     assert len(builds) == 4
+
+
+def test_count_two_qubit_ops_counts_exactly_the_two_qubit_gates():
+    """Mutation testing found this metric unverified.
+
+    ``_count_two_qubit_ops`` produces the ``two_qubit_ops`` metric the default
+    objective weights at 2.0, so a wrong count silently mis-ranks every
+    candidate. Inverting its condition previously broke no test.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    empty = QuantumCircuit(2)
+    assert pipeline._count_two_qubit_ops(empty) == 0
+
+    single_qubit_only = QuantumCircuit(3)
+    single_qubit_only.h(0)
+    single_qubit_only.x(1)
+    single_qubit_only.rz(0.3, 2)
+    assert pipeline._count_two_qubit_ops(single_qubit_only) == 0
+
+    mixed = QuantumCircuit(3, 3)
+    mixed.h(0)
+    mixed.cx(0, 1)
+    mixed.cx(1, 2)
+    mixed.measure(range(3), range(3))
+    assert pipeline._count_two_qubit_ops(mixed) == 2
+
+    # Barriers and delays span qubits but are directives, not gates: a
+    # two-qubit barrier must not inflate the count.
+    with_directives = QuantumCircuit(3, 3)
+    with_directives.h(0)
+    with_directives.cx(0, 1)
+    with_directives.barrier(0, 1)
+    with_directives.delay(16, 0)
+    with_directives.measure(range(3), range(3))
+    assert pipeline._count_two_qubit_ops(with_directives) == 1
+
+    three_qubit = QuantumCircuit(3)
+    three_qubit.ccx(0, 1, 2)
+    assert pipeline._count_two_qubit_ops(three_qubit) == 0
+
+
+def test_compile_one_reports_the_two_qubit_count_of_the_compiled_circuit():
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=5, seed=4)
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+
+    compiled, metrics = pipeline.compile_one(
+        qc,
+        backend=backend,
+        spec=StrategySpec(optimization_level=1, routing_method="sabre"),
+        profile=False,
+    )
+    assert metrics["two_qubit_ops"] == pipeline._count_two_qubit_ops(compiled)
+    assert metrics["two_qubit_ops"] == sum(
+        1
+        for instruction in compiled.data
+        if len(instruction.qubits) == 2
+        and instruction.operation.name not in ("barrier", "delay")
+    )

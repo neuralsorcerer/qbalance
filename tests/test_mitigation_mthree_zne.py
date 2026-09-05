@@ -423,3 +423,11 @@ def test_mthree_mitigation_improves_a_readout_noisy_distribution():
     raw_error = total_variation(ideal_probs, normalized(raw))
     mitigated_error = total_variation(ideal_probs, normalized(mitigated))
     assert mitigated_error < raw_error / 2
+
+
+def test_zne_extrapolation_rejects_non_string_count_keys():
+    """Mutation testing found this validation branch unexercised."""
+    with pytest.raises(ValueError, match="counts keys must be non-empty bitstrings"):
+        zne.zne_extrapolate_counts([1.0, 2.0], [{0: 5}, {"0": 5}])
+    with pytest.raises(ValueError, match="counts keys must be non-empty bitstrings"):
+        zne.zne_extrapolate_counts([1.0, 2.0], [{"": 5}, {"0": 5}])
