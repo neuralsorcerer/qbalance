@@ -11,6 +11,7 @@ import math
 import shutil
 import sys
 import types
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
@@ -2524,3 +2525,37 @@ def test_to_download_creates_missing_parent_directories(tmp_path):
 
     assert out == zip_path
     assert zip_path.is_file()
+
+
+def test_save_refuses_to_overwrite_by_default(tmp_path):
+    """An existing output directory is not replaced unless asked."""
+    balanced = _one_circuit_workload(tmp_path, name="ds_save_default")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "keep.txt").write_text("precious", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        balanced.save(out_dir)
+
+    assert (out_dir / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_save_refuses_to_overwrite_a_directory_holding_the_source_dataset(tmp_path):
+    """overwrite=True deletes the target, so it must not contain the source.
+
+    The guard covers two shapes: the output is the dataset directory itself,
+    or it is an ancestor of it.  Requiring both would make the guard
+    unreachable, and save() would then rmtree the dataset it is reading.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_self")
+    dataset_root = Path(balanced.dataset.root)
+
+    # The output *is* the dataset directory.
+    with pytest.raises(ValueError, match="source dataset"):
+        balanced.save(dataset_root, overwrite=True)
+
+    # The output is an ancestor of the dataset directory.
+    with pytest.raises(ValueError, match="source dataset"):
+        balanced.save(dataset_root.parent, overwrite=True)
+
+    assert (dataset_root / "c0.qpy").is_file()

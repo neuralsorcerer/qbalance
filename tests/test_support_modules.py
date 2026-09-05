@@ -699,3 +699,24 @@ def test_backend_display_name_handles_both_backend_conventions():
     assert backend_display_name(Anonymous()) == "Anonymous"
     # An empty name is no name; fall back rather than print nothing.
     assert backend_display_name(BlankName()) == "BlankName"
+
+
+def test_default_cache_dir_does_not_duplicate_the_app_name(monkeypatch):
+    """platformdirs may or may not already end in the app name.
+
+    Appending unconditionally yields ``.../qbalance/qbalance``, whose ``name``
+    is still "qbalance" -- so checking only the last component cannot tell the
+    two apart.  Pin the whole path for both shapes.
+    """
+    monkeypatch.setattr(
+        utils_module, "user_cache_dir", lambda app: f"/base/cache/{app}"
+    )
+    assert utils_module.default_cache_dir("qbalance") == pathlib.Path(
+        "/base/cache/qbalance"
+    )
+
+    # A platform whose cache dir does not already carry the app name.
+    monkeypatch.setattr(utils_module, "user_cache_dir", lambda app: "/base/Caches")
+    assert utils_module.default_cache_dir("qbalance") == pathlib.Path(
+        "/base/Caches/qbalance"
+    )

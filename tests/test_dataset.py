@@ -206,22 +206,27 @@ def test_save_dataset_restores_existing_dataset_when_commit_fails(
     import qbalance.dataset as dataset_mod
 
     real_replace = dataset_mod.os.replace
-    calls = 0
 
-    def flaky_replace(src, dst):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+    def failing_commit(src, dst):
+        # Fail the commit itself, and only it.  Counting calls is not enough:
+        # dump_json's own atomic write replaces the index inside the staging
+        # directory first, so an ordinal fails the backup instead and never
+        # reaches the rollback this test exists to cover.  The restore comes
+        # from the .backup path and must be allowed through.
+        if str(dst) == str(dataset_dir) and not str(src).endswith(".backup"):
             raise OSError("commit failed")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(dataset_mod.os, "replace", flaky_replace)
+    monkeypatch.setattr(dataset_mod.os, "replace", failing_commit)
 
     with pytest.raises(OSError, match="commit failed"):
         save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
 
+    # The backup was taken and then restored, so the previous dataset is back
+    # exactly as it was, with nothing left beside it.
     assert old_artifact.read_bytes() == old_payload
     assert load_dataset(dataset_dir).records[0].name == "old"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["dataset"]
 
 
 def test_save_dataset_disambiguates_colliding_names(
