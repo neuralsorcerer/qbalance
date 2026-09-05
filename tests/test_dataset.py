@@ -984,3 +984,32 @@ def test_is_safe_artifact_path_rejects_anything_but_a_plain_filename(artifact):
 @pytest.mark.parametrize("artifact", ["c0.qpy", "circuit_1.qpy", "a.b-c_d.qpy"])
 def test_is_safe_artifact_path_accepts_a_plain_filename(artifact):
     assert _is_safe_artifact_path(artifact) is True
+
+
+def test_save_dataset_cleanup_does_not_mask_the_original_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Discarding the staging directory must not replace the real error.
+
+    The cleanup runs in a finally while the failure that caused it is already
+    propagating.  If removing the staging tree raises in turn, the caller is
+    told about the cleanup instead of about what actually went wrong.
+    """
+    _install_fake_qiskit(monkeypatch)
+
+    def _explode(circuit, handle):
+
+        raise ValueError("qpy dump failed")
+
+    monkeypatch.setattr(sys.modules["qiskit"].qpy, "dump", _explode)
+
+    def _rmtree(path, ignore_errors=False):
+
+        if ignore_errors:
+            return
+        raise OSError("rmtree refused")
+
+    monkeypatch.setattr("qbalance.dataset.shutil.rmtree", _rmtree)
+
+    with pytest.raises(ValueError, match="qpy dump failed"):
+        save_dataset(tmp_path / "dataset", [_DummyCircuit("a")])
