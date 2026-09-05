@@ -802,3 +802,46 @@ def test_target_fallback_warning_names_the_backend(caplog):
 
     assert "Backend ibmq_fake_device exposes no transpiler Target" in caplog.text
     assert "bound method" not in caplog.text
+
+
+def test_estimate_circuit_error_matches_the_independent_error_product():
+    """The estimate is 1 - product(1 - e_i) over the circuit's operations.
+
+    This metric carries the heaviest weight in the default objective, so an
+    error here skews every selection.  The existing assertions only bound it
+    to (0, 1), which a quite different formula would also satisfy -- pin the
+    arithmetic against the documented per-operation defaults.
+    """
+    from qiskit import QuantumCircuit
+
+    class NoCalibration:
+        """No calibration data, so every operation takes its default."""
+
+        num_qubits = 2
+        target = None
+
+        @staticmethod
+        def properties():
+
+            return None
+
+    circuit = QuantumCircuit(2, 2)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.cx(0, 1)
+    circuit.barrier()
+    circuit.measure([0, 1], [0, 1])
+
+    # Defaults: two-qubit 0.01, single-qubit 0.001, readout 0.02.
+    expected = 1.0 - (0.99**2) * 0.999 * (0.98**2)
+    error = nal.estimate_circuit_error(NoCalibration(), circuit)
+    assert error == pytest.approx(expected, rel=1e-12, abs=0.0)
+
+    # A barrier spans two qubits but is a scheduling directive, not a gate;
+    # billing it as a two-qubit error would inflate the estimate.
+    without_barrier = QuantumCircuit(2, 2)
+    without_barrier.h(0)
+    without_barrier.cx(0, 1)
+    without_barrier.cx(0, 1)
+    without_barrier.measure([0, 1], [0, 1])
+    assert nal.estimate_circuit_error(NoCalibration(), without_barrier) == error
