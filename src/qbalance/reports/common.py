@@ -150,8 +150,11 @@ def strategy_key(spec: Dict[str, Any]) -> str:
         zne_degree = spec.get("zne_degree", 1)
         if zne_degree != 1:
             parts.append(f"zdeg={zne_degree}")
-        zne_factors = spec.get("zne_factors", _DEFAULT_ZNE_FACTORS)
-        if tuple(zne_factors or ()) != _DEFAULT_ZNE_FACTORS:
+        # Normalize once: the comparison and the label must agree, or a null
+        # factor list compares as "not the default" and then renders through
+        # _format_zne_factors' fallback as the literal string "None".
+        zne_factors = tuple(spec.get("zne_factors", _DEFAULT_ZNE_FACTORS) or ())
+        if zne_factors != _DEFAULT_ZNE_FACTORS:
             parts.append(f"zf={_format_zne_factors(zne_factors)}")
     if spec.get("cutting"):
         parts.append(f"cut{spec.get('max_subcircuit_qubits')}")

@@ -194,3 +194,43 @@ def test_report_rendering_accepts_rows_without_metrics(tmp_path):
 
     assert out.exists()
     assert "opt1" in out.read_text(encoding="utf-8")
+
+
+def test_strategy_key_labels_zne_factors_only_when_they_differ():
+    """Default ZNE factors must not leave a suffix on the key.
+
+    ``strategy_key`` is the identity report rows are grouped by, so a suffix
+    that appears for every ZNE strategy stops distinguishing the ones that
+    actually scale noise differently -- and a missing suffix silently merges
+    them.  Cover the default, an override, and the legacy shapes where the
+    field is absent or null.
+    """
+    from qbalance.strategies import StrategySpec
+
+    default = report_common.strategy_key(
+        StrategySpec(optimization_level=1, zne=True).model_dump()
+    )
+    assert default == "opt1,zne"
+
+    custom = report_common.strategy_key(
+        StrategySpec(
+            optimization_level=1, zne=True, zne_factors=(1.0, 3.0, 5.0)
+        ).model_dump()
+    )
+    assert custom.startswith("opt1,zne,zf=")
+    assert custom != default
+
+    # A legacy file may omit the field entirely, which means the defaults.
+    assert report_common.strategy_key({"optimization_level": 1, "zne": True}) == default
+
+    # An explicit null or empty list is not the default factor set, so it gets
+    # a label -- but the same label, and never the repr of the value itself.
+    # _format_zne_factors falls back to str() on anything it cannot iterate,
+    # which used to render a null factor list as the literal "zf=None".
+    empty_labels = {
+        report_common.strategy_key(
+            {"optimization_level": 1, "zne": True, "zne_factors": value}
+        )
+        for value in (None, [], ())
+    }
+    assert empty_labels == {"opt1,zne,zf="}
