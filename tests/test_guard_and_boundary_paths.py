@@ -345,3 +345,23 @@ def test_fold_global_rejects_a_measurement_that_is_not_terminal():
     for circuit in (shared_clbit, shared_qubit):
         with pytest.raises(ValueError, match="all measurements are terminal"):
             fold_global(circuit, 3.0)
+
+
+def test_zne_does_not_invent_a_parity_class_with_no_mass():
+    """A parity class targeted at exactly zero mass gets no synthetic key.
+
+    The reconstruction creates a missing parity class only when the
+    extrapolation actually assigns it mass.  Creating one at zero puts a
+    bitstring the experiment never sampled, with probability 0, into the
+    returned distribution.
+    """
+    # Fitting (1, -1.0) and (3, -0.4) extrapolates to -1.3, which the clamp
+    # pins to an even-parity target of exactly 0.0.
+    all_odd = zne_extrapolate_counts(
+        [1.0, 3.0], [{"1": 10}, {"1": 7, "0": 3}], degree=1
+    )
+    assert sorted(all_odd) == ["1"]
+
+    # The mirror: an all-even reference clamps the odd target to exactly 0.0.
+    all_even = zne_extrapolate_counts([1.0, 2.0], [{"0": 10}, {"0": 10}], degree=1)
+    assert sorted(all_even) == ["0"]

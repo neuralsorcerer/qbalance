@@ -2509,3 +2509,18 @@ def test_final_measurement_qubits_falls_back_to_the_full_width(tmp_path):
     assert wl._final_measurement_qubits(_NoMeasurements()) == [0, 1, 2]
     assert wl._final_measurement_qubits(_NoWidth()) == []
     assert wl._final_measurement_qubits(_NullWidth()) == []
+
+
+def test_to_download_creates_missing_parent_directories(tmp_path):
+    """The archive path may name a directory that does not exist yet.
+
+    The staging directory is created beside the archive, so the whole parent
+    chain has to exist first.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_dl_nested")
+    zip_path = tmp_path / "deep" / "nested" / "workload.zip"
+
+    out = balanced.to_download(zip_path)
+
+    assert out == zip_path
+    assert zip_path.is_file()
