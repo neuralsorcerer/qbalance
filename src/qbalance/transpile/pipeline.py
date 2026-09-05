@@ -23,7 +23,7 @@ from qbalance.transpile.suppression import (
     apply_pauli_twirling,
     build_dd_pass_manager,
 )
-from qbalance.utils import instruction_parts
+from qbalance.utils import backend_display_name, instruction_parts
 
 log = get_logger(__name__)
 
@@ -216,7 +216,7 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
     log.warning(
         "Backend %s exposes no transpiler Target; falling back to translation-only "
         "compilation, which ignores optimization_level, layout, and routing.",
-        getattr(backend, "name", None) or backend.__class__.__name__,
+        backend_display_name(backend),
     )
     return _generate_stage_pm(backend, spec, initial_layout=initial_layout)
 

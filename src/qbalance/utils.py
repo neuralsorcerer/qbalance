@@ -29,6 +29,29 @@ def _atomic_write_lock(path: Path) -> threading.Lock:
     return _ATOMIC_WRITE_LOCKS[hash(normalized_path) % len(_ATOMIC_WRITE_LOCKS)]
 
 
+def backend_display_name(backend: Any) -> str:
+    """Return a readable name for a backend.
+
+    ``BackendV2`` exposes ``name`` as a string attribute, while BackendV1-style
+    objects expose it as a method.  A bare ``getattr`` therefore yields a bound
+    method -- complete with a memory address -- for precisely the backends that
+    most often need naming in a diagnostic.
+
+    Args:
+        backend: Backend object (or backend-like handle) to name.
+
+    Returns:
+        The backend's name, falling back to its class name.
+
+    Raises:
+        None.
+    """
+    name = getattr(backend, "name", None)
+    if callable(name):
+        name = name()
+    return str(name or backend.__class__.__name__)
+
+
 def validate_integral(
     name: str,
     value: Any,

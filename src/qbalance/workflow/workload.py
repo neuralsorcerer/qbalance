@@ -34,6 +34,7 @@ from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
 from qbalance.utils import (
+    backend_display_name,
     bit_index,
     instruction_parts,
     stable_hash_str,
@@ -1141,10 +1142,7 @@ def _compile_cached(
         # would give the same circuit a different key on every run and the
         # cache could never hit across processes.
         fpr = stable_hash_str(str(circuit))
-    backend_name = getattr(backend, "name", None)
-    if callable(backend_name):
-        backend_name = backend.name()
-    backend_name = str(backend_name or backend.__class__.__name__)
+    backend_name = backend_display_name(backend)
     backend_id = f"{backend_key if backend_key is not None else ''}|{backend_name}"
     key = f"{backend_id}:{fpr}:{spec.model_dump_json()}:profile={profile}"
     import hashlib

@@ -21,6 +21,7 @@ from qbalance.backends import resolver as backend_resolver
 from qbalance.errors import OptionalDependencyError, QBalanceError
 from qbalance.utils import (
     atomic_write_bytes,
+    backend_display_name,
     bit_index,
     default_cache_dir,
     dump_json,
@@ -669,3 +670,32 @@ def test_atomic_write_cleanup_does_not_mask_the_original_error(tmp_path, monkeyp
 
     with pytest.raises(OSError, match="replace failed"):
         utils_module.atomic_write_bytes(tmp_path / "out.bin", b"data")
+
+
+def test_backend_display_name_handles_both_backend_conventions():
+    """BackendV2 exposes name as a string; BackendV1-style as a method.
+
+    A bare getattr returns the bound method for the second kind, so anything
+    naming a backend for a human would print a repr with a memory address --
+    and those are exactly the backends most likely to need naming.
+    """
+
+    class V2Style:
+        name = "fake_kyoto"
+
+    class V1Style:
+        def name(self):
+
+            return "ibmq_fake_device"
+
+    class Anonymous:
+        pass
+
+    class BlankName:
+        name = ""
+
+    assert backend_display_name(V2Style()) == "fake_kyoto"
+    assert backend_display_name(V1Style()) == "ibmq_fake_device"
+    assert backend_display_name(Anonymous()) == "Anonymous"
+    # An empty name is no name; fall back rather than print nothing.
+    assert backend_display_name(BlankName()) == "BlankName"

@@ -774,3 +774,31 @@ def test_compile_one_reports_the_two_qubit_count_of_the_compiled_circuit():
         if len(instruction.qubits) == 2
         and instruction.operation.name not in ("barrier", "delay")
     )
+
+
+def test_target_fallback_warning_names_the_backend(caplog):
+    """The warning must identify which backend lost optimization_level.
+
+    It fires only for backends without a transpiler Target -- BackendV1-style
+    objects, whose ``name`` is a method.  Printing the attribute directly puts
+    a bound-method repr in the log instead of the name.
+    """
+    import logging
+    import types as _types
+
+    class V1Style:
+        target = None
+
+        def name(self):
+
+            return "ibmq_fake_device"
+
+        def configuration(self):
+
+            return _types.SimpleNamespace(basis_gates=["cx", "x", "rz", "sx"])
+
+    with caplog.at_level(logging.WARNING, logger="qbalance.transpile.pipeline"):
+        pipeline._generate_pm(V1Style(), StrategySpec())
+
+    assert "Backend ibmq_fake_device exposes no transpiler Target" in caplog.text
+    assert "bound method" not in caplog.text
