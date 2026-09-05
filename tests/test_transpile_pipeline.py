@@ -868,3 +868,33 @@ def test_compile_one_does_not_profile_by_default():
         qc, backend=backend, spec=StrategySpec(), profile=True
     )
     assert profiled["pass_profile"]["passes"]
+
+
+def test_two_qubit_counting_agrees_across_the_two_implementations():
+    """Both counters must exclude scheduling directives identically.
+
+    ``extract_circuit_metrics`` and ``pipeline._count_two_qubit_ops`` both
+    report two_qubit_ops, from separate copies of the directive-name set
+    (a local literal and _DIRECTIVE_NAMES).  If they ever diverge, the metric
+    silently depends on which path produced it -- and a barrier spanning two
+    qubits counting as a two-qubit gate would inflate the objective for
+    otherwise identical circuits.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.metrics.circuit_metrics import extract_circuit_metrics
+
+    circuit = QuantumCircuit(3, 3)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.barrier(0, 1)  # spans two qubits, is not a gate
+    circuit.cz(1, 2)
+    circuit.delay(16, 0)
+    circuit.measure([0, 1, 2], [0, 1, 2])
+
+    assert pipeline._count_two_qubit_ops(circuit) == 2
+    assert extract_circuit_metrics(circuit)["two_qubit_ops"] == 2.0
+    assert (
+        float(pipeline._count_two_qubit_ops(circuit))
+        == extract_circuit_metrics(circuit)["two_qubit_ops"]
+    )
