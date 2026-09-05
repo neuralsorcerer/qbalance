@@ -751,3 +751,48 @@ def test_builtin_dataset_name_is_validated_before_touching_the_filesystem(
 
     # Nothing anywhere under tmp_path gained a directory.
     assert [p for p in tmp_path.rglob("*") if p.is_dir()] == [data_root]
+
+
+def test_package_logger_defers_to_a_host_that_configured_logging():
+    """qbalance installs a handler only when the application installed none.
+
+    Both halves matter.  Installing one on top of the host's duplicates every
+    record; installing none when the host has no logging leaves the package
+    silent.  The existing regression test cannot pin either, because under
+    pytest the root logger's state is whatever the run happens to leave.
+    """
+    import logging
+
+    from qbalance.logging import LOGGER_NAME, get_logger
+
+    package_logger = logging.getLogger(LOGGER_NAME)
+    saved_handlers = list(package_logger.handlers)
+    saved_propagate = package_logger.propagate
+    saved_level = package_logger.level
+    saved_root = list(logging.root.handlers)
+    try:
+        # Host owns logging: qbalance must stay out of the way and propagate.
+        package_logger.handlers.clear()
+        package_logger.propagate = True
+        logging.root.handlers[:] = [logging.NullHandler()]
+        get_logger("qbalance.probe_host")
+        assert package_logger.handlers == []
+        assert package_logger.propagate is True
+
+        # No host logging: qbalance installs exactly one handler and stops
+        # propagating, so a later basicConfig cannot make records double.
+        package_logger.handlers.clear()
+        package_logger.propagate = True
+        logging.root.handlers[:] = []
+        get_logger("qbalance.probe_bare")
+        assert len(package_logger.handlers) == 1
+        assert package_logger.propagate is False
+
+        # Idempotent: a second call must not stack another handler.
+        get_logger("qbalance.probe_again")
+        assert len(package_logger.handlers) == 1
+    finally:
+        package_logger.handlers[:] = saved_handlers
+        package_logger.propagate = saved_propagate
+        package_logger.setLevel(saved_level)
+        logging.root.handlers[:] = saved_root
