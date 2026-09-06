@@ -2641,3 +2641,48 @@ def test_matrix_output_is_written_atomically(tmp_path, monkeypatch):
     # The previous file is untouched and no partial artifact is left beside it.
     assert out_json.read_text(encoding="utf-8") == "previous results"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["ds_atomic", "matrix.json"]
+
+
+def test_documented_adjust_parameters_match_the_signature():
+    """The adjust() table in the API reference is a user-facing contract.
+
+    A parameter added to the signature but not the table is undiscoverable,
+    and a default that drifts sends readers to the wrong conclusion about
+    what a bare call does.  Neither shows up as a test failure anywhere else.
+    """
+    import inspect
+    import re
+
+    doc_path = Path(__file__).resolve().parents[1] / "docs" / "api-references.md"
+    if not doc_path.is_file():
+        pytest.skip("docs are not present in this checkout")
+
+    block = (
+        doc_path.read_text(encoding="utf-8")
+        .split("`adjust` parameters:")[1]
+        .split("Validation and edge-case")[0]
+    )
+    documented = dict(
+        re.findall(r"^\|\s*`([a-z_]+)`\s*\|\s*`([^`]*)`\s*\|", block, re.M)
+    )
+    actual = {
+        name: param.default
+        for name, param in inspect.signature(wl.Workload.adjust).parameters.items()
+        if name != "self"
+    }
+
+    assert set(documented) == set(actual)
+
+    def rendered(value):
+
+        # Identity checks, not equality: 0 == False in Python, so a dict
+        # lookup keyed on False would claim seed=0 is documented wrong.
+        if value is None:
+            return "None"
+        if value is True:
+            return "True"
+        if value is False:
+            return "False"
+        return repr(value).replace("'", '"')
+
+    assert {name: rendered(value) for name, value in actual.items()} == documented
