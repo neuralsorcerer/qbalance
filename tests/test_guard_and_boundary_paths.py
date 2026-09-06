@@ -355,15 +355,24 @@ def test_zne_does_not_invent_a_parity_class_with_no_mass():
     bitstring the experiment never sampled, with probability 0, into the
     returned distribution.
     """
-    # Fitting (1, -1.0) and (3, -0.4) extrapolates to -1.3, which the clamp
-    # pins to an even-parity target of exactly 0.0.
+    # Both cases must extrapolate *past* the parity boundary so the clamp is
+    # exact with margin.  Landing on it instead -- as an all-even reference
+    # does, giving y0 = 0.999...9 -- makes the target mass exactly zero only
+    # by a last-bit rounding coincidence, and a different BLAS produces a
+    # target of ~1e-15 that legitimately creates the key.
+    #
+    # Fitting (1, -1.0) and (3, -0.4) extrapolates to -1.3, so the even-parity
+    # target clamps to exactly 0.0.
     all_odd = zne_extrapolate_counts(
         [1.0, 3.0], [{"1": 10}, {"1": 7, "0": 3}], degree=1
     )
     assert sorted(all_odd) == ["1"]
 
-    # The mirror: an all-even reference clamps the odd target to exactly 0.0.
-    all_even = zne_extrapolate_counts([1.0, 2.0], [{"0": 10}, {"0": 10}], degree=1)
+    # The mirror: (1, 1.0) and (3, 0.4) extrapolate to 1.3, clamping the
+    # odd-parity target to exactly 0.0.
+    all_even = zne_extrapolate_counts(
+        [1.0, 3.0], [{"0": 10}, {"0": 7, "1": 3}], degree=1
+    )
     assert sorted(all_even) == ["0"]
 
 

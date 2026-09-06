@@ -11,6 +11,8 @@ import re
 import sys
 import types
 
+import pytest
+
 from qbalance.reports import common as report_common
 from qbalance.reports import html as report_html
 from qbalance.reports import markdown as report_md
@@ -273,6 +275,11 @@ def test_html_report_escapes_markup_from_the_matrix_file(tmp_path):
     matrix file -- a CI artifact, a shared benchmark.  Interpolating them raw
     puts live markup into a document the reader opens in a browser.
     """
+    # Needs the real template engine; the stub-based test above pins that
+    # render_html asks for autoescaping, which is what CI can check without
+    # the report extra installed.
+    pytest.importorskip("jinja2")
+
     matrix = _matrix_with(
         tmp_path,
         "<img src=x onerror=alert(1)>",
