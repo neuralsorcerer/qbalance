@@ -234,14 +234,14 @@ def test_fold_global_still_rejects_post_measurement_computation():
     mid_circuit.measure(0, 0)
     mid_circuit.h(0)
     mid_circuit.measure(0, 0)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="all measurements are terminal"):
         zne.fold_global(mid_circuit, 3.0)
 
     unmeasured_qubit = QuantumCircuit(2, 1)
     unmeasured_qubit.h(0)
     unmeasured_qubit.measure(0, 0)
     unmeasured_qubit.x(1)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="all measurements are terminal"):
         zne.fold_global(unmeasured_qubit, 3.0)
 
 

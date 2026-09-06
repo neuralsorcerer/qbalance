@@ -178,9 +178,9 @@ def test_report_rendering_rejects_malformed_matrix_files(tmp_path):
 
     broken = tmp_path / "broken.json"
     broken.write_text("{not json", encoding="utf-8")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid matrix JSON in"):
         report_md.render_markdown(broken, tmp_path / "out")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Could not read matrix JSON from"):
         report_md.render_markdown(tmp_path / "absent.json", tmp_path / "out")
 
 
