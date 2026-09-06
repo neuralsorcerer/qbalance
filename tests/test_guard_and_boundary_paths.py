@@ -395,3 +395,71 @@ def test_backend_basis_gates_falls_back_to_the_backend_configuration():
     assert _backend_basis_gates(NoBasis(), None) is None
     assert _backend_basis_gates(Broken(), None) is None
     assert _backend_basis_gates(object(), None) is None
+
+
+def test_fold_global_preserves_the_circuit_unitary():
+    """Folding scales noise, not the computation.
+
+    ``U (U-dagger U)^r`` must implement the same unitary as ``U``; that is the
+    entire premise of zero-noise extrapolation.  The fold factor and the
+    terminal-measurement rule are pinned elsewhere, but nothing checked that
+    the circuit being folded still computes the same thing -- a wrongly
+    composed inverse would extrapolate a different circuit's noise curve and
+    never fail a test.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import Operator
+
+    from qbalance.mitigation.zne import fold_global
+
+    circuit = QuantumCircuit(2)
+    circuit.h(0)
+    circuit.cx(0, 1)
+    circuit.rz(0.7, 1)
+    circuit.sx(0)
+
+    reference = Operator(circuit)
+    for scale in (2.0, 3.0, 4.0, 5.0):
+        # equiv compares up to global phase, which folding does not preserve
+        # and which no measurement can observe.
+        assert Operator(fold_global(circuit, scale)).equiv(reference)
+
+
+def test_measurement_twirling_round_trips_through_untwirl():
+    """Untwirling must undo exactly what twirling did.
+
+    Twirling flips a random subset of classical bits and untwirling inverts
+    that map; if the two disagree on bit order or on which bits were flipped,
+    every mitigated distribution is silently permuted.  Drive several seeds so
+    the assertion does not rest on one lucky flip pattern.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.transpile.suppression import (
+        apply_measurement_twirling,
+        apply_measurement_untwirl_counts,
+    )
+
+    for seed in range(8):
+        circuit = QuantumCircuit(3, 3)
+        circuit.h(0)
+        circuit.cx(0, 1)
+        circuit.cx(1, 2)
+        circuit.measure([0, 1, 2], [0, 1, 2])
+
+        _, flip_map = apply_measurement_twirling(circuit, seed=seed)
+
+        ideal = {"000": 40, "111": 60, "010": 7}
+
+        def as_measured(key):
+
+            bits = list(key)
+            for clbit, flipped in flip_map.items():
+                if flipped:
+                    position = len(bits) - 1 - clbit
+                    if 0 <= position < len(bits):
+                        bits[position] = "1" if bits[position] == "0" else "0"
+            return "".join(bits)
+
+        observed = {as_measured(k): v for k, v in ideal.items()}
+        assert apply_measurement_untwirl_counts(observed, flip_map) == ideal
