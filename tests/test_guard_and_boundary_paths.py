@@ -426,12 +426,17 @@ def test_fold_global_preserves_the_circuit_unitary():
 
 
 def test_measurement_twirling_round_trips_through_untwirl():
-    """Untwirling must undo exactly what twirling did.
+    """Untwirling inverts the flip map under the little-endian key order.
 
-    Twirling flips a random subset of classical bits and untwirling inverts
-    that map; if the two disagree on bit order or on which bits were flipped,
-    every mitigated distribution is silently permuted.  Drive several seeds so
-    the assertion does not rest on one lucky flip pattern.
+    The authoritative check for this property runs the twirled circuit on a
+    simulator (test_transpile_pipeline.py), but it is skipped wherever
+    qiskit-aer is absent -- which includes CI, since that installs only the
+    dev extra.  This is the aer-free counterpart: it restates the documented
+    bit order independently and checks untwirling inverts a flip expressed in
+    those terms, so a bit-order regression still fails somewhere.
+
+    It does not re-verify that the twirled circuit really flips those bits;
+    that is the simulator test's job.
     """
     from qiskit import QuantumCircuit
 
