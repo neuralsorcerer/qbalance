@@ -796,3 +796,30 @@ def test_package_logger_defers_to_a_host_that_configured_logging():
         package_logger.propagate = saved_propagate
         package_logger.setLevel(saved_level)
         logging.root.handlers[:] = saved_root
+
+
+def test_package_namespace_matches_its_declared_api():
+    """Every public name on the package is one it means to export.
+
+    A plain ``from x import Y`` at module scope binds Y into the package
+    namespace, so a helper imported for internal use becomes part of the
+    surface people can reach.  The module underscore-prefixes such imports
+    for exactly that reason; this keeps the next one from slipping through.
+    """
+    import types
+
+    import qbalance
+
+    exported = set(qbalance.__all__)
+    leaked = {
+        name
+        for name in dir(qbalance)
+        if not name.startswith("_") and name not in exported
+        # Submodules are reachable by import and are not part of __all__.
+        and not isinstance(getattr(qbalance, name), types.ModuleType)
+    }
+
+    assert leaked == set()
+    # Everything promised is actually there.
+    assert all(hasattr(qbalance, name) for name in exported)
+    assert len(exported) == len(qbalance.__all__), "__all__ has duplicates"

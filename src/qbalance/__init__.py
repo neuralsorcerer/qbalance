@@ -4,7 +4,7 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-from importlib.metadata import PackageNotFoundError
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _installed_version
 
 from qbalance._version import __version__ as _fallback_version
@@ -27,7 +27,7 @@ try:
     # the environment actually in use; _version.py is the in-tree fallback for
     # running straight from a source checkout.
     __version__ = _installed_version("qbalance")
-except PackageNotFoundError:  # pragma: no cover - only without an install
+except _PackageNotFoundError:  # pragma: no cover - only without an install
     __version__ = _fallback_version
 
 __all__ = [
