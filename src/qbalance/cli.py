@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from qbalance.benchmarking.matrix import run_matrix
@@ -59,7 +60,10 @@ def dataset_cmd(
         raise typer.BadParameter("Only 'examples' is supported right now")
     circuits = _make_tiny()
     ds = save_dataset(out, circuits, overwrite=overwrite)
-    console.print(f"[green]Wrote dataset[/green] {ds.root} with {len(ds)} circuits")
+    console.print(
+        f"[green]Wrote dataset[/green] {escape(str(ds.root))} "
+        f"with {len(ds)} circuits"
+    )
 
 
 @app.command("adjust")
@@ -85,7 +89,7 @@ def adjust_cmd(
     execute: bool = typer.Option(
         False,
         "--execute",
-        help="Execute circuits (needs runnable backend or qbalance[aer])",
+        help="Execute circuits (needs runnable backend or qbalance\\[aer])",
     ),
     shots: int = typer.Option(1024, "--shots"),
     profile: bool = typer.Option(False, "--profile", help="Enable per-pass profiling"),
@@ -114,7 +118,7 @@ def adjust_cmd(
         pareto (default: typer.Option(False, '--pareto', help='Use Pareto-front selection')): Pareto value consumed by this routine.
         max_candidates (default: typer.Option(24, '--max-candidates')): Max candidates value consumed by this routine.
         strategies_json (default: None): Optional JSON file defining explicit candidate strategies.
-        execute (default: typer.Option(False, '--execute', help='Execute circuits (needs runnable backend or qbalance[aer])')): Whether to run compiled circuits and collect counts.
+        execute (default: typer.Option(False, '--execute', help='Execute circuits (needs runnable backend or qbalance\\[aer])')): Whether to run compiled circuits and collect counts.
         shots (default: typer.Option(1024, '--shots')): Number of shots used when executing circuits on a backend.
         profile (default: typer.Option(False, '--profile', help='Enable per-pass profiling')): Whether pass-level transpiler profiling is enabled.
         overwrite (default: typer.Option(False, '--overwrite')): Whether existing files/directories may be replaced.
@@ -225,7 +229,7 @@ def matrix_cmd(
         seed=seed,
         profile=profile,
     )
-    console.print(f"[green]Wrote[/green] {p}")
+    console.print(f"[green]Wrote[/green] {escape(str(p))}")
 
 
 @app.command("report")
@@ -233,7 +237,7 @@ def report_cmd(
     matrix_json: Path = typer.Argument(...),
     out: Path = typer.Option(..., "--out", "-o"),
     html: bool = typer.Option(
-        False, "--html", help="Also emit HTML (requires qbalance[report])"
+        False, "--html", help="Also emit HTML (requires qbalance\\[report])"
     ),
 ):
     """Report cmd used by the qbalance workflow.
@@ -241,7 +245,7 @@ def report_cmd(
     Args:
         matrix_json (default: typer.Argument(...)): Matrix json value consumed by this routine.
         out (default: typer.Option(..., '--out', '-o')): Destination path for generated output files.
-        html (default: typer.Option(False, '--html', help='Also emit HTML (requires qbalance[report])')): Html value consumed by this routine.
+        html (default: typer.Option(False, '--html', help='Also emit HTML (requires qbalance\\[report])')): Html value consumed by this routine.
 
     Returns:
         Computed value produced by this routine.
@@ -250,10 +254,10 @@ def report_cmd(
         None.
     """
     md = render_markdown(matrix_json, out)
-    console.print(f"[green]Wrote[/green] {md}")
+    console.print(f"[green]Wrote[/green] {escape(str(md))}")
     if html:
         h = render_html(matrix_json, out)
-        console.print(f"[green]Wrote[/green] {h}")
+        console.print(f"[green]Wrote[/green] {escape(str(h))}")
 
 
 @app.command("plugins")
@@ -337,6 +341,10 @@ def compile_cmd(
     if out.exists():
         if not overwrite:
             raise typer.BadParameter(f"{out} exists (use --overwrite)")
+        if not out.is_dir():
+            # --overwrite replaces a previous output directory; it must never
+            # delete an unrelated file the user pointed at by mistake.
+            raise typer.BadParameter(f"{out} exists and is not a directory")
         import shutil
 
         shutil.rmtree(out)
@@ -359,7 +367,7 @@ def compile_cmd(
             with (out / "compiled" / f"{artifact_stem}.qpy").open("wb") as f:
                 qpy.dump(c, f)
     (out / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
-    console.print(f"[green]Wrote[/green] {out}")
+    console.print(f"[green]Wrote[/green] {escape(str(out))}")
 
 
 if __name__ == "__main__":

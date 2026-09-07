@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-from qbalance.errors import OptionalDependencyError
+from qbalance.errors import OptionalDependencyError, QBalanceError
 from qbalance.logging import get_logger
 
 log = get_logger(__name__)
@@ -32,23 +32,48 @@ def find_cuts_best_effort(
         Tuple[Any, Dict[str, Any]] with the computed result.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: Raised when qiskit-addon-cutting is not installed.
+        QBalanceError: Raised when the installed qiskit-addon-cutting does not
+            expose the automated cut finder.
     """
     try:
-        from qiskit_addon_cutting.cutting import (
-            DeviceConstraints,
-            OptimizationParameters,
-            find_cuts,
-        )
-    except Exception as e:  # pragma: no cover
+        import qiskit_addon_cutting
+    except Exception as e:
         raise OptionalDependencyError(
             "qiskit-addon-cutting is required (install qbalance[cutting])"
         ) from e
 
+    # The automated cut finder lives at the package root.  Keep the legacy
+    # submodule path as a fallback, but never report a missing symbol as a
+    # missing package: that message sent users to reinstall a dependency they
+    # already had.
+    try:
+        DeviceConstraints = qiskit_addon_cutting.DeviceConstraints
+        OptimizationParameters = qiskit_addon_cutting.OptimizationParameters
+        find_cuts = qiskit_addon_cutting.find_cuts
+    except AttributeError:
+        try:
+            from qiskit_addon_cutting.cutting import (  # type: ignore[import-not-found,no-redef]
+                DeviceConstraints,
+                OptimizationParameters,
+                find_cuts,
+            )
+        except Exception as e:
+            raise QBalanceError(
+                "Installed qiskit-addon-cutting does not expose the automated cut "
+                f"finder (find_cuts/OptimizationParameters/DeviceConstraints): {e}"
+            ) from e
+
     optimization = OptimizationParameters(
         max_backjumps=max_backjumps, max_gamma=max_gamma
     )
-    constraints = DeviceConstraints(max_subcircuit_width=int(max_subcircuit_qubits))
+    subcircuit_qubits = int(max_subcircuit_qubits)
+    try:
+        constraints = DeviceConstraints(qubits_per_subcircuit=subcircuit_qubits)
+    except TypeError:
+        # Older releases spelled the same constraint differently.
+        constraints = DeviceConstraints(max_subcircuit_width=subcircuit_qubits)
+
     cut_circuit, meta = find_cuts(
         circuit, optimization=optimization, constraints=constraints
     )

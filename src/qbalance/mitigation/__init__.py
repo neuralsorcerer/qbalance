@@ -5,6 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 from qbalance.mitigation.mthree import apply_mthree_mitigation
-from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
+from qbalance.mitigation.zne import (
+    fold_global,
+    fold_global_for_backend,
+    zne_extrapolate_counts,
+)
 
-__all__ = ["apply_mthree_mitigation", "zne_extrapolate_counts", "fold_global"]
+__all__ = [
+    "apply_mthree_mitigation",
+    "zne_extrapolate_counts",
+    "fold_global",
+    "fold_global_for_backend",
+]

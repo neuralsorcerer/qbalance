@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
@@ -18,7 +18,7 @@ def apply_mthree_mitigation(
     backend: Any,
     raw_counts: Dict[str, int],
     measured_qubits: List[int],
-    shots: int,
+    shots: Optional[int] = None,
     calibration_shots: int = 10_000,
 ) -> Dict[str, float]:
     """Apply mthree mitigation used by the qbalance workflow.
@@ -26,9 +26,14 @@ def apply_mthree_mitigation(
     Args:
         backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
         raw_counts: Raw counts value consumed by this routine.
-        measured_qubits: Measured qubits value consumed by this routine.
-        shots: Number of shots used when executing circuits on a backend.
-        calibration_shots (default: 10000): Calibration shots value consumed by this routine.
+        measured_qubits: Physical qubit feeding each classical bit, ordered by
+            classical bit index.  Getting this order wrong degrades the
+            correction silently rather than failing.
+        shots (default: None): Accepted for call-site symmetry and recorded by
+            callers; mthree derives the shot count from ``raw_counts`` and takes
+            its calibration budget from ``calibration_shots``, so this value is
+            not used here.
+        calibration_shots (default: 10000): Shot budget for mthree's calibration.
 
     Returns:
         Dict[str, float] with the computed result.

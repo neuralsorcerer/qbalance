@@ -28,7 +28,9 @@ def resolve(spec: str) -> Any:
         QBalanceError: Raised when input validation fails or a dependent operation cannot be completed.
         OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
     """
-    parts = spec.split(":")
+    # Strip each part so the same tolerant spelling the fake plugin accepts
+    # ("aer : simulator") resolves here too.
+    parts = [part.strip() for part in spec.split(":")]
     if len(parts) < 2:
         raise QBalanceError(f"Invalid aer backend spec: {spec!r}")
 

@@ -21,6 +21,7 @@ from qbalance.dataset import (
     CircuitRecord,
     _build_unique_artifact,
     _build_unique_name,
+    _is_safe_artifact_path,
     _normalize_metadata_entry,
     load_data,
     load_dataset,
@@ -205,22 +206,27 @@ def test_save_dataset_restores_existing_dataset_when_commit_fails(
     import qbalance.dataset as dataset_mod
 
     real_replace = dataset_mod.os.replace
-    calls = 0
 
-    def flaky_replace(src, dst):
-        nonlocal calls
-        calls += 1
-        if calls == 2:
+    def failing_commit(src, dst):
+        # Fail the commit itself, and only it.  Counting calls is not enough:
+        # dump_json's own atomic write replaces the index inside the staging
+        # directory first, so an ordinal fails the backup instead and never
+        # reaches the rollback this test exists to cover.  The restore comes
+        # from the .backup path and must be allowed through.
+        if str(dst) == str(dataset_dir) and not str(src).endswith(".backup"):
             raise OSError("commit failed")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(dataset_mod.os, "replace", flaky_replace)
+    monkeypatch.setattr(dataset_mod.os, "replace", failing_commit)
 
     with pytest.raises(OSError, match="commit failed"):
         save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
 
+    # The backup was taken and then restored, so the previous dataset is back
+    # exactly as it was, with nothing left beside it.
     assert old_artifact.read_bytes() == old_payload
     assert load_dataset(dataset_dir).records[0].name == "old"
+    assert [entry.name for entry in tmp_path.iterdir()] == ["dataset"]
 
 
 def test_save_dataset_disambiguates_colliding_names(
@@ -764,3 +770,336 @@ def test_load_circuits_raises_optional_dependency_error_when_qiskit_missing(
 
     with pytest.raises(OptionalDependencyError, match="qiskit"):
         dataset.load_circuits()
+
+
+def test_save_dataset_bounds_long_circuit_names(tmp_path):
+    """Regression: circuit names become filenames and must fit the filesystem.
+
+    A 300-character circuit name produced a 304-character artifact filename,
+    which most filesystems reject with ENAMETOOLONG, so saving crashed with a
+    raw OSError instead of writing the dataset.
+    """
+    from qiskit import QuantumCircuit
+
+    circuits = []
+    for name in ("x" * 300, "y" * 300, "a" * 200 + "ONE", "a" * 200 + "TWO", "short"):
+        qc = QuantumCircuit(1, 1, name=name)
+        qc.h(0)
+        qc.measure(0, 0)
+        circuits.append(qc)
+
+    ds = save_dataset(tmp_path / "ds", circuits, overwrite=True)
+
+    artifacts = [record.artifact for record in ds.records]
+    assert len(set(artifacts)) == len(circuits)
+    for artifact in artifacts:
+        assert len(artifact.encode("utf-8")) <= 255
+        assert (tmp_path / "ds" / artifact).is_file()
+    # Long names sharing a prefix must not collapse onto one truncated stem.
+    assert artifacts[2] != artifacts[3]
+    # Short names keep their readable stem.
+    assert artifacts[4] == "short.qpy"
+
+    reloaded = load_dataset(tmp_path / "ds")
+    assert reloaded.names() == ds.names()
+    assert len(reloaded.load_circuits()) == len(circuits)
+
+
+def test_load_circuits_names_the_record_behind_an_unreadable_artifact(tmp_path):
+    """A corrupt artifact should say which record it belongs to.
+
+    Every other failure this loader can hit -- missing artifact, unsafe path,
+    unsupported format -- names the offending record, but a truncated or
+    corrupt QPY file surfaced a bare struct error with no clue which file was
+    at fault. Interrupted copies and partially extracted bundles make that a
+    realistic way to meet a dataset.
+    """
+    from qiskit import QuantumCircuit
+
+    circuits = []
+    for name in ("first", "second", "third"):
+        qc = QuantumCircuit(1, 1, name=name)
+        qc.h(0)
+        qc.measure(0, 0)
+        circuits.append(qc)
+    save_dataset(tmp_path / "ds", circuits, overwrite=True)
+
+    artifact = tmp_path / "ds" / "second.qpy"
+    healthy = artifact.read_bytes()
+
+    for payload in (b"", healthy[:20], b"NOTQPY" + b"\x00" * 64):
+        artifact.write_bytes(payload)
+        with pytest.raises(ValueError) as excinfo:
+            load_dataset(tmp_path / "ds").load_circuits()
+        message = str(excinfo.value)
+        assert "index 1" in message
+        assert "'second'" in message
+        assert "second.qpy" in message
+
+    artifact.write_bytes(healthy)
+    assert len(load_dataset(tmp_path / "ds").load_circuits()) == 3
+
+
+def test_load_circuits_still_rejects_an_unknown_format(tmp_path):
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.h(0)
+    qc.measure(0, 0)
+    dataset = save_dataset(tmp_path / "ds", [qc], overwrite=True)
+    dataset.records[0].format = "exe"
+
+    with pytest.raises(ValueError, match="Unknown circuit format"):
+        dataset.load_circuits()
+
+
+def test_save_dataset_cleans_up_when_a_first_write_fails(tmp_path, monkeypatch):
+    """Mutation testing found the no-previous-dataset failure branch unexercised.
+
+    The rollback path distinguishes "a backup was taken" from "there was
+    nothing to back up"; only the former was covered.
+    """
+    import qiskit
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.h(0)
+    qc.measure(0, 0)
+
+    target = tmp_path / "fresh"
+    assert not target.exists()
+
+    def exploding_dump(circuit, stream, *args, **kwargs):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(qiskit.qpy, "dump", exploding_dump)
+    with pytest.raises(RuntimeError, match="write failed"):
+        save_dataset(target, [qc], overwrite=True)
+
+    # Nothing was created, and no temporary directory was left behind.
+    assert not target.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_save_dataset_reports_a_commit_failure_when_there_was_no_previous_dataset(
+    tmp_path, monkeypatch
+):
+    """The rollback branch must not try to restore a backup it never took.
+
+    When no dataset existed, a failing commit has nothing to roll back; the
+    original error has to reach the caller rather than a FileNotFoundError from
+    restoring a non-existent backup.
+    """
+    from qiskit import QuantumCircuit
+
+    import qbalance.dataset as dataset_module
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.h(0)
+    qc.measure(0, 0)
+
+    target = tmp_path / "fresh"
+    assert not target.exists()
+
+    real_replace = dataset_module.os.replace
+
+    def failing_replace(src, dst):
+        # Fail only the commit itself. A restore would come from the .backup
+        # path, and must not be attempted here because nothing was backed up:
+        # letting it through would surface a FileNotFoundError instead of the
+        # real error.
+        if str(dst) == str(target) and not str(src).endswith(".backup"):
+            raise OSError("commit failed")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(dataset_module.os, "replace", failing_replace)
+    with pytest.raises(OSError, match="commit failed"):
+        save_dataset(target, [qc], overwrite=True)
+
+    assert not target.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_save_dataset_overwrite_removes_its_backup_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A successful overwrite must not leave its rollback copy behind.
+
+    ``save_dataset`` moves the previous dataset aside before committing the
+    new one so a failed write can be rolled back.  When the commit succeeds
+    that copy is garbage, and leaving it behind silently doubles the on-disk
+    size of every overwritten dataset.
+    """
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+
+    save_dataset(dataset_dir, [_DummyCircuit("old")])
+    save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
+
+    leftovers = sorted(p.name for p in tmp_path.iterdir() if p.name != "dataset")
+    assert leftovers == []
+
+
+def test_save_dataset_creates_missing_parent_directories(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Callers pass a nested output path that need not exist yet.
+
+    The staging directory is created beside the destination, so the whole
+    parent chain has to exist before the temporary directory can be made.
+    """
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "deep" / "nested" / "dataset"
+
+    dataset = save_dataset(dataset_dir, [_DummyCircuit("only")])
+
+    assert dataset_dir.is_dir()
+    assert dataset.records[0].artifact == "only.qpy"
+    assert (dataset_dir / "only.qpy").is_file()
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        "",  # no name at all
+        "/abs/c0.qpy",  # absolute
+        "\\abs\\c0.qpy",
+        "nested/c0.qpy",  # more than one component
+        "..",  # traversal
+        ".",
+        "../c0.qpy",
+        "c0.qpy\x00",  # embedded NUL
+    ],
+)
+def test_is_safe_artifact_path_rejects_anything_but_a_plain_filename(artifact):
+    """The guard has to stand on its own, not on its caller's checks.
+
+    ``load_dataset`` validates the record before calling this, so exercising
+    the helper directly is what pins its standalone contract -- notably the
+    component-count check, which the caller's own screening never reaches.
+
+    The separator rejection runs first, so the later ``is_absolute()`` check
+    is unreachable on POSIX (an absolute path must contain "/") and stays
+    dead defence in depth; the absolute cases below are therefore rejected by
+    the separator rule, not by that branch.
+    """
+    assert _is_safe_artifact_path(artifact) is False
+
+
+@pytest.mark.parametrize("artifact", ["c0.qpy", "circuit_1.qpy", "a.b-c_d.qpy"])
+def test_is_safe_artifact_path_accepts_a_plain_filename(artifact):
+    assert _is_safe_artifact_path(artifact) is True
+
+
+def test_save_dataset_cleanup_does_not_mask_the_original_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """Discarding the staging directory must not replace the real error.
+
+    The cleanup runs in a finally while the failure that caused it is already
+    propagating.  If removing the staging tree raises in turn, the caller is
+    told about the cleanup instead of about what actually went wrong.
+    """
+    _install_fake_qiskit(monkeypatch)
+
+    def _explode(circuit, handle):
+
+        raise ValueError("qpy dump failed")
+
+    monkeypatch.setattr(sys.modules["qiskit"].qpy, "dump", _explode)
+
+    def _rmtree(path, ignore_errors=False):
+
+        if ignore_errors:
+            return
+        raise OSError("rmtree refused")
+
+    monkeypatch.setattr("qbalance.dataset.shutil.rmtree", _rmtree)
+
+    with pytest.raises(ValueError, match="qpy dump failed"):
+        save_dataset(tmp_path / "dataset", [_DummyCircuit("a")])
+
+
+def test_dataset_round_trip_preserves_circuits_through_real_qpy(tmp_path):
+    """What comes back must be what went in.
+
+    Most dataset tests stub qiskit's qpy with a JSON shim to exercise the
+    surrounding bookkeeping, which leaves the real serialization -- the whole
+    point of the format -- unchecked.  Save and reload through the genuine
+    encoder and compare structure, parameters and exact float payloads.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.circuit import Parameter
+
+    mixed = QuantumCircuit(3, 3, name="mixed")
+    mixed.h(0)
+    mixed.cx(0, 1)
+    angle = 0.12345678901234567
+    mixed.rz(angle, 2)
+    mixed.barrier()
+    mixed.measure([0, 1, 2], [0, 1, 2])
+
+    no_clbits = QuantumCircuit(2, name="no_clbits")
+    no_clbits.sx(0)
+    no_clbits.cz(0, 1)
+
+    parametric = QuantumCircuit(1, name="parametric")
+    parametric.rx(Parameter("theta"), 0)
+
+    circuits = [mixed, no_clbits, parametric]
+    metadata = [{"index": i, "nested": {"ok": True}} for i in range(len(circuits))]
+
+    save_dataset(tmp_path / "ds", circuits, metadata=metadata)
+    dataset = load_dataset(tmp_path / "ds")
+    loaded = dataset.load_circuits()
+
+    assert [r.metadata for r in dataset.records] == metadata
+    assert len(loaded) == len(circuits)
+    for original, restored in zip(circuits, loaded):
+        assert restored.name == original.name
+        assert (restored.num_qubits, restored.num_clbits) == (
+            original.num_qubits,
+            original.num_clbits,
+        )
+        assert [i.operation.name for i in restored.data] == [
+            i.operation.name for i in original.data
+        ]
+        assert sorted(map(str, restored.parameters)) == sorted(
+            map(str, original.parameters)
+        )
+
+    # Rotation angles must survive bit-exactly, not merely close.
+    restored_angle = next(
+        i.operation.params[0] for i in loaded[0].data if i.operation.name == "rz"
+    )
+    assert restored_angle == angle
+
+
+def test_save_dataset_survives_a_failure_removing_its_backup(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A committed save must not fail because the backup could not be removed.
+
+    This cleanup runs only after the commit succeeded, so the new dataset is
+    already in place.  Letting the removal raise turns a completed save into a
+    reported failure and sends the caller looking for a problem that is not
+    there; a leftover backup directory is the lesser evil.
+    """
+    _install_fake_qiskit(monkeypatch)
+    dataset_dir = tmp_path / "dataset"
+    save_dataset(dataset_dir, [_DummyCircuit("old")])
+
+    import qbalance.dataset as dataset_mod
+
+    def _rmtree(path, ignore_errors=False):
+
+        if ignore_errors:
+            return
+        raise OSError("rmtree refused")
+
+    monkeypatch.setattr(dataset_mod.shutil, "rmtree", _rmtree)
+
+    result = save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
+
+    assert result.records[0].name == "new"
+    assert load_dataset(dataset_dir).records[0].name == "new"

@@ -27,13 +27,20 @@ from qbalance.diagnostics.distribution import cvm_1d, emd_1d, ks_1d
 from qbalance.execution import run_counts
 from qbalance.logging import get_logger
 from qbalance.mitigation.mthree import apply_mthree_mitigation
-from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
+from qbalance.mitigation.zne import fold_global_for_backend, zne_extrapolate_counts
 from qbalance.objectives import Objective, default_objective
 from qbalance.search import BanditSearcher, default_candidate_strategies, pareto_front
 from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
-from qbalance.utils import bit_index, instruction_parts, validate_integral
+from qbalance.utils import (
+    atomic_write_bytes,
+    backend_display_name,
+    bit_index,
+    instruction_parts,
+    stable_hash_str,
+    validate_integral,
+)
 
 log = get_logger(__name__)
 
@@ -112,6 +119,12 @@ class BalancedWorkload:
         for k in ["depth", "two_qubit_ops"]:
             x1 = [_finite_float_or_default(m.get(k), 0.0) for m in base_ms]
             x2 = [_finite_float_or_default(m.get(k), 0.0) for m in sel_ms]
+            if not x1 or not x2:
+                # A workload with no selections (an empty dataset, or an empty
+                # split) has nothing to compare; the distance helpers reject
+                # empty samples, and reporting must not fail on an empty run.
+                lines.append(f"  dist[{k}]: n/a (no comparable samples)")
+                continue
             lines.append(
                 f"  dist[{k}]: EMD={emd_1d(x1, x2):.4g}  CVM={cvm_1d(x1, x2):.4g}  KS={ks_1d(x1, x2):.4g}"
             )
@@ -282,6 +295,12 @@ class BalancedWorkload:
         for k in ["depth", "two_qubit_ops", "estimated_error"]:
             x1 = [_finite_float_or_default(m.get(k), 0.0) for m in base_ms]
             x2 = [_finite_float_or_default(m.get(k), 0.0) for m in sel_ms]
+            if not x1 or not x2:
+                # Match ``agg``: an empty sample set reports NaN rather than
+                # raising out of the distance helpers.
+                nan = float("nan")
+                out[k] = {"emd": nan, "cvm": nan, "ks": nan}
+                continue
             out[k] = {"emd": emd_1d(x1, x2), "cvm": cvm_1d(x1, x2), "ks": ks_1d(x1, x2)}
         return out
 
@@ -296,12 +315,20 @@ class BalancedWorkload:
             None. This method updates state or performs side effects only.
 
         Raises:
-            FileExistsError: Raised when input validation fails or a dependent operation cannot be completed.
+            FileExistsError: Raised when the output directory exists and overwrite is False.
+            NotADirectoryError: Raised when the output path exists but is not a directory.
+            ValueError: Raised when overwriting would delete this workload's own dataset.
         """
         out_dir = Path(out_dir)
         if out_dir.exists():
             if not overwrite:
                 raise FileExistsError(f"{out_dir} exists (use overwrite=True)")
+            if not out_dir.is_dir():
+                # overwrite=True means "replace this workload directory", never
+                # "delete whatever file happens to sit at this path".
+                raise NotADirectoryError(
+                    f"Cannot overwrite {out_dir}: it exists and is not a directory."
+                )
             dataset_root = Path(self.dataset.root).resolve()
             out_resolved = out_dir.resolve()
             if dataset_root == out_resolved or out_resolved in dataset_root.parents:
@@ -342,8 +369,10 @@ class BalancedWorkload:
                 for name, strategies in self.evaluation_history.items()
             },
         }
-        (out_dir / "results.json").write_text(
-            json.dumps(results, indent=2), encoding="utf-8"
+        # Read back by load_balanced_workload, so a partial write must not be
+        # left behind for the next run to choke on.
+        atomic_write_bytes(
+            out_dir / "results.json", json.dumps(results, indent=2).encode("utf-8")
         )
         (out_dir / "summary.txt").write_text(self.summary() + "\n", encoding="utf-8")
 
@@ -698,7 +727,12 @@ class Workload:
         baseline_spec = StrategySpec(optimization_level=1, routing_method="sabre")
         for qc, rec in zip(circuits, self.dataset.records):
             compiled, m = _compile_cached(
-                qc, backend, baseline_spec, profile=profile, cache_root=cache_root
+                qc,
+                backend,
+                baseline_spec,
+                profile=profile,
+                cache_root=cache_root,
+                backend_key=self.backend_spec,
             )
             baseline_metrics[rec.name] = m
 
@@ -721,6 +755,7 @@ class Workload:
                     seed=seed,
                     profile=profile,
                     cache_root=cache_root,
+                    backend_key=self.backend_spec,
                 )
                 if metrics is not None:
                     record_evals.append((spec, metrics))
@@ -820,6 +855,7 @@ def _evaluate_candidate(
     seed: int,
     profile: bool,
     cache_root: Optional[Path],
+    backend_key: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Compile and optionally execute one candidate strategy for one circuit.
 
@@ -835,12 +871,25 @@ def _evaluate_candidate(
             working, _cut_meta = find_cuts_best_effort(
                 working, spec.max_subcircuit_qubits
             )
-        except Exception:
-            # if cutting fails, skip this candidate
+        except Exception as e:
+            # A candidate skipped here leaves no trace in the evaluation history
+            # or the rankings, so say why: silence here is what let a broken
+            # cutting integration look like "cutting simply was not selected".
+            log.warning(
+                "Skipping candidate: circuit cutting failed for "
+                "max_subcircuit_qubits=%s: %s",
+                spec.max_subcircuit_qubits,
+                e,
+            )
             return None
 
     compiled, m = _compile_cached(
-        working, backend, spec, profile=profile, cache_root=cache_root
+        working,
+        backend,
+        spec,
+        profile=profile,
+        cache_root=cache_root,
+        backend_key=backend_key,
     )
 
     # optional execution for mitigation or if execute=True
@@ -871,7 +920,7 @@ def _evaluate_candidate(
                     factors = list(spec.zne_factors)
                     counts_pf = []
                     for f in factors:
-                        c_fold = fold_global(compiled, f)
+                        c_fold = fold_global_for_backend(compiled, backend, f)
                         cts = run_counts(
                             backend,
                             c_fold,
@@ -1064,8 +1113,9 @@ def _compile_cached(
     spec: StrategySpec,
     profile: bool,
     cache_root: Optional[Path],
+    backend_key: Optional[str] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
-    # Cache key depends on circuit fingerprint + backend name + spec
+    # Cache key depends on circuit fingerprint + backend identity + spec
 
     """Internal helper that compile cached.
 
@@ -1075,6 +1125,12 @@ def _compile_cached(
         spec: Strategy/backend specification controlling compilation behavior.
         profile: Whether pass-level transpiler profiling is enabled.
         cache_root: Cache root value consumed by this routine.
+        backend_key (default: None): Backend spec string that resolved to
+            ``backend``.  Backend display names are not unique -- every
+            ``fake:generic:N:SEED`` shares one name while carrying different
+            calibration data -- so the resolving spec is included in the cache
+            key to keep calibration-derived metrics from leaking across
+            backends.
 
     Returns:
         Tuple[Any, Dict[str, Any]] with the computed result.
@@ -1085,23 +1141,36 @@ def _compile_cached(
     try:
         fpr = fingerprint_circuit(circuit)
     except Exception:
-        fpr = str(hash(str(circuit)))
-    backend_name = getattr(backend, "name", None)
-    if callable(backend_name):
-        backend_name = backend.name()
-    backend_name = str(backend_name or backend.__class__.__name__)
-    key = f"{backend_name}:{fpr}:{spec.model_dump_json()}:profile={profile}"
+        # builtins.hash of a str is salted per process (PYTHONHASHSEED), so it
+        # would give the same circuit a different key on every run and the
+        # cache could never hit across processes.
+        fpr = stable_hash_str(str(circuit))
+    backend_name = backend_display_name(backend)
+    backend_id = f"{backend_key if backend_key is not None else ''}|{backend_name}"
+    key = f"{backend_id}:{fpr}:{spec.model_dump_json()}:profile={profile}"
     import hashlib
 
     key_hash = hashlib.sha256(key.encode("utf-8")).hexdigest()
     entry = get_entry(key_hash, root=cache_root)
-    hit = load_compiled(entry)
+    try:
+        hit = load_compiled(entry)
+    except Exception as e:
+        # An entry left corrupt by an interrupted run (or written by an
+        # incompatible qiskit) must not abort this one; recompiling is always
+        # correct, and the next save overwrites the bad entry.
+        log.warning("Ignoring unreadable compile-cache entry %s: %s", entry.dir, e)
+        hit = None
     if hit is not None:
         c, m = hit
         return c, m
 
     compiled, m = compile_one(circuit, backend=backend, spec=spec, profile=profile)
-    save_compiled(entry, compiled, m)
+    try:
+        save_compiled(entry, compiled, m)
+    except Exception as e:
+        # The cache only saves work.  A read-only cache root, a full disk, or a
+        # circuit QPY cannot serialize must not fail the adjustment run.
+        log.warning("Could not write compile-cache entry %s: %s", entry.dir, e)
     return compiled, m
 
 

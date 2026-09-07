@@ -15,11 +15,11 @@ from qbalance.backends import resolve_backend
 from qbalance.dataset import load_dataset
 from qbalance.execution import run_counts
 from qbalance.logging import get_logger
-from qbalance.mitigation.zne import fold_global, zne_extrapolate_counts
+from qbalance.mitigation.zne import fold_global_for_backend, zne_extrapolate_counts
 from qbalance.strategies import StrategySpec
 from qbalance.transpile.pipeline import compile_one
 from qbalance.transpile.suppression import apply_measurement_untwirl_counts
-from qbalance.utils import validate_integral
+from qbalance.utils import atomic_write_bytes, validate_integral
 
 log = get_logger(__name__)
 
@@ -111,7 +111,7 @@ def run_matrix(
                         if zne_factors:
                             counts_pf = []
                             for f in zne_factors:
-                                c_fold = fold_global(compiled, f)
+                                c_fold = fold_global_for_backend(compiled, backend, f)
                                 cts = run_counts(
                                     backend, c_fold, shots=shots, seed_simulator=seed
                                 )
@@ -146,5 +146,7 @@ def run_matrix(
         },
         "results": [asdict(r) for r in results],
     }
-    out_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    # Read back by `qbalance report`, and written at the end of a run that
+    # may have taken hours; a truncated file fails the next step outright.
+    atomic_write_bytes(out_json, json.dumps(payload, indent=2).encode("utf-8"))
     return out_json

@@ -294,6 +294,18 @@ Interpretation:
 
 For each objective term, qbalance ignores a term when the metric is missing, non-numeric, or non-finite. In selection fallback logic, if no finite objective term contributes, the candidate is treated as effectively worst-case (score $+\infty$).
 
+### 2b) Reproducibility of `objective_score`
+
+Compilation itself is deterministic: with a fixed `seed`, two cold-cache runs produce identical strategy selections and identical `depth`, `two_qubit_ops` and `estimated_error` values. The default objective, however, weights `compile_time_s` at `0.1`, and compile time is wall-clock, so `objective_score` varies slightly between runs and can in principle reorder two candidates whose other metrics are nearly tied. Drop the `compile_time_s` term to make scores and selection bit-reproducible:
+
+```python
+from qbalance import Objective
+
+objective = Objective(
+    weights={"depth": 1.0, "two_qubit_ops": 2.0, "estimated_error": 10.0}
+)
+```
+
 ### 3) Pareto pre-filtering
 
 With `pareto=True`, qbalance first computes a non-dominated set on:
@@ -498,9 +510,16 @@ python -m qbalance compile ./circuits \
 
 Entry-point groups:
 
-- `qbalance.backends`
-- `qbalance.objectives`
-- `qbalance.reports`
+- `qbalance.backends` — **resolved at runtime.** A third-party package that registers
+  here extends backend spec strings: register `mock` and `-b mock:5` resolves through
+  your loader everywhere a backend spec is accepted.
+- `qbalance.objectives` — inventory only.
+- `qbalance.reports` — inventory only.
+
+Only the backend group is loaded. Nothing resolves an objective or a report by plugin
+name today: objectives come from `default_objective()` or `load_objective(path)`, and
+`qbalance report` calls the markdown and HTML renderers directly. Registrations in
+those two groups appear in `plugins list` but cannot yet be invoked.
 
 Inspect active registrations with:
 

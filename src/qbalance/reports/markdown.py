@@ -9,7 +9,22 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from qbalance.reports.common import aggregate, load_matrix, sort_value, strategy_key
+from qbalance.reports.common import (
+    aggregate,
+    load_matrix,
+    matrix_results,
+    sort_value,
+    strategy_key,
+)
+
+
+def _table_cell(value: str) -> str:
+    """Escape a value so it stays inside its own markdown table cell.
+
+    Strategy keys are built from free-form spec fields, so an unescaped pipe
+    splits the row into an extra column and misaligns the whole table.
+    """
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
 
 
 def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
@@ -23,12 +38,12 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
         Path with the computed result.
 
     Raises:
-        None.
+        ValueError: Raised when the matrix JSON cannot be read or has an unusable shape.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     data = load_matrix(matrix_json)
-    results = data["results"]
+    results = matrix_results(data)
 
     # group by backend -> strategy
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -59,7 +74,7 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
         )
         for sk, agg in items:
             lines.append(
-                f"| `{sk}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} |"
+                f"| `{_table_cell(sk)}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} |"
             )
         lines.append("")
     out = out_dir / "report.md"

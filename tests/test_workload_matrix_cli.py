@@ -7,16 +7,21 @@
 from __future__ import annotations
 
 import json
+import math
+import shutil
 import sys
 import types
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pytest
+import typer
 
 from qbalance import cli
 from qbalance.benchmarking import matrix as matrix_mod
 from qbalance.cutting import addon_cutting
+from qbalance.errors import OptionalDependencyError
 from qbalance.mitigation import zne
 from qbalance.objectives import Objective, default_objective
 from qbalance.reports import common as report_common
@@ -28,18 +33,21 @@ from tests.system_stubs import _Circ
 
 def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
 
-    cutting_mod = types.ModuleType("qiskit_addon_cutting.cutting")
-    cutting_mod.DeviceConstraints = lambda max_subcircuit_width: types.SimpleNamespace(
-        max_subcircuit_width=max_subcircuit_width
+    # Stub the real API surface: find_cuts, OptimizationParameters and
+    # DeviceConstraints live at the qiskit_addon_cutting package root, and the
+    # constraint is spelled qubits_per_subcircuit.
+    cutting_mod = types.ModuleType("qiskit_addon_cutting")
+    cutting_mod.DeviceConstraints = lambda qubits_per_subcircuit: types.SimpleNamespace(
+        qubits_per_subcircuit=qubits_per_subcircuit
     )
     cutting_mod.OptimizationParameters = lambda max_backjumps, max_gamma: (
         types.SimpleNamespace(max_backjumps=max_backjumps, max_gamma=max_gamma)
     )
     cutting_mod.find_cuts = lambda circuit, optimization, constraints: (
         circuit,
-        {"w": constraints.max_subcircuit_width},
+        {"w": constraints.qubits_per_subcircuit},
     )
-    monkeypatch.setitem(sys.modules, "qiskit_addon_cutting.cutting", cutting_mod)
+    monkeypatch.setitem(sys.modules, "qiskit_addon_cutting", cutting_mod)
 
     qc = _Circ()
     cut, meta = addon_cutting.find_cuts_best_effort(qc, max_subcircuit_qubits=1)
@@ -93,7 +101,9 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
         "apply_mthree_mitigation",
         lambda backend, counts, measured_qubits, shots: {"00": 1.0},
     )
-    monkeypatch.setattr(wl, "fold_global", lambda compiled, f: compiled)
+    monkeypatch.setattr(
+        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+    )
     monkeypatch.setattr(
         wl, "zne_extrapolate_counts", lambda factors, counts_pf, degree: {"00": 1.0}
     )
@@ -169,7 +179,7 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(
         matrix_mod, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
     )
-    monkeypatch.setattr(matrix_mod, "fold_global", lambda c, f: c)
+    monkeypatch.setattr(matrix_mod, "fold_global_for_backend", lambda c, backend, f: c)
     monkeypatch.setattr(
         matrix_mod,
         "zne_extrapolate_counts",
@@ -223,7 +233,7 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
         ),
     )
     cli.dataset_cmd("examples", tmp_path / "a", overwrite=True)
-    with pytest.raises(Exception):
+    with pytest.raises(typer.BadParameter, match="Only 'examples' is supported"):
         cli.dataset_cmd("bad", tmp_path / "a", overwrite=True)
 
 
@@ -232,7 +242,7 @@ def test_additional_branch_coverage(monkeypatch, tmp_path):
 
     from qbalance.backends import resolver as resolver_mod
 
-    resolver_mod._PLUGINS = None
+    monkeypatch.setattr(resolver_mod, "_PLUGINS", None)
     monkeypatch.setattr(
         resolver_mod, "_load_backend_plugins", lambda: {"x": lambda s: s}
     )
@@ -298,7 +308,9 @@ def test_additional_branch_coverage(monkeypatch, tmp_path):
     monkeypatch.setitem(
         sys.modules, "qiskit.circuit", types.ModuleType("qiskit.circuit")
     )
-    with pytest.raises(Exception):
+    with pytest.raises(
+        OptionalDependencyError, match="qiskit is required for pauli twirling"
+    ):
         suppression.apply_pauli_twirling(_Circ())
 
     # candidates dedupe continue line via monkeypatched class equality
@@ -372,7 +384,7 @@ def test_cli_full_commands(monkeypatch, tmp_path):
     cli.matrix_cmd(tmp_path, ["b"], tmp_path / "m.json")
     cli.report_cmd(tmp_path / "m.json", tmp_path, html=True)
     cli.plugins_cmd("list")
-    with pytest.raises(Exception):
+    with pytest.raises(typer.BadParameter, match="Only 'list' supported"):
         cli.plugins_cmd("bad")
 
     out = tmp_path / "compiled_out"
@@ -389,7 +401,7 @@ def test_cli_full_commands(monkeypatch, tmp_path):
         measurement_twirling=False,
         overwrite=True,
     )
-    with pytest.raises(Exception):
+    with pytest.raises(typer.BadParameter, match="use --overwrite"):
         cli.compile_cmd(
             tmp_path,
             "b",
@@ -1371,7 +1383,9 @@ def test_workload_adjust_accepts_integral_types_and_cache_root_string(
     monkeypatch.setattr(wl, "resolve_backend", lambda b: object())
     seen_cache_roots = []
 
-    def fake_compile_cached(circuit, backend, spec, profile, cache_root):
+    def fake_compile_cached(
+        circuit, backend, spec, profile, cache_root, backend_key=None
+    ):
         seen_cache_roots.append(cache_root)
         return circuit, {
             "depth": 1,
@@ -1410,7 +1424,9 @@ def test_bandit_skips_non_finite_observations(monkeypatch, tmp_path):
     specs = [StrategySpec(optimization_level=0), StrategySpec(optimization_level=1)]
     monkeypatch.setattr(wl, "default_candidate_strategies", lambda **k: specs)
 
-    def fake_compile_cached(circuit, backend, spec, profile, cache_root):
+    def fake_compile_cached(
+        circuit, backend, spec, profile, cache_root, backend_key=None
+    ):
         if spec.optimization_level == 0:
             return circuit, {"depth": float("inf")}
         return circuit, {"depth": 1, "two_qubit_ops": 0, "estimated_error": 0.0}
@@ -1538,3 +1554,1135 @@ def test_strategy_failure_reason_marks_requested_runtime_failures():
         )
         is None
     )
+
+
+def test_compile_cache_key_separates_backends_sharing_a_display_name(tmp_path):
+    """Regression: backend display names are not unique cache identities.
+
+    ``fake:generic:5:1`` and ``fake:generic:5:7`` both report the name
+    ``generic_backend_5q`` while carrying different calibration data, so keying
+    the compile cache on the name alone served one backend's compiled circuit
+    and calibration-derived metrics for the other.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.backends import resolve_backend
+
+    first = resolve_backend("fake:generic:5:1")
+    second = resolve_backend("fake:generic:5:7")
+    assert first.name == second.name
+
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+    spec = StrategySpec(optimization_level=1, routing_method="sabre")
+
+    cache_root = tmp_path / "cache"
+    _, first_metrics = wl._compile_cached(
+        qc,
+        first,
+        spec,
+        profile=False,
+        cache_root=cache_root,
+        backend_key="fake:generic:5:1",
+    )
+    _, second_metrics = wl._compile_cached(
+        qc,
+        second,
+        spec,
+        profile=False,
+        cache_root=cache_root,
+        backend_key="fake:generic:5:7",
+    )
+
+    assert first_metrics["estimated_error"] != second_metrics["estimated_error"]
+
+    # The same backend must still hit the cache.
+    _, repeat_metrics = wl._compile_cached(
+        qc,
+        first,
+        spec,
+        profile=False,
+        cache_root=cache_root,
+        backend_key="fake:generic:5:1",
+    )
+    assert repeat_metrics["estimated_error"] == first_metrics["estimated_error"]
+
+
+def test_adjust_threads_the_backend_spec_into_the_compile_cache_key(
+    monkeypatch, tmp_path
+):
+    seen: list = []
+    real_compile_cached = wl._compile_cached
+
+    def recording_compile_cached(*args, **kwargs):
+        seen.append(kwargs.get("backend_key"))
+        return real_compile_cached(*args, **kwargs)
+
+    monkeypatch.setattr(wl, "_compile_cached", recording_compile_cached)
+
+    dataset_dir = tmp_path / "ds"
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    save_dataset(dataset_dir, _make_tiny()[:1], overwrite=True)
+
+    wl.Workload.from_path(dataset_dir).set_target("fake:generic:5").adjust(
+        strategies=[StrategySpec(optimization_level=0)],
+        cache_root=tmp_path / "cache",
+    )
+
+    assert seen
+    assert set(seen) == {"fake:generic:5"}
+
+
+def test_compile_cache_survives_a_corrupt_entry(tmp_path, monkeypatch):
+    """Regression: a half-written cache entry used to abort the whole run.
+
+    The compile cache lives in the platform cache directory and persists across
+    runs, so any interrupted run left a truncated ``meta.json`` or
+    ``compiled.qpy`` that made every later run fail with a raw JSON or QPY
+    error.  A cache only saves work; it must never be a failure mode.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.backends import resolve_backend
+
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    backend = resolve_backend("fake:generic:5")
+    spec = StrategySpec(optimization_level=1, routing_method="sabre")
+    cache_root = tmp_path / "cache"
+
+    def compile_once():
+        return wl._compile_cached(
+            qc, backend, spec, profile=False, cache_root=cache_root, backend_key="b"
+        )[1]["estimated_error"]
+
+    expected = compile_once()
+    assert compile_once() == expected  # served from cache
+
+    for corrupt in (b"{ truncated", b"", b"\x00\x01"):
+        for name in ("meta.json", "compiled.qpy"):
+            for path in cache_root.rglob(name):
+                path.write_bytes(corrupt)
+            assert compile_once() == expected
+            # The bad entry is healed by the recompile that replaced it.
+            assert compile_once() == expected
+
+    # A cache that cannot be written must not fail the compile either.
+    monkeypatch.setattr(
+        wl,
+        "save_compiled",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("no space left on device")),
+    )
+    shutil.rmtree(cache_root)
+    assert compile_once() == expected
+
+
+def test_save_compiled_writes_atomically_and_leaves_no_partials(tmp_path):
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.cache import get_entry, load_compiled, save_compiled
+
+    qc = QuantumCircuit(1)
+    qc.h(0)
+    entry = get_entry("a" * 64, root=tmp_path)
+
+    save_compiled(entry, qc, {"depth": 1})
+
+    assert sorted(p.name for p in entry.dir.iterdir()) == ["compiled.qpy", "meta.json"]
+    loaded, meta = load_compiled(entry)
+    assert meta["depth"] == 1
+    assert loaded.num_qubits == 1
+
+    # A circuit QPY cannot serialize must not leave a partial entry behind.
+    entry2 = get_entry("b" * 64, root=tmp_path)
+    with pytest.raises(TypeError, match="not a supported data type"):
+        save_compiled(entry2, object(), {"depth": 1})
+    assert not entry2.dir.exists() or list(entry2.dir.iterdir()) == []
+
+
+def test_find_cuts_best_effort_uses_the_real_addon_api():
+    """Regression: the wrapper called qiskit-addon-cutting two ways it never had.
+
+    It imported from a ``qiskit_addon_cutting.cutting`` submodule that does not
+    exist and passed ``DeviceConstraints(max_subcircuit_width=...)`` instead of
+    ``qubits_per_subcircuit``.  Worse, the import error was reported as a missing
+    optional dependency, sending users to reinstall a package they already had.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+
+    from qbalance.cutting.addon_cutting import find_cuts_best_effort
+
+    circuit = QuantumCircuit(6)
+    circuit.h(0)
+    for control, target in [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 4),
+        (4, 5),
+        (0, 5),
+        (1, 4),
+        (2, 5),
+    ]:
+        circuit.cx(control, target)
+
+    cut, meta = find_cuts_best_effort(circuit, max_subcircuit_qubits=3)
+
+    assert cut.num_qubits == circuit.num_qubits
+    assert isinstance(meta, dict)
+    assert "sampling_overhead" in meta
+    # Cutting must have actually replaced gates with QPD placeholders.
+    assert any(name.startswith("qpd") for name in cut.count_ops())
+
+
+def test_missing_cutting_dependency_is_reported_as_such(monkeypatch):
+    import builtins
+
+    from qbalance.cutting import addon_cutting
+    from qbalance.errors import OptionalDependencyError
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "qiskit_addon_cutting":
+            raise ImportError("no cutting addon")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    monkeypatch.delitem(sys.modules, "qiskit_addon_cutting", raising=False)
+
+    with pytest.raises(
+        OptionalDependencyError, match="qiskit-addon-cutting is required"
+    ):
+        addon_cutting.find_cuts_best_effort(object(), 3)
+
+
+def test_a_skipped_cutting_candidate_says_why(monkeypatch, caplog):
+    """Regression: a skipped candidate left no trace at all.
+
+    It is absent from evaluation_history and from the rankings, so a broken
+    cutting integration looked exactly like "cutting was simply not selected".
+    """
+    monkeypatch.setattr(
+        wl,
+        "find_cuts_best_effort",
+        lambda circuit, width: (_ for _ in ()).throw(RuntimeError("cannot cut")),
+    )
+
+    with caplog.at_level("WARNING", logger="qbalance.workflow.workload"):
+        metrics = wl._evaluate_candidate(
+            object(),
+            object(),
+            StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=3),
+            objective=default_objective(),
+            execute=False,
+            shots=10,
+            seed=0,
+            profile=False,
+            cache_root=None,
+        )
+
+    assert metrics is None
+    assert "cannot cut" in caplog.text
+    assert "Skipping candidate" in caplog.text
+
+
+def test_adjust_is_reproducible_across_cold_caches(tmp_path):
+    """A fixed seed must reproduce selections and compile metrics exactly.
+
+    Two runs share a seed but not a cache, so every circuit is genuinely
+    recompiled.  Only ``compile_time_s`` (wall clock) and the default
+    objective's ``0.1 * compile_time_s`` term may differ, which is why this
+    checks a time-free objective for bit equality.
+    """
+    pytest.importorskip("qiskit")
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+    from qbalance.objectives import Objective
+
+    dataset_dir = tmp_path / "ds"
+    save_dataset(dataset_dir, _make_tiny(), overwrite=True)
+    objective = Objective(
+        weights={"depth": 1.0, "two_qubit_ops": 2.0, "estimated_error": 10.0}
+    )
+
+    def run(cache_name):
+        workload = wl.Workload.from_path(dataset_dir).set_target("fake:generic:5")
+        balanced = workload.adjust(
+            objective=objective,
+            search="bandit",
+            pareto=True,
+            max_candidates=8,
+            seed=42,
+            cache_root=tmp_path / cache_name,
+        )
+        out_dir = tmp_path / f"out-{cache_name}"
+        balanced.save(out_dir, overwrite=True)
+        payload = json.loads((out_dir / "results.json").read_text(encoding="utf-8"))
+        return _without_compile_time(payload), balanced
+
+    first, first_workload = run("cache-a")
+    second, _ = run("cache-b")
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+
+    # A different seed must actually explore differently.
+    other = (
+        wl.Workload.from_path(dataset_dir)
+        .set_target("fake:generic:5")
+        .adjust(
+            objective=objective,
+            search="bandit",
+            pareto=True,
+            max_candidates=8,
+            seed=7,
+            cache_root=tmp_path / "cache-c",
+        )
+    )
+    assert [s.spec for s in other.evaluation_history["qft4"]] != [
+        s.spec for s in first_workload.evaluation_history["qft4"]
+    ]
+
+
+def _without_compile_time(value):
+    if isinstance(value, dict):
+        return {
+            key: _without_compile_time(item)
+            for key, item in value.items()
+            if key != "compile_time_s"
+        }
+    if isinstance(value, list):
+        return [_without_compile_time(item) for item in value]
+    return value
+
+
+def test_reporting_survives_a_workload_with_no_selections(tmp_path):
+    """Regression: summary() and covars() crashed on an empty workload.
+
+    ``adjust`` legitimately returns no selections for an empty dataset or an
+    empty ``split`` half, but the distance helpers reject empty samples, so
+    reporting raised "Input samples must be non-empty" from deep inside the
+    diagnostics -- and ``save`` failed after already writing results.json,
+    leaving a partial output directory.
+    """
+    pytest.importorskip("qiskit")
+
+    from qbalance.dataset import load_dataset, save_dataset
+
+    dataset_dir = tmp_path / "empty"
+    save_dataset(dataset_dir, [], overwrite=True)
+    assert len(load_dataset(dataset_dir)) == 0
+
+    balanced = (
+        wl.Workload.from_path(dataset_dir)
+        .set_target("fake:generic:5")
+        .adjust(cache_root=tmp_path / "cache")
+    )
+    assert balanced.selections == {}
+
+    summary = balanced.summary()
+    assert "circuits: 0" in summary
+    assert "dist[depth]: n/a" in summary
+    assert "dist[two_qubit_ops]: n/a" in summary
+
+    covars = balanced.covars()
+    assert set(covars) == {"depth", "two_qubit_ops", "estimated_error"}
+    assert all(math.isnan(value) for row in covars.values() for value in row.values())
+
+    out_dir = tmp_path / "out"
+    balanced.save(out_dir, overwrite=True)
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "dataset",
+        "results.json",
+        "summary.txt",
+    ]
+    assert wl.load_balanced_workload(out_dir).selections == {}
+
+
+def test_reporting_survives_an_empty_dataset_split(tmp_path):
+    pytest.importorskip("qiskit")
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import load_dataset, save_dataset
+
+    save_dataset(tmp_path / "full", _make_tiny(), overwrite=True)
+    train, test = load_dataset(tmp_path / "full").split(seed=0, frac_train=0.0)
+    assert len(train) == 0 and len(test) == 3
+
+    balanced = (
+        wl.Workload.from_dataset(train)
+        .set_target("fake:generic:5")
+        .adjust(cache_root=tmp_path / "cache")
+    )
+    balanced.save(tmp_path / "out", overwrite=True)
+    assert (tmp_path / "out" / "summary.txt").exists()
+
+
+def test_non_empty_workloads_still_report_numeric_distances(tmp_path):
+    pytest.importorskip("qiskit")
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    save_dataset(tmp_path / "ds", _make_tiny(), overwrite=True)
+    balanced = (
+        wl.Workload.from_path(tmp_path / "ds")
+        .set_target("fake:generic:5")
+        .adjust(max_candidates=4, seed=0, cache_root=tmp_path / "cache")
+    )
+
+    distance_lines = [
+        line for line in balanced.summary().splitlines() if "dist[" in line
+    ]
+    assert distance_lines
+    assert all("n/a" not in line for line in distance_lines)
+    assert all(
+        not math.isnan(value)
+        for row in balanced.covars().values()
+        for value in row.values()
+    )
+
+
+def test_summary_reports_how_many_circuits_improved(tmp_path):
+    """Mutation testing found the improved count unasserted.
+
+    The summary line is the headline result of a run, so inverting the
+    comparison that produces it must not go unnoticed.
+    """
+    from qbalance.dataset import CircuitDataset
+    from qbalance.objectives import Objective
+
+    dataset = CircuitDataset(tmp_path, [])
+    objective = Objective(weights={"depth": 1.0})
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:5",
+        selections={
+            "better": Strategy(spec=StrategySpec(), metrics={"depth": 1.0}),
+            "worse": Strategy(spec=StrategySpec(), metrics={"depth": 9.0}),
+            "same": Strategy(spec=StrategySpec(), metrics={"depth": 5.0}),
+        },
+        baseline_metrics={
+            "better": {"depth": 5.0},
+            "worse": {"depth": 5.0},
+            "same": {"depth": 5.0},
+        },
+        objective=objective,
+    )
+
+    diagnostics = balanced.selection_diagnostics()
+    assert diagnostics["better"]["objective_improved"] is True
+    assert diagnostics["worse"]["objective_improved"] is False
+    assert (
+        diagnostics["same"]["objective_improved"] is True
+    )  # equal counts as no regression
+
+    line = next(
+        line for line in balanced.summary().splitlines() if "objective deltas" in line
+    )
+    assert "improved=2/3" in line
+
+
+def test_to_download_writes_a_fresh_zip_without_overwrite(tmp_path):
+    """Mutation testing found this path unexercised.
+
+    ``overwrite=False`` must only refuse when the zip already exists.
+    """
+    from qbalance.dataset import CircuitDataset
+
+    balanced = wl.BalancedWorkload(
+        dataset=CircuitDataset(tmp_path / "ds", []),
+        backend_spec="fake:generic:5",
+        selections={},
+    )
+    (tmp_path / "ds").mkdir()
+    (tmp_path / "ds" / "qbalance_dataset.json").write_text(
+        json.dumps({"version": 1, "records": []}), encoding="utf-8"
+    )
+
+    target = tmp_path / "bundle.zip"
+    assert not target.exists()
+    assert balanced.to_download(target, overwrite=False) == target
+    assert target.is_file()
+
+    with pytest.raises(FileExistsError):
+        balanced.to_download(target, overwrite=False)
+
+
+def test_save_creates_missing_parent_directories(tmp_path):
+    """Mutation testing found nested output paths unexercised."""
+    from qbalance.dataset import CircuitDataset
+
+    dataset_dir = tmp_path / "ds"
+    dataset_dir.mkdir()
+    (dataset_dir / "qbalance_dataset.json").write_text(
+        json.dumps({"version": 1, "records": []}), encoding="utf-8"
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=CircuitDataset(dataset_dir, []),
+        backend_spec="fake:generic:5",
+        selections={},
+    )
+
+    nested = tmp_path / "a" / "b" / "c"
+    assert not nested.parent.exists()
+    balanced.save(nested, overwrite=False)
+    assert (nested / "results.json").is_file()
+
+
+def test_selection_diagnostics_reports_relative_deltas(tmp_path):
+    """Relative deltas must be real ratios, and must skip a zero baseline.
+
+    ``relative_delta`` divides by the baseline magnitude, so the zero-baseline
+    guard is what keeps the diagnostics JSON-serializable instead of raising.
+    Exercise both sides of that guard with numbers, not just the all-``None``
+    degenerate case.
+    """
+    dsroot = tmp_path / "ds_rel_delta"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={
+            "c0": Strategy(
+                spec=StrategySpec(),
+                metrics={"depth": 8.0, "two_qubit_ops": 5.0},
+            )
+        },
+        baseline_metrics={"c0": {"depth": 10.0, "two_qubit_ops": 0.0}},
+        objective=Objective({"depth": 1.0}),
+    )
+
+    deltas = balanced.selection_diagnostics()["c0"]["metric_deltas"]
+
+    assert deltas["depth"] == {
+        "baseline": 10.0,
+        "selected": 8.0,
+        "delta": -2.0,
+        "relative_delta": -0.2,
+    }
+    # A zero baseline has no meaningful ratio; the delta still stands.
+    assert deltas["two_qubit_ops"] == {
+        "baseline": 0.0,
+        "selected": 5.0,
+        "delta": 5.0,
+        "relative_delta": None,
+    }
+
+
+def test_final_measurement_qubits_skips_malformed_measurements():
+    """Only one-qubit/one-clbit measurements define the clbit -> qubit map.
+
+    A measurement carrying more than one qubit or no clbit at all cannot say
+    which qubit feeds which classical bit.  Mapping one anyway would hand
+    mthree the wrong physical qubits and silently degrade the correction.
+    """
+    from tests.system_stubs import _I, _Q
+
+    class _MalformedCirc:
+        num_qubits = 3
+        data = [
+            (_I("measure"), [_Q(2)], [_Q(0)]),
+            (_I("measure"), [_Q(0), _Q(1)], [_Q(1)]),
+            (_I("measure"), [_Q(1)], []),
+            (_I("barrier"), [_Q(0)], []),
+        ]
+
+    assert wl._final_measurement_qubits(_MalformedCirc()) == [2]
+
+
+def test_selection_diagnostics_handles_a_metric_present_on_only_one_side(tmp_path):
+    """A metric missing from one side has no delta, and must not raise.
+
+    Baselines and selections are independent metric dicts, so a key can easily
+    exist on one and not the other -- subtracting them would raise TypeError
+    mid-report.
+    """
+    dsroot = tmp_path / "ds_one_sided"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={"c0": Strategy(spec=StrategySpec(), metrics={"depth": 4.0})},
+        baseline_metrics={"c0": {"two_qubit_ops": 7.0}},
+        objective=Objective({"depth": 1.0}),
+    )
+
+    deltas = balanced.selection_diagnostics()["c0"]["metric_deltas"]
+
+    assert deltas["depth"] == {
+        "baseline": None,
+        "selected": 4.0,
+        "delta": None,
+        "relative_delta": None,
+    }
+    assert deltas["two_qubit_ops"] == {
+        "baseline": 7.0,
+        "selected": None,
+        "delta": None,
+        "relative_delta": None,
+    }
+
+
+def _one_circuit_workload(tmp_path, name="ds_dl"):
+    """Build a minimal saveable BalancedWorkload."""
+    dsroot = tmp_path / name
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"artifact")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    return wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={"c0": Strategy(spec=StrategySpec(), metrics={"depth": 1.0})},
+        baseline_metrics={"c0": {"depth": 2.0}},
+        objective=Objective({"depth": 1.0}),
+    )
+
+
+def test_to_download_refuses_to_overwrite_by_default(tmp_path):
+    """Exporting must not silently destroy an existing archive."""
+    balanced = _one_circuit_workload(tmp_path)
+    zip_path = tmp_path / "workload.zip"
+    zip_path.write_bytes(b"precious")
+
+    with pytest.raises(FileExistsError):
+        balanced.to_download(zip_path)
+
+    assert zip_path.read_bytes() == b"precious"
+
+
+def test_to_download_overwrites_when_asked(tmp_path):
+    balanced = _one_circuit_workload(tmp_path, name="ds_dl2")
+    zip_path = tmp_path / "workload.zip"
+    zip_path.write_bytes(b"precious")
+
+    out = balanced.to_download(zip_path, overwrite=True)
+
+    assert out == zip_path
+    assert zip_path.read_bytes() != b"precious"
+
+
+def test_grid_search_never_consults_the_bandit(tmp_path, monkeypatch):
+    """Grid search evaluates every candidate; the bandit is for the other mode."""
+    from tests.system_stubs import _Circ
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_grid"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    class _BanditThatMustNotBeUsed:
+        def observe(self, *a, **k):
+
+            raise AssertionError("grid search must not consult the bandit")
+
+        def propose(self, *a, **k):
+
+            raise AssertionError("grid search must not consult the bandit")
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(wl, "BanditSearcher", _BanditThatMustNotBeUsed)
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [
+            StrategySpec(seed_transpiler=i) for i in range(3)
+        ],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    balanced = (
+        wl.Workload.from_dataset(ds)
+        .set_target("fake:generic:2")
+        .adjust(search="grid", max_candidates=3)
+    )
+
+    assert balanced.selection_diagnostics()["c0"]["evaluated_candidates"] == 3
+
+
+def test_candidate_is_not_cut_without_the_cutting_flag(tmp_path, monkeypatch):
+    """max_subcircuit_qubits alone must not trigger circuit cutting.
+
+    The width limit is meaningful only when cutting is requested; acting on it
+    by itself would cut circuits the caller never asked to cut, and a cutting
+    failure silently drops the candidate.
+    """
+    from tests.system_stubs import _Circ
+
+    def _must_not_cut(*a, **k):
+
+        raise AssertionError("cutting must not run when spec.cutting is False")
+
+    monkeypatch.setattr(wl, "find_cuts_best_effort", _must_not_cut)
+    monkeypatch.setattr(
+        wl, "_compile_cached", lambda *a, **k: (_Circ(), {"depth": 2.0})
+    )
+
+    metrics = wl._evaluate_candidate(
+        _Circ(),
+        types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+        StrategySpec(cutting=False, max_subcircuit_qubits=2),
+        objective=Objective({"depth": 1.0}),
+        execute=False,
+        shots=16,
+        seed=0,
+        profile=False,
+        cache_root=tmp_path,
+    )
+
+    assert metrics is not None
+
+
+def test_mitigation_receives_untwirled_counts(tmp_path, monkeypatch):
+    """Measurement twirling is undone before the counts reach mitigation.
+
+    Feeding twirled counts to mthree corrects the wrong bitstrings, which
+    degrades the result silently rather than raising.
+    """
+    from tests.system_stubs import _Circ
+
+    seen: dict[str, int] = {}
+
+    def _capture(backend, counts, **kwargs):
+
+        seen.update(counts)
+        return {"0": 1.0}
+
+    monkeypatch.setattr(
+        wl,
+        "_compile_cached",
+        lambda *a, **k: (_Circ(), {"measurement_flip_map": {0: 1}}),
+    )
+    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"0": 8, "1": 2})
+    monkeypatch.setattr(wl, "apply_mthree_mitigation", _capture)
+
+    wl._evaluate_candidate(
+        _Circ(),
+        types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+        StrategySpec(mthree=True),
+        objective=Objective({"depth": 1.0}),
+        execute=True,
+        shots=10,
+        seed=0,
+        profile=False,
+        cache_root=tmp_path,
+    )
+
+    # clbit 0 was flipped during twirling, so every key flips back.
+    assert seen == {"1": 8, "0": 2}
+
+
+def test_compile_cache_key_separates_backends_sharing_a_class(tmp_path, monkeypatch):
+    """Backend identity comes from the backend's name, not its Python class.
+
+    Every fake backend shares one class, so keying on the class name would let
+    calibration-derived metrics leak between different devices.
+    """
+    from tests.system_stubs import _Circ
+
+    keys: list[str] = []
+
+    def _record(key_hash, root=None):
+
+        keys.append(key_hash)
+        return types.SimpleNamespace(dir=tmp_path)
+
+    monkeypatch.setattr(wl, "get_entry", _record)
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+    monkeypatch.setattr(wl, "compile_one", lambda *a, **k: (_Circ(), {}))
+    monkeypatch.setattr(wl, "fingerprint_circuit", lambda c: "fingerprint")
+
+    class _Backend:
+        def __init__(self, label):
+
+            self._label = label
+
+        def name(self):
+
+            return self._label
+
+    for label in ("alpha", "beta"):
+        wl._compile_cached(_Circ(), _Backend(label), StrategySpec(), False, tmp_path)
+
+    assert len(keys) == 2
+    assert keys[0] != keys[1]
+
+
+def test_loading_rejects_an_empty_selection_name(tmp_path):
+    """An empty selection name is not a circuit name.
+
+    It would otherwise be reported as "references circuits not present in the
+    dataset", which points the reader at the dataset instead of the malformed
+    key that is actually at fault.
+    """
+    out_dir = tmp_path / "saved"
+    (out_dir / "dataset").mkdir(parents=True)
+    (out_dir / "dataset" / "qbalance_dataset.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {
+                        "name": "c0",
+                        "artifact": "c0.qpy",
+                        "format": "qpy",
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / "dataset" / "c0.qpy").write_bytes(b"artifact")
+    (out_dir / "results.json").write_text(
+        json.dumps(
+            {
+                "backend_spec": "fake:generic:2",
+                "objective": {"depth": 1.0},
+                "selections": {
+                    "": {"spec": StrategySpec().model_dump(), "metrics": {}}
+                },
+                "baseline_metrics": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="non-empty strings"):
+        wl.load_balanced_workload(out_dir)
+
+
+def test_regression_guard_is_off_by_default(tmp_path, monkeypatch):
+    """adjust() explores freely unless the caller opts into the safety rail.
+
+    The guard replaces a worse-than-baseline selection with the baseline, so
+    turning it on by default would silently change what every caller ships.
+    """
+    from tests.system_stubs import _Circ
+
+    guarded: list[int] = []
+
+    def _record_guard(
+        baseline_spec, baseline_metrics, chosen_spec, chosen_metrics, obj
+    ):
+
+        guarded.append(1)
+        return chosen_spec, chosen_metrics
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_guard"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(wl, "_guard_against_regression", _record_guard)
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [StrategySpec()],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust(
+        search="grid", max_candidates=1
+    )
+
+    assert guarded == []
+
+
+def test_adjust_does_not_use_pareto_selection_by_default(tmp_path, monkeypatch):
+    """Pareto selection is opt-in.
+
+    It can pick a different strategy than the plain minimum-objective rule,
+    so turning it on by default would quietly change every caller's result.
+    """
+    from tests.system_stubs import _Circ
+
+    def _must_not_run(*a, **k):
+
+        raise AssertionError("pareto selection must be opt-in")
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "ds_pareto_default"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(wl, "pareto_front", _must_not_run)
+    monkeypatch.setattr(
+        wl,
+        "default_candidate_strategies",
+        lambda max_candidates, seed: [
+            StrategySpec(seed_transpiler=i) for i in range(2)
+        ],
+    )
+    monkeypatch.setattr(
+        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+    )
+    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    balanced = (
+        wl.Workload.from_dataset(ds)
+        .set_target("fake:generic:2")
+        .adjust(search="grid", max_candidates=2)
+    )
+
+    assert "c0" in balanced.selections
+
+
+def test_adjust_requires_a_positive_candidate_budget(tmp_path):
+    """A zero or negative budget evaluates nothing and cannot select."""
+    dsroot = tmp_path / "ds_budget"
+    dsroot.mkdir()
+    (dsroot / "qbalance_dataset.json").write_text("{}", encoding="utf-8")
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    workload = wl.Workload.from_dataset(ds).set_target("fake:generic:2")
+
+    for budget in (0, -1):
+        with pytest.raises(ValueError, match="max_candidates must be a positive"):
+            workload.adjust(max_candidates=budget)
+
+
+def test_final_measurement_qubits_falls_back_to_the_full_width(tmp_path):
+    """With no recoverable mapping, every qubit is assumed measured in order.
+
+    Returning an empty list instead would hand mthree no qubits to correct,
+    which mis-mitigates silently rather than failing.  The width guard also
+    has to survive a backend stub that reports no width at all.
+    """
+    from tests.system_stubs import _I, _Q
+
+    class _NoMeasurements:
+        num_qubits = 3
+        data = [(_I("h"), [_Q(0)], []), (_I("cx"), [_Q(0), _Q(1)], [])]
+
+    class _NoWidth:
+        data = []
+
+    class _NullWidth:
+        num_qubits = None
+        data = []
+
+    assert wl._final_measurement_qubits(_NoMeasurements()) == [0, 1, 2]
+    assert wl._final_measurement_qubits(_NoWidth()) == []
+    assert wl._final_measurement_qubits(_NullWidth()) == []
+
+
+def test_to_download_creates_missing_parent_directories(tmp_path):
+    """The archive path may name a directory that does not exist yet.
+
+    The staging directory is created beside the archive, so the whole parent
+    chain has to exist first.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_dl_nested")
+    zip_path = tmp_path / "deep" / "nested" / "workload.zip"
+
+    out = balanced.to_download(zip_path)
+
+    assert out == zip_path
+    assert zip_path.is_file()
+
+
+def test_save_refuses_to_overwrite_by_default(tmp_path):
+    """An existing output directory is not replaced unless asked."""
+    balanced = _one_circuit_workload(tmp_path, name="ds_save_default")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    (out_dir / "keep.txt").write_text("precious", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        balanced.save(out_dir)
+
+    assert (out_dir / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_save_refuses_to_overwrite_a_directory_holding_the_source_dataset(tmp_path):
+    """overwrite=True deletes the target, so it must not contain the source.
+
+    The guard covers two shapes: the output is the dataset directory itself,
+    or it is an ancestor of it.  Requiring both would make the guard
+    unreachable, and save() would then rmtree the dataset it is reading.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_self")
+    dataset_root = Path(balanced.dataset.root)
+
+    # The output *is* the dataset directory.
+    with pytest.raises(ValueError, match="source dataset"):
+        balanced.save(dataset_root, overwrite=True)
+
+    # The output is an ancestor of the dataset directory.
+    with pytest.raises(ValueError, match="source dataset"):
+        balanced.save(dataset_root.parent, overwrite=True)
+
+    assert (dataset_root / "c0.qpy").is_file()
+
+
+def test_to_download_cleanup_does_not_mask_the_original_failure(tmp_path, monkeypatch):
+    """Discarding the staging tree must not replace the real error.
+
+    The cleanup runs in a finally while the failure that caused it is already
+    propagating; without ignore_errors a failing rmtree is what the caller
+    sees instead.  Same contract as save_dataset and atomic_write_bytes.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_dl_mask")
+
+    real_rmtree = wl.shutil.rmtree
+    armed = {"on": False}
+
+    def _explode(*a, **k):
+
+        # save() has finished staging by now, so only the cleanup that runs
+        # while this error propagates should see the failing rmtree.
+        armed["on"] = True
+        raise RuntimeError("archive failed")
+
+    def _rmtree(path, ignore_errors=False):
+
+        if not armed["on"]:
+            # save() clears its own target with a plain rmtree, and that call
+            # is supposed to work -- and to fail loudly if it cannot.
+            return real_rmtree(path, ignore_errors=ignore_errors)
+        if ignore_errors:
+            return
+        raise OSError("rmtree refused")
+
+    monkeypatch.setattr(wl.zipfile, "ZipFile", _explode)
+    monkeypatch.setattr(wl.shutil, "rmtree", _rmtree)
+
+    with pytest.raises(RuntimeError, match="archive failed"):
+        balanced.to_download(tmp_path / "out.zip")
+
+
+def test_matrix_output_is_written_atomically(tmp_path, monkeypatch):
+    """A failed write must not destroy the previous results file.
+
+    The matrix runs compiles (and optionally executions) across every backend
+    x circuit x strategy before writing anything, and the file it produces is
+    read back by ``qbalance report``.  A plain write truncates the destination
+    the moment it opens, so an interrupted write loses the old results and
+    leaves a partial file the next step rejects.
+    """
+    dsroot = tmp_path / "ds_atomic"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"placeholder")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    monkeypatch.setattr(dataset, "load_circuits", lambda: [object()])
+
+    monkeypatch.setattr(matrix_mod, "load_dataset", lambda d: dataset)
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_one",
+        lambda qc, backend, spec, profile: (qc, {"depth": 1.0}),
+    )
+
+    out_json = tmp_path / "matrix.json"
+    out_json.write_text("previous results", encoding="utf-8")
+
+    import qbalance.utils as utils_mod
+
+    def _failing_replace(src, dst):
+
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(utils_mod.os, "replace", _failing_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        matrix_mod.run_matrix(dsroot, ["b"], [StrategySpec()], out_json)
+
+    # The previous file is untouched and no partial artifact is left beside it.
+    assert out_json.read_text(encoding="utf-8") == "previous results"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ds_atomic", "matrix.json"]
+
+
+def test_documented_adjust_parameters_match_the_signature():
+    """The adjust() table in the API reference is a user-facing contract.
+
+    A parameter added to the signature but not the table is undiscoverable,
+    and a default that drifts sends readers to the wrong conclusion about
+    what a bare call does.  Neither shows up as a test failure anywhere else.
+    """
+    import inspect
+    import re
+
+    doc_path = Path(__file__).resolve().parents[1] / "docs" / "api-references.md"
+    if not doc_path.is_file():
+        pytest.skip("docs are not present in this checkout")
+
+    block = (
+        doc_path.read_text(encoding="utf-8")
+        .split("`adjust` parameters:")[1]
+        .split("Validation and edge-case")[0]
+    )
+    documented = dict(
+        re.findall(r"^\|\s*`([a-z_]+)`\s*\|\s*`([^`]*)`\s*\|", block, re.M)
+    )
+    actual = {
+        name: param.default
+        for name, param in inspect.signature(wl.Workload.adjust).parameters.items()
+        if name != "self"
+    }
+
+    assert set(documented) == set(actual)
+
+    def rendered(value):
+
+        # Identity checks, not equality: 0 == False in Python, so a dict
+        # lookup keyed on False would claim seed=0 is documented wrong.
+        if value is None:
+            return "None"
+        if value is True:
+            return "True"
+        if value is False:
+            return "False"
+        return repr(value).replace("'", '"')
+
+    assert {name: rendered(value) for name, value in actual.items()} == documented

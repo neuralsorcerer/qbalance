@@ -48,9 +48,11 @@ Important validation rules:
 - `num_twirls >= 1`.
 - `zne_degree >= 0`; when `zne=True`, it must also be at least `1` and smaller than `len(zne_factors)`.
 - When `zne=True`, `zne_factors` must be non-empty, finite, sorted, all `>= 1.0`, and include `1.0`.
-- When `cutting=True`, `max_subcircuit_qubits` is required.
+- When `cutting=True`, `max_subcircuit_qubits` is required. Cutting is incomplete: `qbalance.cutting.find_cuts_best_effort` returns a circuit of QPD placeholder gates that no backend basis can express, and `qiskit-addon-cutting` rejects circuits carrying classical bits, so a `cutting=True` candidate is skipped (with the reason logged) rather than evaluated.
 - If `max_subcircuit_qubits` is provided, it must be an integer `>= 1`.
 - `resilience_level` must be `None`, `0`, `1`, or `2`.
+- `layout_method="qbalance_noise_aware"` ranks physical qubits by calibration quality only and does not consult the coupling map, so on sparse hardware the qubits it picks are usually not adjacent and routing inflates the circuit substantially. Prefer a Qiskit layout method for sparse devices.
+- Unknown fields are rejected. A misspelled key such as `optimisation_level` would otherwise be dropped silently, leaving a default strategy and a run that reports several visibly different entries as one identical configuration.
 
 ### `load_strategy_specs(path: Path | str) -> list[StrategySpec]`
 
@@ -101,7 +103,7 @@ Methods:
 | `shots` | `1024` | Positive integer execution-shot count. Boolean values are rejected. |
 | `profile` | `False` | Enable pass-level transpiler profiling. |
 | `cache_root` | `None` | Optional compiled-circuit cache root. `str` and `Path` values are accepted and normalized to `Path`. |
-| `seed` | `0` | Integer seed for deterministic candidate ordering and execution helpers. Boolean values are rejected. |
+| `seed` | `0` | Integer seed for deterministic candidate ordering and execution helpers. Boolean values are rejected. A fixed seed reproduces selections and compile metrics exactly; `objective_score` still varies slightly under the default objective because it weights wall-clock `compile_time_s`. |
 | `strategies` | `None` | Explicit iterable of strategies. If provided, `max_candidates` is ignored and the supplied order is used for grid search. |
 | `allow_regression` | `True` | Boolean safety rail. When `False`, final selection falls back to the baseline strategy if the best feasible candidate has a finite-safe objective score worse than the finite-safe baseline score. Equal scores and incomparable baselines do not trigger fallback. |
 
@@ -187,9 +189,11 @@ Common compile metrics include depth, size, two-qubit operation count, estimated
 
 ## Execution and mitigation
 
-- `qbalance.execution.run_counts(backend, circuit, shots=1024, seed_simulator=None)`: execute a circuit on a backend-like object and return counts.
-- `qbalance.mitigation.apply_mthree_mitigation(...)`: optional M3 mitigation integration.
+- `qbalance.execution.run_counts(backend, circuit, shots=1024, seed_simulator=None, seed_transpiler=None)`: execute a circuit on a backend-like object and return counts. Seeds are forwarded only to `run` implementations that accept them.
+- `qbalance.mitigation.apply_mthree_mitigation(backend, raw_counts, measured_qubits, shots, calibration_shots=10000)`: optional M3 mitigation integration. `measured_qubits` must list the physical qubit feeding each classical bit, ordered by classical bit index; `qbalance.workflow.workload` derives it from the compiled circuit.
+- `qbalance.mitigation.runtime_options.build_runtime_estimator_options(...)`: builds an IBM Runtime EstimatorV2 options mapping. This is a standalone helper: qbalance's own compile/execute path does not call it, and `StrategySpec.resilience_level` is likewise carried through to artifacts as metadata rather than applied locally.
 - `qbalance.mitigation.fold_global(circuit, factor)`: global folding helper for ZNE.
+- `qbalance.mitigation.fold_global_for_backend(circuit, backend, factor)`: fold a compiled circuit and re-express it in the backend's native basis. Folding appends `circuit.inverse()`, which introduces adjoint gates (for example `sxdg`) that are outside the backend basis, so the ZNE workflow uses this helper to keep folded circuits runnable. The qubit layout and the measurement clbit mapping are preserved.
 - `qbalance.mitigation.zne_extrapolate_counts(factors, counts_per_factor, degree=1)`: extrapolate probability distributions back to zero noise.
 
 ## Backend plugins
@@ -201,11 +205,11 @@ Built-in entry points include:
 - `fake`: `fake:generic:<num_qubits>` (optionally `fake:generic:<num_qubits>:<calibration_seed>`; calibration data is seeded deterministically, seed 0 by default) and `fake:ibm:<name>` device snapshots via `qiskit-ibm-runtime` where available.
 - `aer`: qiskit-aer backends when the `aer` extra is installed.
 
-Third-party packages can register `qbalance.backends` entry points. `qbalance plugins list` shows discovered plugin groups.
+Third-party packages can register `qbalance.backends` entry points, and those are loaded and used: registering `mock` makes `mock:5` resolvable wherever a backend spec is accepted. `qbalance plugins list` shows discovered registrations for all three groups, but only this one is resolved at runtime — the `qbalance.objectives` and `qbalance.reports` groups are inventory only, so a registration there is listed and cannot yet be invoked.
 
 ## Reports
 
 - `qbalance.reports.markdown.render_markdown(matrix_json, out_dir) -> Path`
 - `qbalance.reports.html.render_html(matrix_json, out_dir) -> Path`
 
-Markdown reports require only base dependencies. HTML reports require the optional report dependencies.
+Markdown reports require only base dependencies. HTML reports require the optional report dependencies. Both renderers are called directly; the `qbalance.reports` entry-point group is not consulted when choosing one.

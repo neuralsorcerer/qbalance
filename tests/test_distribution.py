@@ -287,3 +287,62 @@ def test_as_1d_float_array_rejects_non_numeric_generator_content():
         distribution._as_1d_float_array(
             (value for value in ["invalid"]), name="Input samples"
         )
+
+
+def test_distance_metrics_stay_exact_at_extreme_magnitudes():
+    """The overflow-avoiding integration must not cost accuracy.
+
+    ``_integrate_piecewise_constant`` rescales both factors and recombines
+    them with ``frexp``/``ldexp`` so huge supports cannot overflow the
+    element-wise products.  Check the metrics that ride on it against values
+    worked out by hand rather than only checking they stay finite.
+
+    With ``x1 = [0, B]`` and ``x2 = [B/2, B]`` the CDFs on the grid
+    ``[0, B/2, B]`` are ``[0.5, 0.5, 1]`` and ``[0, 0.5, 1]``, so the only
+    non-zero difference is 0.5 over the first interval of width ``B/2``.
+    """
+    big = np.finfo(float).max / 8
+    x1 = [0.0, big]
+    x2 = [big / 2, big]
+
+    assert emd_1d(x1, x2) == pytest.approx(0.5 * (big / 2), rel=1e-12, abs=0.0)
+    assert cvm_1d(x1, x2) == pytest.approx(0.25 * (big / 2), rel=1e-12, abs=0.0)
+    assert ks_1d(x1, x2) == pytest.approx(0.5, rel=1e-12, abs=0.0)
+
+
+def test_distance_metrics_stay_exact_at_subnormal_magnitudes():
+    """The same rescaling must not flush tiny supports to zero."""
+    x1 = [1e-300, 2e-300]
+    x2 = [3e-300, 4e-300]
+
+    # On the grid [1, 2, 3, 4] * 1e-300 the CDFs are [.5, 1, 1, 1] and
+    # [0, 0, .5, 1], so |F1 - F2| is [.5, 1, .5] across three equal intervals
+    # of width 1e-300.  An absolute tolerance would pass on any value at this
+    # magnitude, so compare relatively.
+    assert emd_1d(x1, x2) == pytest.approx(2e-300, rel=1e-12, abs=0.0)
+    assert cvm_1d(x1, x2) == pytest.approx(1.5e-300, rel=1e-12, abs=0.0)
+    assert ks_1d(x1, x2) == pytest.approx(1.0, rel=1e-12, abs=0.0)
+
+
+def test_integrate_piecewise_constant_allows_a_flat_grid_segment():
+    """ "Non-decreasing" admits repeated grid points, which contribute nothing.
+
+    Only a decreasing grid is an error.  Rejecting a zero-width interval too
+    would turn a legitimate duplicate support point into a hard failure, and
+    the existing test only covers the decreasing case.
+    """
+    values = np.array([1.0, 2.0, 3.0])
+    grid = np.array([0.0, 1.0, 1.0])
+
+    # 1.0 over [0, 1], then 2.0 over a zero-width interval.
+    assert distribution._integrate_piecewise_constant(values, grid) == pytest.approx(
+        1.0, rel=1e-12, abs=0.0
+    )
+
+    # A wholly flat grid encloses no area at all.
+    assert (
+        distribution._integrate_piecewise_constant(
+            np.array([1.0, 2.0]), np.array([5.0, 5.0])
+        )
+        == 0.0
+    )

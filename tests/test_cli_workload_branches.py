@@ -315,7 +315,9 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
         "apply_mthree_mitigation",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("m3")),
     )
-    monkeypatch.setattr(wl, "fold_global", lambda compiled, f: compiled)
+    monkeypatch.setattr(
+        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+    )
     monkeypatch.setattr(
         wl,
         "zne_extrapolate_counts",
@@ -349,3 +351,114 @@ def test_workload_adjust_raises_on_dataset_circuit_record_mismatch(
 
     with pytest.raises(RuntimeError, match="does not match"):
         wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust()
+
+
+def test_overwrite_refuses_to_delete_a_non_directory(tmp_path):
+    """Regression: --overwrite onto a file raised a raw errno traceback."""
+    import pytest
+
+    from qbalance.dataset import CircuitDataset
+    from qbalance.workflow.workload import BalancedWorkload
+
+    target = tmp_path / "notes.txt"
+    target.write_text("user data", encoding="utf-8")
+
+    workload = BalancedWorkload(
+        dataset=CircuitDataset(tmp_path, []), backend_spec="b", selections={}
+    )
+    with pytest.raises(NotADirectoryError) as excinfo:
+        workload.save(target, overwrite=True)
+    # The guard must fire before rmtree, with an explanation rather than an errno.
+    assert "is not a directory" in str(excinfo.value)
+    assert "Cannot overwrite" in str(excinfo.value)
+    assert target.read_text(encoding="utf-8") == "user data"
+
+    with pytest.raises(FileExistsError):
+        workload.save(target, overwrite=False)
+    assert target.read_text(encoding="utf-8") == "user data"
+
+
+def test_compile_cmd_overwrite_refuses_to_delete_a_non_directory(tmp_path):
+    import pytest
+    import typer
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    dataset_dir = tmp_path / "ds"
+    save_dataset(dataset_dir, _make_tiny()[:1], overwrite=True)
+    target = tmp_path / "notes.txt"
+    target.write_text("user data", encoding="utf-8")
+
+    def run(out, overwrite):
+        cli.compile_cmd(
+            dataset_dir,
+            backend="fake:generic:5",
+            out=out,
+            optimization_level=1,
+            routing_method="sabre",
+            layout_method=None,
+            pauli_twirling=False,
+            num_twirls=1,
+            dynamical_decoupling=False,
+            measurement_twirling=False,
+            overwrite=overwrite,
+        )
+
+    with pytest.raises(typer.BadParameter) as excinfo:
+        run(target, overwrite=True)
+    assert "not a directory" in str(excinfo.value)
+    assert target.read_text(encoding="utf-8") == "user data"
+
+    # Directories still overwrite normally.
+    out_dir = tmp_path / "compiled"
+    run(out_dir, overwrite=False)
+    run(out_dir, overwrite=True)
+    assert (out_dir / "meta.json").exists()
+
+
+def test_cli_help_keeps_the_extra_name_in_install_hints():
+    """Rich markup must not eat the extra out of an install hint.
+
+    Typer renders option help as Rich markup, where ``[aer]`` and ``[report]``
+    parse as style tags and are deleted.  That silently turns "install
+    qbalance[aer]" into "install qbalance" -- removing the one piece of
+    information the hint exists to carry, and leaving an unbalanced paren.
+    """
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    runner = CliRunner()
+
+    def rendered(*args):
+
+        result = runner.invoke(app, list(args), env={"COLUMNS": "200"})
+        assert result.exit_code == 0
+        # Strip the box drawing and collapse the wrapping Rich applies.
+        return " ".join(result.output.replace("│", " ").split())
+
+    assert "qbalance[aer]" in rendered("adjust", "--help")
+    assert "qbalance[report]" in rendered("report", "--help")
+
+
+def test_cli_echoes_a_path_containing_brackets_verbatim(tmp_path):
+    """A path the CLI reports back must be the path it actually wrote.
+
+    Confirmation lines interpolate user-supplied paths into a Rich markup
+    string, where a bracketed segment starting with a letter parses as a style
+    tag and disappears -- so ``run[cache]/ds`` was reported as ``run/ds``,
+    handing the user a path that does not exist.
+    """
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    out = tmp_path / "run[cache]" / "ds"
+    result = CliRunner().invoke(
+        app, ["dataset", "examples", "-o", str(out)], env={"COLUMNS": "220"}
+    )
+
+    assert result.exit_code == 0, result.output
+    assert out.is_dir()
+    assert "run[cache]" in " ".join(result.output.split())
