@@ -7,10 +7,7 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import shutil
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, cast
@@ -19,7 +16,12 @@ import numpy as np
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
-from qbalance.utils import dump_json, load_json, stable_hash_str
+from qbalance.utils import (
+    dump_json,
+    load_json,
+    replacing_directory,
+    stable_hash_str,
+)
 
 log = get_logger(__name__)
 
@@ -76,65 +78,35 @@ class CircuitDataset:
     records: List[CircuitRecord]
 
     def __len__(self) -> int:
-        """Return the number of records contained in the dataset.
-
-        Args:
-            None.
-
-        Returns:
-            int with the computed result.
-
-        Raises:
-            None.
-        """
+        """Return the number of records."""
         return len(self.records)
 
     def names(self) -> List[str]:
-        """Names used by the qbalance workflow.
-
-        Args:
-            None.
-
-        Returns:
-            List[str] with the computed result.
-
-        Raises:
-            None.
-        """
+        """Return the record names, in dataset order."""
         return [r.name for r in self.records]
 
     def iter_records(self) -> Iterable[CircuitRecord]:
-        """Iter records used by the qbalance workflow.
-
-        Args:
-            None.
-
-        Returns:
-            Iterable[CircuitRecord] with the computed result.
-
-        Raises:
-            None.
-        """
+        """Yield the records in dataset order."""
         yield from self.records
 
     def load_circuits(self) -> List[Any]:
-        """Load circuits from serialized data or persisted storage.
+        """Deserialize every record's circuit, in dataset order.
 
-        Args:
-            None.
+        A QPY artifact holding several circuits contributes its first one.
 
         Returns:
-            List[Any] with the computed result.
+            One circuit per record.
 
         Raises:
-            OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
-            ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+            OptionalDependencyError: If qiskit is not installed.
+            ValueError: If a record has an unknown format, or its artifact is
+                missing, unreadable, or empty.  The message names the record.
         """
         try:
-            import qiskit
-
-            QuantumCircuit = qiskit.QuantumCircuit
-            qpy = qiskit.qpy
+            # ``from`` imports the submodule: ``qiskit.qpy`` is only an
+            # attribute once something has imported it, which qiskit 2.0
+            # itself does not do.
+            from qiskit import QuantumCircuit, qpy
         except Exception as e:  # pragma: no cover
             raise OptionalDependencyError("qiskit is required to load circuits") from e
 
@@ -152,34 +124,39 @@ class CircuitDataset:
                 if rec.format == "qpy":
                     with path.open("rb") as f:
                         loaded = qpy.load(f)
-                    if not loaded:
-                        raise ValueError(f"Empty QPY file: {path}")
-                    circuits.append(loaded[0])
                 else:
-                    circuits.append(QuantumCircuit.from_qasm_file(str(path)))
-            except ValueError:
-                raise
+                    loaded = [QuantumCircuit.from_qasm_file(str(path))]
             except Exception as e:
                 raise ValueError(
                     f"Record at index {index} ({rec.name!r}) has an unreadable "
                     f"{rec.format} artifact {rec.artifact!r}: {e}"
                 ) from e
+            if not loaded:
+                raise ValueError(f"Empty QPY file: {path}")
+            circuits.append(loaded[0])
         return circuits
 
     def split(
         self, seed: int = 0, frac_train: float = 0.8
     ) -> Tuple["CircuitDataset", "CircuitDataset"]:
-        """Split used by the qbalance workflow.
+        """Split the records at random into a train and a test dataset.
+
+        The records are shuffled with ``numpy.random.default_rng(seed)`` and the
+        first ``round(frac_train * len(self))`` of them (Python's ``round``,
+        halves to even) form the train half.  ``frac_train`` of 0 or 1 puts
+        every record, unshuffled, in one half.  Both halves share this
+        dataset's root.
 
         Args:
-            seed (default: 0): Seed used for deterministic randomization.
-            frac_train (default: 0.8): Frac train value consumed by this routine.
+            seed (default: 0): Seed of the shuffle.
+            frac_train (default: 0.8): Fraction of records for the train half.
 
         Returns:
-            Tuple['CircuitDataset', 'CircuitDataset'] with the computed result.
+            ``(train, test)``.
 
         Raises:
-            ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+            ValueError: If ``frac_train`` is not a finite, non-boolean number
+                in ``[0, 1]``.
         """
         fraction_error = "frac_train must be a finite numeric non-boolean scalar in the inclusive range [0, 1]."
         if isinstance(
@@ -229,9 +206,17 @@ _SAFE_ARTIFACT_STEM = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_ARTIFACT_STEM = 120
 _STEM_DIGEST_LENGTH = 8
 
+# Device names Windows reserves in every directory, with or without an
+# extension: writing "con.qpy" there opens the console instead of a file.
+_WINDOWS_RESERVED_STEMS = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
 
 def _sanitize_artifact_stem(value: str, *, fallback: str) -> str:
-    """Return a filesystem-safe artifact stem.
+    """Return a filesystem-safe artifact stem derived from ``value``.
 
     Args:
         value: Source value used to derive a stem.
@@ -241,10 +226,8 @@ def _sanitize_artifact_stem(value: str, *, fallback: str) -> str:
         Sanitized stem safe for use as a single filename component.  The stem
         is ASCII-only and length-bounded; an over-long name is truncated and
         given a short digest of the original so distinct names sharing a prefix
-        stay distinguishable.
-
-    Raises:
-        None.
+        stay distinguishable.  A stem Windows reserves as a device name
+        (``CON``, ``COM1``, ...) is prefixed with ``_``.
     """
     # Normalize separators and common traversal patterns before replacing unsupported chars.
     stem = value.replace("/", "_").replace("\\", "_")
@@ -255,6 +238,10 @@ def _sanitize_artifact_stem(value: str, *, fallback: str) -> str:
         digest = stable_hash_str(value)[:_STEM_DIGEST_LENGTH]
         keep = _MAX_ARTIFACT_STEM - _STEM_DIGEST_LENGTH - 1
         stem = f"{stem[:keep].rstrip('._-')}-{digest}"
+    # Windows matches reserved names on the part before the first dot, so
+    # prefix rather than suffix to move the whole stem off the device name.
+    if stem.split(".", 1)[0].upper() in _WINDOWS_RESERVED_STEMS:
+        stem = f"_{stem}"
     return stem
 
 
@@ -276,22 +263,25 @@ def _is_safe_artifact_path(artifact: str) -> bool:
 
 
 def _build_unique_artifact(base_name: str, used_artifacts: set[str]) -> str:
-    """Internal helper that build unique artifact.
+    """Return an artifact filename not yet taken, ignoring case.
+
+    macOS and Windows filesystems are case-insensitive by default, so
+    ``Bell.qpy`` and ``bell.qpy`` are one file there: the second circuit would
+    overwrite the first while both records still pointed at it.  Uniqueness is
+    therefore decided on the case-folded name.
 
     Args:
-        base_name: Base name value consumed by this routine.
-        used_artifacts: Used artifacts value consumed by this routine.
+        base_name: Sanitized artifact stem.
+        used_artifacts: Case-folded artifact names already assigned.
 
     Returns:
-        str with the computed result.
-
-    Raises:
-        None.
+        ``base_name.qpy``, or ``base_name_N.qpy`` for the smallest free
+        ``N >= 1`` (original case preserved).
     """
     suffix = 0
     while True:
         artifact = f"{base_name}.qpy" if suffix == 0 else f"{base_name}_{suffix}.qpy"
-        if artifact not in used_artifacts:
+        if artifact.casefold() not in used_artifacts:
             return artifact
         suffix += 1
 
@@ -348,30 +338,43 @@ def save_dataset(
     metadata: Optional[Sequence[Dict[str, Any]]] = None,
     overwrite: bool = False,
 ) -> CircuitDataset:
-    """Persist dataset and return a reference to the saved artifact.
+    """Save circuits as a dataset directory and return the dataset.
+
+    Each circuit is written to its own QPY file, and the index
+    ``qbalance_dataset.json`` records its name, file and metadata.  A
+    circuit's name becomes its record name (``circuit_<i>`` when it has
+    none), with ``_1``, ``_2``, ... appended to repeats; file names are
+    sanitized, length-bounded and unique ignoring case.  The dataset is
+    assembled in a temporary directory and moved into place at the end, so
+    a failure leaves no partial dataset and, with ``overwrite=True``, keeps
+    the existing one.
 
     Args:
-        dataset_dir: Directory containing the dataset index and circuit artifacts.
-        circuits: Iterable of QuantumCircuit objects to serialize or process.
-        metadata (default: None): Metadata value consumed by this routine.
-        overwrite (default: False): Whether existing files/directories may be replaced.
+        dataset_dir: Directory to create.
+        circuits: The circuits to save.
+        metadata (default: None): One JSON-serializable dict (or ``None``)
+            per circuit, stored with its record.
+        overwrite (default: False): Whether to replace an existing
+            ``dataset_dir``.
 
     Returns:
-        CircuitDataset with the computed result.
+        The saved dataset.
 
     Raises:
-        FileExistsError: Raised when input validation fails or a dependent operation cannot be completed.
-        ValueError: Raised when input validation fails or a dependent operation cannot be completed.
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        FileExistsError: If ``dataset_dir`` exists and ``overwrite`` is
+            false.
+        ValueError: If ``metadata`` does not match ``circuits`` in length,
+            or an entry is neither a dict nor ``None``, has a non-string
+            key, or is not JSON-serializable.
+        OptionalDependencyError: If qiskit is not installed.
     """
     dataset_dir = Path(dataset_dir)
-    if dataset_dir.exists() and not overwrite:
+    # is_symlink() catches a dangling link, which exists() reports as absent.
+    if (dataset_dir.exists() or dataset_dir.is_symlink()) and not overwrite:
         raise FileExistsError(f"{dataset_dir} exists (use overwrite=True)")
 
     try:
-        import qiskit
-
-        qpy = qiskit.qpy
+        from qiskit import qpy
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required to save circuits") from e
 
@@ -379,13 +382,9 @@ def save_dataset(
     if len(md) != len(circuits):
         raise ValueError("metadata must have the same length as circuits.")
 
-    dataset_parent = dataset_dir.parent
-    dataset_parent.mkdir(parents=True, exist_ok=True)
-    tmp_name = f".{dataset_dir.name}.tmp-"
-
-    tmp_dir = Path(tempfile.mkdtemp(prefix=tmp_name, dir=dataset_parent))
-    committed = False
-    try:
+    # Assembled beside dataset_dir and swapped in at the end, so a failure
+    # leaves no partial dataset and keeps an existing one intact.
+    with replacing_directory(dataset_dir) as tmp_dir:
         records: List[CircuitRecord] = []
         used_names: set[str] = set()
         used_artifacts: set[str] = set()
@@ -402,7 +401,7 @@ def save_dataset(
 
             safe_stem = _sanitize_artifact_stem(name, fallback=f"circuit_{i}")
             artifact = _build_unique_artifact(safe_stem, used_artifacts)
-            used_artifacts.add(artifact)
+            used_artifacts.add(artifact.casefold())
             out = tmp_dir / artifact
             with out.open("wb") as f:
                 qpy.dump(qc, f)
@@ -420,42 +419,29 @@ def save_dataset(
             {"version": 1, "records": [r.__dict__ for r in records]},
         )
 
-        backup_path = Path(f"{tmp_dir}.backup")
-        backed_up = False
-        try:
-            if dataset_dir.exists():
-                os.replace(dataset_dir, backup_path)
-                backed_up = True
-            os.replace(tmp_dir, dataset_dir)
-            committed = True
-        except Exception:
-            if backed_up and not dataset_dir.exists():
-                os.replace(backup_path, dataset_dir)
-            raise
-        finally:
-            if committed and backed_up:
-                if backup_path.is_dir():
-                    shutil.rmtree(backup_path, ignore_errors=True)
-                elif backup_path.exists():
-                    backup_path.unlink()
-    finally:
-        if not committed:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-
     return CircuitDataset(dataset_dir, records)
 
 
 def load_dataset(dataset_dir: Path) -> CircuitDataset:
-    """Load dataset from serialized data or persisted storage.
+    """Load the dataset saved in ``dataset_dir``.
+
+    The index is validated in full before anything is deserialized: every
+    record needs a unique non-empty ``name``, a unique ``artifact`` that is
+    a plain file name present in the directory, a ``format`` of ``"qpy"``
+    or ``"qasm"``, and ``metadata`` that is an object or ``null``.
 
     Args:
-        dataset_dir: Directory containing the dataset index and circuit artifacts.
+        dataset_dir: Directory holding ``qbalance_dataset.json``.
 
     Returns:
-        CircuitDataset with the computed result.
+        The dataset; circuits load on demand with
+        :meth:`CircuitDataset.load_circuits`.
 
     Raises:
-        None.
+        OSError: If the index cannot be read (``FileNotFoundError`` when
+            ``dataset_dir`` holds none).
+        ValueError: If the index is not valid JSON or violates the rules
+            above.
     """
     dataset_dir = Path(dataset_dir)
     idx = load_json(dataset_dir / DATASET_INDEX)
@@ -535,16 +521,16 @@ def load_dataset(dataset_dir: Path) -> CircuitDataset:
 
 
 def load_data(name: str) -> CircuitDataset:
-    """Load data from serialized data or persisted storage.
+    """Load a built-in dataset, materializing it on first use.
 
     Args:
-        name: Name/identifier for a circuit, dataset, or lookup record.
+        name: Built-in dataset name; ``"tiny"`` is the only one.
 
     Returns:
-        CircuitDataset with the computed result.
+        The dataset.
 
     Raises:
-        None.
+        KeyError: If ``name`` is not a built-in dataset.
     """
     from qbalance.builtin_data import get_builtin_dataset_dir
 

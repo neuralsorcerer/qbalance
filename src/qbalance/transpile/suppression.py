@@ -8,19 +8,28 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from importlib import import_module
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypeVar
 
 import numpy as np
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
-from qbalance.utils import bit_index, instruction_parts, shares_bit
+from qbalance.utils import (
+    SCHEDULING_DIRECTIVES,
+    bit_index,
+    instruction_parts,
+    shares_bit,
+)
 
 log = get_logger(__name__)
 
 # Operations that cannot observe a measurement twirl inserted before them:
 # they neither change the qubit state nor read the classical bit.
-_TWIRL_TRANSPARENT_OPS = {"barrier", "delay"}
+_TWIRL_TRANSPARENT_OPS = SCHEDULING_DIRECTIVES
+
+# Untwirling relabels keys only, so it applies to shot counts and to
+# (quasi-)probabilities alike.
+_CountT = TypeVar("_CountT", int, float)
 
 
 def normalize_measurement_flip_map(flip_map: Any) -> Dict[int, int]:
@@ -50,19 +59,24 @@ def normalize_measurement_flip_map(flip_map: Any) -> Dict[int, int]:
 def apply_pauli_twirling(
     circuit: Any, num_twirls: int = 1, seed: Optional[int] = None, target: Any = None
 ) -> List[Any]:
-    """Apply pauli twirling used by the qbalance workflow.
+    """Return ``num_twirls`` Pauli-twirled copies of ``circuit``.
+
+    This wraps Qiskit's ``pauli_twirl_2q_gates``: every two-qubit gate is
+    conjugated by a random Pauli pair that leaves the circuit's unitary
+    unchanged.
 
     Args:
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
-        num_twirls (default: 1): Num twirls value consumed by this routine.
-        seed (default: None): Seed used for deterministic randomization.
-        target (default: None): Target value consumed by this routine.
+        circuit: Circuit to twirl.
+        num_twirls (default: 1): Number of randomized copies.
+        seed (default: None): Seed of the Pauli draws.
+        target (default: None): Target whose native gates the inserted
+            Paulis are synthesized into.
 
     Returns:
-        List[Any] with the computed result.
+        The twirled circuits, as a list even for one copy.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is not installed.
     """
     try:
         from qiskit.circuit import pauli_twirl_2q_gates
@@ -76,16 +90,13 @@ def apply_pauli_twirling(
 
 
 def _dd_sequence(name: str) -> List[Any]:
-    """Internal helper that dd sequence.
+    """Return the gates of the DD sequence ``name`` (case-insensitive).
 
-    Args:
-        name: Name/identifier for a circuit, dataset, or lookup record.
-
-    Returns:
-        Computed value produced by this routine.
+    ``XY4`` is X Y X Y, ``XX`` is X X, and ``YY`` is Y Y; any other name
+    gives ``XY4`` (``StrategySpec`` rejects unknown names before this).
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is not installed.
     """
     try:
         from qiskit.circuit.library import XGate, YGate
@@ -182,6 +193,33 @@ def _backend_instruction_durations(backend: Any) -> Any:
     return durations
 
 
+# Canonical names of the sequences _dd_sequence builds, keyed by gate names.
+_DD_SEQUENCE_LABELS = {
+    ("x", "y", "x", "y"): "XY4",
+    ("x", "x"): "XX",
+    ("y", "y"): "YY",
+}
+
+
+def resolve_dd_sequence(backend: Any, sequence: str = "XY4") -> List[Any]:
+    """Return the DD gates ``build_dd_pass_manager`` pads idle time with.
+
+    The requested sequence is replaced by a fully supported echo when the
+    backend cannot run one of its gates (see :func:`_compatible_dd_sequence`).
+    """
+    dd_seq = _dd_sequence(sequence)
+    target = getattr(backend, "target", None)
+    if target is None:
+        return _compatible_dd_sequence(dd_seq, _backend_basis_gates(backend))
+    return _compatible_dd_sequence(dd_seq, _operation_names(target))
+
+
+def dd_sequence_label(gates: List[Any]) -> str:
+    """Return the conventional name ("XY4", "XX", ...) of a DD gate sequence."""
+    names = tuple(_gate_name(gate) for gate in gates)
+    return _DD_SEQUENCE_LABELS.get(names, "".join(name.upper() for name in names))
+
+
 def _make_pass(factory: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     """Instantiate a Qiskit pass, falling back for older positional APIs."""
     try:
@@ -191,17 +229,24 @@ def _make_pass(factory: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
 
 
 def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
-    """Build dd pass manager from the provided configuration parameters.
+    """Build the pass manager that pads a compiled circuit's idle time with DD.
+
+    It unrolls gates on three or more qubits, translates to the backend's
+    basis when one is known, schedules as late as possible, and fills every
+    idle window with the sequence :func:`resolve_dd_sequence` picks for the
+    backend.
 
     Args:
-        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
-        sequence (default: 'XY4'): Sequence value consumed by this routine.
+        backend: Backend whose target (or, for older backends, instruction
+            durations and basis gates) the scheduling uses.
+        sequence (default: 'XY4'): Requested DD sequence: ``XY4``, ``XX``
+            or ``YY``.
 
     Returns:
-        Any with the computed result.
+        The pass manager.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is not installed.
     """
     try:
         from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
@@ -217,7 +262,7 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
             "qiskit is required for dynamical decoupling"
         ) from e
 
-    dd_seq = _dd_sequence(sequence)
+    dd_seq = resolve_dd_sequence(backend, sequence)
 
     # Qiskit recommends scheduling first, then padding idle intervals with the
     # requested DD sequence.  Modern Qiskit scheduler/padding passes accept a
@@ -229,9 +274,7 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
         # Older backends may only expose a basis-gate list.  Keep translator
         # behavior when a basis is available; otherwise skip translation rather
         # than constructing a guaranteed-invalid empty-basis translator.
-        supported_ops = _backend_basis_gates(backend)
-        basis = sorted(supported_ops)
-        dd_seq = _compatible_dd_sequence(dd_seq, supported_ops)
+        basis = sorted(_backend_basis_gates(backend))
         durations = _backend_instruction_durations(backend)
         schedule_pass = _make_pass(ALAPScheduleAnalysis, durations, durations=durations)
         dd_pass = _make_pass(
@@ -242,9 +285,7 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
             dd_sequence=dd_seq,
         )
     else:
-        supported_ops = _operation_names(target)
-        basis = sorted(supported_ops)
-        dd_seq = _compatible_dd_sequence(dd_seq, supported_ops)
+        basis = sorted(_operation_names(target))
         schedule_pass = _make_pass(ALAPScheduleAnalysis, target, target=target)
         dd_pass = _make_pass(
             PadDynamicalDecoupling, target, dd_seq, target=target, dd_sequence=dd_seq
@@ -293,17 +334,26 @@ def _is_terminal_measurement(
 def apply_measurement_twirling(
     circuit: Any, seed: Optional[int] = None
 ) -> Tuple[Any, Dict[int, int]]:
-    """Apply measurement twirling used by the qbalance workflow.
+    """Flip each terminal measurement of ``circuit`` at random.
+
+    With probability 1/2 an ``X`` is inserted just before a terminal
+    measurement and its classical bit recorded in the flip map, so
+    :func:`apply_measurement_untwirl_counts` can undo the flip in the
+    counts.  A measurement is terminal when no later instruction other than
+    a barrier or delay acts on its qubit or classical bit; other
+    measurements are left alone.  An object without ``copy_empty_like`` is
+    returned as an untwirled copy with an empty flip map.
 
     Args:
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
-        seed (default: None): Seed used for deterministic randomization.
+        circuit: Circuit to twirl.
+        seed (default: None): Seed of the flips.
 
     Returns:
-        Tuple[Any, Dict[int, int]] with the computed result.
+        ``(twirled_circuit, flip_map)``, the map holding ``{clbit: 1}`` for
+        every flipped classical bit.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is not installed.
     """
     try:
         import_module("qiskit")
@@ -341,41 +391,31 @@ def apply_measurement_twirling(
             qc.append(inst, qargs, cargs)
         return qc, flip_map
 
-    # Lightweight circuit stubs used by tests may not support reconstruction.
-    # Preserve compatibility by falling back to in-place-style copy behavior.
-    qc = circuit.copy()
-    data = list(qc.data)
-    for index, entry in enumerate(data):
-        inst, qargs, cargs = instruction_parts(entry)
-        if (
-            getattr(inst, "name", "") == "measure"
-            and len(qargs) == 1
-            and len(cargs) == 1
-            and _is_terminal_measurement(data, index, qargs, cargs)
-        ):
-            cb = bit_index(qc, cargs[0])
-            flip = int(rng.integers(0, 2))
-            if flip == 1:
-                qb = bit_index(qc, qargs[0])
-                qc.x(qb)
-                flip_map[cb] = flip_map.get(cb, 0) ^ 1
-    return qc, flip_map
+    # Without copy_empty_like there is no way to place an X *before* a
+    # measurement: ``x()`` appends after it, where it cannot affect the
+    # recorded bit, and recording a flip for it would make untwirling corrupt
+    # every count.  Leave such circuit objects untwirled -- an empty flip map
+    # is the only correction consistent with an unchanged circuit.
+    return circuit.copy(), flip_map
 
 
 def apply_measurement_untwirl_counts(
-    counts: Dict[str, int], flip_map: Dict[int, int]
-) -> Dict[str, int]:
-    """Apply measurement untwirl counts used by the qbalance workflow.
+    counts: Dict[str, _CountT], flip_map: Dict[int, int]
+) -> Dict[str, _CountT]:
+    """Undo measurement-twirl flips on a counts or probability mapping.
+
+    Keys are relabelled: classical bit ``c`` is the ``c``-th binary digit
+    from the right, register separators are skipped and kept, and
+    outcomes that become equal are summed.  Flips of classical bits the
+    keys do not have are ignored.
 
     Args:
-        counts: Counts value consumed by this routine.
-        flip_map: Flip map value consumed by this routine.
+        counts: Counts or probabilities keyed by Qiskit bitstrings.
+        flip_map: Flip map as recorded by :func:`apply_measurement_twirling`
+            (sanitized with :func:`normalize_measurement_flip_map`).
 
     Returns:
-        Dict[str, int] with the computed result.
-
-    Raises:
-        None.
+        The untwirled mapping; ``counts`` itself when nothing is flipped.
     """
     if not flip_map:
         return counts
@@ -384,7 +424,7 @@ def apply_measurement_untwirl_counts(
     if not normalized_flip_map:
         return counts
 
-    out: Dict[str, int] = {}
+    out: Dict[str, _CountT] = {}
     for bitstr, n in counts.items():
         b = list(bitstr)
         # Qiskit renders multiple classical registers with spaces in count keys,

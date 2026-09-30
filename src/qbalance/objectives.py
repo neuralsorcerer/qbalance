@@ -22,16 +22,10 @@ class Objective:
     )
 
     def __post_init__(self) -> None:
-        """Validate and normalize dataclass state immediately after initialization.
+        """Copy ``weights`` and keep the usable ones for scoring.
 
-        Args:
-            None.
-
-        Returns:
-            None. This method updates state or performs side effects only.
-
-        Raises:
-            None.
+        A weight that is not a finite number is kept in ``weights`` but
+        ignored by :meth:`score`.
         """
         copied_weights = dict(self.weights)
         object.__setattr__(self, "weights", copied_weights)
@@ -48,16 +42,17 @@ class Objective:
         object.__setattr__(self, "_valid_weights", tuple(valid_weights))
 
     def score(self, metrics: Mapping[str, Any]) -> float:
-        """Score used by the qbalance workflow.
+        """Return the weighted sum of ``metrics`` (lower is better).
+
+        The score is ``sum(weight * metrics[key])`` over the finite weights.
+        A metric that is missing, non-numeric or non-finite contributes
+        nothing, as does a term that overflows.
 
         Args:
-            metrics: Mapping of metric names to numeric values used for scoring.
+            metrics: Metric values keyed by name.
 
         Returns:
-            float with the computed result.
-
-        Raises:
-            None.
+            The score; 0 when no term applies.
         """
         score = 0.0
         for key, weight in self._valid_weights:
@@ -165,18 +160,19 @@ def _normalize_objective_weights(weights: Mapping[str, Any]) -> dict[str, float]
 
 
 def default_objective() -> Objective:
-    # Reasonable default: depth + 2q gates + estimated error
+    """Return the objective ``adjust`` uses by default.
 
-    """Return the default objective configuration used by qbalance.
+    ``depth + 2 * two_qubit_ops + 10 * estimated_error
+    + 0.1 * compile_time_s + sampling_overhead``.
 
-    Args:
-        None.
-
-    Returns:
-        Objective with the computed result.
-
-    Raises:
-        None.
+    ``sampling_overhead`` is the factor by which a strategy multiplies the
+    shots needed for a given precision: 1 for a circuit that runs once (a
+    constant that never changes their ranking), the extrapolation's shot
+    multiplier for ZNE (4.375 for the default linear fit at factors 1, 3, 5),
+    and the quasi-probability overhead -- 9 per CNOT cut -- for circuit
+    cutting.  Without it a cut candidate is judged only by its smaller
+    subexperiments and wins on every wide circuit, and a ZNE candidate scores
+    exactly like the same compile without ZNE, whatever their shot cost.
     """
     return Objective(
         weights={
@@ -184,5 +180,6 @@ def default_objective() -> Objective:
             "two_qubit_ops": 2.0,
             "estimated_error": 10.0,
             "compile_time_s": 0.1,
+            "sampling_overhead": 1.0,
         }
     )

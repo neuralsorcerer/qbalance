@@ -197,6 +197,9 @@ def test_fold_global_accepts_measurement_twirl_frame_changes():
 
     Rejecting any non-measure instruction after the first measurement made
     ``zne=True`` with ``measurement_twirling=True`` fail for every circuit.
+    The frame-change X gates are part of the computation, so they are folded
+    with the rest of it (``X X^dagger X`` is still one net X) and every
+    measurement stays terminal.
     """
     from qiskit import QuantumCircuit
 
@@ -211,19 +214,62 @@ def test_fold_global_accepts_measurement_twirl_frame_changes():
     folded = zne.fold_global(qc, 3.0)
 
     assert [inst.operation.name for inst in folded.data] == [
+        # U
         "h",
         "cx",
         "x",
         "x",
+        # U^dagger
+        "x",
+        "x",
         "cx",
         "h",
+        # U
         "h",
         "cx",
+        "x",
         "x",
         "measure",
-        "x",
         "measure",
     ]
+
+
+def test_fold_global_folds_gates_listed_after_another_qubits_measurement():
+    """Regression: every gate is folded, whatever its position in ``data``.
+
+    ``circuit.data`` is only a topological order, so a qubit that finishes
+    early is measured before gates on other qubits are listed.  Splitting the
+    circuit at the first measurement replayed those later gates once, so the
+    two-qubit gates below were never folded and ZNE extrapolated a noise curve
+    in which most of the circuit's noise was not scaled at all.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import Operator
+
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.measure(0, 0)
+    qc.h(1)
+    qc.cx(1, 2)
+    qc.measure([1, 2], [1, 2])
+
+    folded = zne.fold_global(qc, 3.0)
+
+    assert folded.count_ops()["cx"] == 3
+    assert folded.count_ops()["h"] == 6
+    names = [inst.operation.name for inst in folded.data]
+    assert names[-3:] == ["measure", "measure", "measure"]
+    assert "measure" not in names[:-3]
+    # Every measurement still reads the same clbit from the same qubit.
+    assert [
+        (folded.find_bit(i.qubits[0]).index, folded.find_bit(i.clbits[0]).index)
+        for i in folded.data
+        if i.operation.name == "measure"
+    ] == [(0, 0), (1, 1), (2, 2)]
+    unitary = qc.remove_final_measurements(inplace=False)
+    assert Operator(folded.remove_final_measurements(inplace=False)).equiv(
+        Operator(unitary)
+    )
 
 
 def test_fold_global_still_rejects_post_measurement_computation():
@@ -237,12 +283,23 @@ def test_fold_global_still_rejects_post_measurement_computation():
     with pytest.raises(ValueError, match="all measurements are terminal"):
         zne.fold_global(mid_circuit, 3.0)
 
+    # A gate listed after a measurement of a *different* qubit is not
+    # post-measurement computation: it commutes with that measurement, so it
+    # is folded like any other gate.
     unmeasured_qubit = QuantumCircuit(2, 1)
     unmeasured_qubit.h(0)
     unmeasured_qubit.measure(0, 0)
     unmeasured_qubit.x(1)
-    with pytest.raises(ValueError, match="all measurements are terminal"):
-        zne.fold_global(unmeasured_qubit, 3.0)
+    folded = zne.fold_global(unmeasured_qubit, 3.0)
+    assert [inst.operation.name for inst in folded.data] == [
+        "h",
+        "x",
+        "x",
+        "h",
+        "h",
+        "x",
+        "measure",
+    ]
 
 
 def test_fold_global_preserves_the_circuit_unitary():
@@ -353,7 +410,7 @@ def test_fake_ibm_backends_resolve_from_lowercase_device_names():
 def test_mthree_mitigation_improves_a_readout_noisy_distribution():
     """The wrapper must feed mthree the qubits its count keys actually use.
 
-    ``_final_measurement_qubits`` orders physical qubits by classical bit, and
+    ``measured_qubits_by_clbit`` orders physical qubits by classical bit, and
     getting that wrong silently degrades the correction rather than failing, so
     check the mitigated distribution really moves toward the ideal one.
     """
@@ -368,7 +425,7 @@ def test_mthree_mitigation_improves_a_readout_noisy_distribution():
     from qbalance.mitigation.mthree import apply_mthree_mitigation
     from qbalance.strategies import StrategySpec
     from qbalance.transpile.pipeline import compile_one
-    from qbalance.workflow.workload import _final_measurement_qubits
+    from qbalance.utils import measured_qubits_by_clbit
 
     noise = NoiseModel()
     for qubit in range(5):
@@ -411,7 +468,7 @@ def test_mthree_mitigation_improves_a_readout_noisy_distribution():
             for key in set(first) | set(second)
         )
 
-    measured = _final_measurement_qubits(compiled)
+    measured = measured_qubits_by_clbit(compiled)
     assert len(measured) == compiled.num_clbits
 
     mitigated = apply_mthree_mitigation(
@@ -431,3 +488,340 @@ def test_zne_extrapolation_rejects_non_string_count_keys():
         zne.zne_extrapolate_counts([1.0, 2.0], [{0: 5}, {"0": 5}])
     with pytest.raises(ValueError, match="counts keys must be non-empty bitstrings"):
         zne.zne_extrapolate_counts([1.0, 2.0], [{"": 5}, {"0": 5}])
+
+
+def test_realized_fold_factor_matches_what_fold_global_applies():
+    """The extrapolation x-values must be the factors folding really ran at."""
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1)
+    qc.h(0)
+    qc.t(0)
+
+    for scale in (1.0, 1.5, 2.0, 3.0, 4.0, 5.0, 6.5):
+        k = zne.realized_fold_factor(scale)
+        assert k % 2 == 1
+        assert k >= scale
+        folded = zne.fold_global(qc, scale)
+        assert len(folded.data) == k * len(qc.data)
+
+    for bad in (0.5, float("nan"), True, "x"):
+        with pytest.raises(ValueError, match="finite real value"):
+            zne.realized_fold_factor(bad)  # type: ignore[arg-type]
+
+
+def test_fold_global_for_backend_keeps_the_compiled_layout():
+    """Re-basing must not replace the compile's TranspileLayout.
+
+    The folded circuit runs on the same physical qubits with the same net
+    routing permutation, so the original layout still describes it; the
+    identity layout the re-basing pass manager stamps on would not.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.strategies import StrategySpec
+    from qbalance.transpile.pipeline import compile_one
+
+    backend = GenericBackendV2(num_qubits=5, seed=0)
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+    compiled, _ = compile_one(qc, backend, StrategySpec(optimization_level=2))
+    assert compiled.layout is not None
+
+    folded = zne.fold_global_for_backend(compiled, backend, 3.0)
+
+    assert folded.layout is compiled.layout
+
+
+def test_mthree_calibrates_generic_backends_on_their_aer_equivalent():
+    """Regression: M3 always failed on ``fake:generic`` backends.
+
+    mthree reads ``backend.configuration()``, which ``GenericBackendV2`` lacks.
+    Its runs use ``NoiseModel.from_backend`` on Aer, so the Aer equivalent
+    carries the same readout channel; any other backend passes through.
+    """
+    pytest.importorskip("qiskit_aer")
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit_aer import AerSimulator
+
+    generic = GenericBackendV2(num_qubits=3, seed=0)
+    system = mthree_mod._calibration_system(generic)
+    assert isinstance(system, AerSimulator)
+    assert callable(system.configuration)
+
+    with_configuration = types.SimpleNamespace(configuration=lambda: None)
+    assert mthree_mod._calibration_system(with_configuration) is with_configuration
+    other = object()
+    assert mthree_mod._calibration_system(other) is other
+
+
+def test_mthree_mitigation_runs_on_a_generic_backend():
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit, transpile
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=3, seed=0)
+    qc = QuantumCircuit(2, 2)
+    qc.x(0)
+    qc.x(1)
+    qc.measure([0, 1], [0, 1])
+    compiled = transpile(qc, backend, optimization_level=0, initial_layout=[0, 1])
+    counts = backend.run(compiled, shots=4000, seed_simulator=1).result().get_counts()
+
+    probs = mthree_mod.apply_mthree_mitigation(
+        backend, counts, measured_qubits=[0, 1], calibration_shots=4000
+    )
+
+    assert pytest.approx(sum(probs.values()), abs=1e-6) == 1.0
+    assert probs["11"] >= counts.get("11", 0) / 4000
+
+
+def _install_fake_mthree(monkeypatch, calls):
+    """Install a linear fake M3 whose correction swaps nothing but records calls."""
+    mthree = types.ModuleType("mthree")
+    classes = types.ModuleType("mthree.classes")
+
+    class Mit:
+        def __init__(self, system):
+
+            calls.append(("init", system))
+
+        def cals_from_system(self, qubits, shots):
+
+            calls.append(("cals", list(qubits), shots))
+
+        def apply_correction(self, counts, qubits):
+
+            calls.append(("correct", dict(counts)))
+            total = sum(counts.values())
+            return {key: value / total for key, value in counts.items()}
+
+    class Quasi(dict):
+        def __init__(self, data, shots=None):
+
+            super().__init__(data)
+            calls.append(("quasi", dict(data), shots))
+
+        def nearest_probability_distribution(self):
+
+            return dict(self)
+
+    mthree.M3Mitigation = Mit
+    classes.QuasiDistribution = Quasi
+    mthree.classes = classes
+    monkeypatch.setitem(sys.modules, "mthree", mthree)
+    monkeypatch.setitem(sys.modules, "mthree.classes", classes)
+
+
+def test_mitigate_twirled_counts_corrects_each_instance_before_untwirling(
+    monkeypatch,
+):
+    """Each instance is corrected as measured, then untwirled with its own map."""
+    calls: list = []
+    _install_fake_mthree(monkeypatch, calls)
+    backend = types.SimpleNamespace(configuration=lambda: None)
+
+    probs = mthree_mod.mitigate_twirled_counts(
+        backend,
+        [{"0": 30, "1": 10}, {"0": 5, "1": 15}],
+        [{0: 1}, {}],
+        measured_qubits=[4],
+        calibration_shots=123,
+    )
+
+    # Calibrated once, on the backend itself, for the measured qubit.
+    assert [c for c in calls if c[0] in ("init", "cals")] == [
+        ("init", backend),
+        ("cals", [4], 123),
+    ]
+    # Both instances were corrected on their raw counts.
+    assert [c[1] for c in calls if c[0] == "correct"] == [
+        {"0": 30, "1": 10},
+        {"0": 5, "1": 15},
+    ]
+    # Instance 0 (flipped) contributes 0.75 to "1"; instance 1 contributes
+    # 0.75 to "1" as well; each weighs 1/2 by shots.
+    assert probs == pytest.approx({"1": 0.75, "0": 0.25})
+
+    with pytest.raises(ValueError, match="same length"):
+        mthree_mod.mitigate_twirled_counts(backend, [{"0": 1}], [], [0])
+    with pytest.raises(ValueError, match="at least one shot"):
+        mthree_mod.mitigate_twirled_counts(backend, [{"0": 0}], [{}], [0])
+
+
+def test_mitigate_twirled_counts_recovers_asymmetric_readout():
+    """End to end: twirled instances with 20% 1->0 readout error, true 50/50."""
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import NoiseModel, ReadoutError
+
+    noise = NoiseModel()
+    noise.add_all_qubit_readout_error(ReadoutError([[0.99, 0.01], [0.20, 0.80]]))
+    sim = AerSimulator(noise_model=noise)
+
+    raw, flips = [], []
+    for flip in (1, 0, 1, 0):
+        qc = QuantumCircuit(1, 1)
+        qc.h(0)
+        if flip:
+            qc.x(0)
+        qc.measure(0, 0)
+        raw.append(sim.run(qc, shots=50_000, seed_simulator=11).result().get_counts())
+        flips.append({0: 1} if flip else {})
+
+    probs = mthree_mod.mitigate_twirled_counts(
+        sim, raw, flips, measured_qubits=[0], calibration_shots=100_000
+    )
+
+    assert probs["0"] == pytest.approx(0.5, abs=0.02)
+    assert probs["1"] == pytest.approx(0.5, abs=0.02)
+
+
+def test_mthree_handles_counts_from_several_classical_registers():
+    """Regression: M3 rejected every circuit with more than one register.
+
+    Qiskit separates registers with spaces in count keys ("10 1"), which
+    mthree read as an extra bit: "Bitstring length (4) does not match number
+    of qubits (3)".  Separators are stripped for the correction and restored
+    on the result, so mitigated keys match the counts they came from.
+    """
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import NoiseModel, ReadoutError
+
+    noise = NoiseModel()
+    noise.add_all_qubit_readout_error(ReadoutError([[0.97, 0.03], [0.10, 0.90]]))
+    sim = AerSimulator(noise_model=noise)
+    qubits = QuantumRegister(3)
+    first, second = ClassicalRegister(1, "a"), ClassicalRegister(2, "b")
+    qc = QuantumCircuit(qubits, first, second)
+    qc.x(0)
+    qc.x(2)
+    qc.measure(qubits[0], first[0])
+    qc.measure(qubits[1], second[0])
+    qc.measure(qubits[2], second[1])
+    raw = sim.run(qc, shots=20_000, seed_simulator=5).result().get_counts()
+    assert all(" " in key for key in raw)
+
+    legacy = mthree_mod.apply_mthree_mitigation(
+        sim, raw, [0, 1, 2], calibration_shots=50_000
+    )
+    twirled = mthree_mod.mitigate_twirled_counts(
+        sim, [raw], [{}], measured_qubits=[0, 1, 2], calibration_shots=50_000
+    )
+
+    for probs in (legacy, twirled):
+        assert all(" " in key for key in probs)
+        # Measured x on q0 (register a) and q2 (register b, bit 1).
+        assert probs.get("10 1", 0.0) == pytest.approx(1.0, abs=0.02)
+        assert raw["10 1"] / 20_000 < 0.85
+
+    assert mthree_mod._with_separators("101", "10 1") == "10 1"
+    assert mthree_mod._with_separators("101", None) == "101"
+    assert mthree_mod._without_separators({"10 1": 2, "101": 1}) == {"101": 3}
+
+
+def test_mthree_skips_classical_bits_no_measurement_writes():
+    """Regression: M3 failed whenever a classical bit was never measured.
+
+    ``QuantumCircuit(3, 3)`` measuring two qubits yields three-bit count keys
+    for two measured qubits, which mthree rejects ("Bitstring length (3) does
+    not match number of qubits (2)") -- so every M3 candidate on such a
+    circuit failed.  Keys are now projected onto the measured bits and
+    expanded back, with the unwritten bits restored as ``0``.
+    """
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+    from qiskit_aer.noise import NoiseModel, ReadoutError
+
+    from qbalance.utils import measured_clbits, measured_qubits_by_clbit
+
+    noise = NoiseModel()
+    noise.add_all_qubit_readout_error(ReadoutError([[0.97, 0.03], [0.10, 0.90]]))
+    sim = AerSimulator(noise_model=noise)
+    qc = QuantumCircuit(4, 4)
+    qc.x(0)
+    qc.x(2)
+    qc.measure(0, 1)  # clbits 0 and 2 are never written
+    qc.measure(2, 3)
+    raw = sim.run(qc, shots=20_000, seed_simulator=5).result().get_counts()
+
+    assert measured_qubits_by_clbit(qc) == [0, 2]
+    assert measured_clbits(qc) == [1, 3]
+    for probs in (
+        mthree_mod.apply_mthree_mitigation(
+            sim, raw, [0, 2], calibration_shots=50_000, clbits=[1, 3]
+        ),
+        mthree_mod.mitigate_twirled_counts(
+            sim,
+            [raw],
+            [{}],
+            measured_qubits=[0, 2],
+            calibration_shots=50_000,
+            clbits=[1, 3],
+        ),
+    ):
+        assert probs.get("1010", 0.0) == pytest.approx(1.0, abs=0.02)
+        assert all(key[1] == "0" and key[3] == "0" for key in probs)
+    assert raw["1010"] / 20_000 < 0.85
+
+    with pytest.raises(ValueError, match="do not fit"):
+        mthree_mod.apply_mthree_mitigation(sim, raw, [0, 2], clbits=[1, 4])
+
+
+def test_mthree_key_layout_projects_and_expands_measured_bits():
+    layout = mthree_mod._KeyLayout({"10 01": 1}, clbits=[0, 3])
+    # Key bits, classical bit 0 rightmost: c3=1 c2=0 | c1=0 c0=1.
+    assert layout.project({"10 01": 5, "10 00": 2}) == {"11": 5, "10": 2}
+    assert layout.expand("11") == "10 01"
+    assert layout.expand("01") == "00 01"
+    unmapped = mthree_mod._KeyLayout({"101": 1}, clbits=None)
+    assert unmapped.project({"101": 3}) == {"101": 3}
+    assert unmapped.expand("101") == "101"
+
+
+def test_parity_expectation_value_matches_the_zne_observable():
+    assert zne.parity_expectation_value({"00": 3, "11": 1}) == 1.0
+    assert zne.parity_expectation_value({"00": 3, "01": 1}) == pytest.approx(0.5)
+    assert zne.parity_expectation_value({"0 1": 0.25, "1 1": 0.75}) == pytest.approx(
+        0.5
+    )
+    with pytest.raises(ValueError, match="positive total weight"):
+        zne.parity_expectation_value({})
+
+
+def test_mthree_on_a_generic_backend_is_reproducible_for_a_seed():
+    """The calibration simulator qbalance creates takes the run's seed."""
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit, transpile
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=3, seed=0)
+    assert mthree_mod._calibration_system(backend, seed=5).options.seed_simulator == 5
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    compiled = transpile(qc, backend, optimization_level=0, initial_layout=[0, 1])
+    counts = backend.run(compiled, shots=2000, seed_simulator=1).result().get_counts()
+
+    def mitigate():
+
+        return mthree_mod.mitigate_twirled_counts(
+            backend, [counts], [{}], [0, 1], calibration_shots=2000, seed=5
+        )
+
+    assert mitigate() == mitigate()

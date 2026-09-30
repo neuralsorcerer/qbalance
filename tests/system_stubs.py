@@ -28,11 +28,11 @@ class _Circ:
         self.qubits = [_Q(0), _Q(1)]
         self.data = [(_I("cx"), [_Q(0), _Q(1)], []), (_I("measure"), [_Q(0)], [])]
 
-    def depth(self):
+    def depth(self, filter_function=None):
 
         return 3
 
-    def size(self):
+    def size(self, filter_function=None):
 
         return 4
 
@@ -73,3 +73,18 @@ class _Job:
     def result(self):
 
         return types.SimpleNamespace(get_counts=lambda: self._counts)
+
+
+def as_ensemble(compile_fn):
+    """Adapt a ``(circuit, metrics)`` compile stub to ``(instances, metrics)``.
+
+    ``compile_ensemble`` and ``_compile_cached`` return every twirl instance;
+    single-circuit stubs describe a one-instance ensemble.
+    """
+
+    def wrapper(*args, **kwargs):
+
+        compiled, metrics = compile_fn(*args, **kwargs)
+        return [compiled], metrics
+
+    return wrapper

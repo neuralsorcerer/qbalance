@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 @dataclass
 class PassProfile:
+    """One pass of a profiled compile: its class name, run time and index."""
+
     name: str
     time_s: float
     index: int
@@ -19,33 +21,18 @@ class PassProfile:
 
 @dataclass
 class ProfileReport:
+    """The passes of a profiled compile, in the order they ran."""
+
     passes: List[PassProfile] = field(default_factory=list)
 
     def total_time_s(self) -> float:
-        """Total time s used by the qbalance workflow.
-
-        Args:
-            None.
-
-        Returns:
-            float with the computed result.
-
-        Raises:
-            None.
-        """
+        """Return the summed run time of the recorded passes, in seconds."""
         return sum(p.time_s for p in self.passes)
 
     def to_json(self) -> Dict[str, Any]:
-        """To json used by the qbalance workflow.
+        """Return the report as JSON-ready data.
 
-        Args:
-            None.
-
-        Returns:
-            Dict[str, Any] with the computed result.
-
-        Raises:
-            None.
+        ``{"total_time_s": t, "passes": [{"name": n, "time_s": t, "index": i}]}``
         """
         return {
             "total_time_s": self.total_time_s(),
@@ -57,30 +44,14 @@ class ProfileReport:
 
 
 def make_callback(report: ProfileReport):
-    """Make callback used by the qbalance workflow.
+    """Return a pass-manager callback that records every pass into ``report``.
 
-    Args:
-        report: Report value consumed by this routine.
-
-    Returns:
-        Computed value produced by this routine.
-
-    Raises:
-        None.
+    Pass it as ``callback=`` to ``PassManager.run`` (or ``transpile``);
+    each call appends the pass's class name, run time and running index.
     """
 
     def _cb(**kwargs):
-        """Internal helper that cb.
-
-        Args:
-            **kwargs: Kwargs value consumed by this routine.
-
-        Returns:
-            Computed value produced by this routine.
-
-        Raises:
-            None.
-        """
+        """Append the pass Qiskit reports to ``report``."""
         pass_ = kwargs.get("pass_")
         t = float(kwargs.get("time", 0.0))
         idx = int(kwargs.get("count", -1))

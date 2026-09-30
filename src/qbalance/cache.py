@@ -9,7 +9,7 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.transpile.suppression import normalize_measurement_flip_map
@@ -36,16 +36,10 @@ class CacheEntry:
 
 
 def fingerprint_circuit(circuit: Any) -> str:
-    """Fingerprint circuit used by the qbalance workflow.
-
-    Args:
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
-
-    Returns:
-        str with the computed result.
+    """Return the SHA-256 hex digest of ``circuit``'s QPY serialization.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is not installed.
     """
     try:
         from qiskit import qpy
@@ -60,32 +54,19 @@ def fingerprint_circuit(circuit: Any) -> str:
 
 
 def cache_dir(root: Optional[Path] = None) -> Path:
-    """Cache dir used by the qbalance workflow.
+    """Return the compile-cache directory: ``ROOT/cache``.
 
     Args:
-        root (default: None): Root directory used to resolve local cache/dataset files.
-
-    Returns:
-        Path with the computed result.
-
-    Raises:
-        None.
+        root (default: None): Cache root; the platform's user cache
+            directory for qbalance when ``None``.
     """
     return (root or default_cache_dir("qbalance")) / "cache"
 
 
 def get_entry(key: str, root: Optional[Path] = None) -> CacheEntry:
-    """Return entry for the provided inputs.
+    """Return the cache entry for ``key``, stored at ``cache_dir(root)/key[:2]/key``.
 
-    Args:
-        key: Stable key used to identify a cache artifact.
-        root (default: None): Root directory used to resolve local cache/dataset files.
-
-    Returns:
-        CacheEntry with the computed result.
-
-    Raises:
-        None.
+    Nothing is created on disk.
     """
     d = cache_dir(root) / key[:2] / key
     return CacheEntry(key=key, dir=d)
@@ -93,27 +74,35 @@ def get_entry(key: str, root: Optional[Path] = None) -> CacheEntry:
 
 def _normalize_cached_meta(meta: Dict[str, Any]) -> Dict[str, Any]:
     """Return cached metadata with JSON-loaded flip-map keys restored."""
-    if "measurement_flip_map" not in meta:
+    if "measurement_flip_map" not in meta and "measurement_flip_maps" not in meta:
         return meta
 
     normalized_meta = dict(meta)
-    normalized_meta["measurement_flip_map"] = normalize_measurement_flip_map(
-        meta.get("measurement_flip_map")
-    )
+    if "measurement_flip_map" in meta:
+        normalized_meta["measurement_flip_map"] = normalize_measurement_flip_map(
+            meta.get("measurement_flip_map")
+        )
+    if "measurement_flip_maps" in meta:
+        raw_maps = meta.get("measurement_flip_maps")
+        normalized_meta["measurement_flip_maps"] = [
+            normalize_measurement_flip_map(flip_map)
+            for flip_map in (raw_maps if isinstance(raw_maps, list) else [])
+        ]
     return normalized_meta
 
 
-def load_compiled(entry: CacheEntry) -> Optional[Tuple[Any, Dict]]:
-    """Load compiled from serialized data or persisted storage.
+def load_compiled_ensemble(entry: CacheEntry) -> Optional[Tuple[List[Any], Dict]]:
+    """Load every cached circuit of an entry, with its metadata.
 
     Args:
         entry: CacheEntry describing where cached circuit artifacts are stored.
 
     Returns:
-        Optional[Tuple[Any, Dict]] with the computed result.
+        ``(circuits, meta)``, or ``None`` when the entry is incomplete.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is unavailable.
+        ValueError: If the entry holds no circuit.
     """
     meta = entry.dir / "meta.json"
     qpy_path = entry.dir / "compiled.qpy"
@@ -125,23 +114,48 @@ def load_compiled(entry: CacheEntry) -> Optional[Tuple[Any, Dict]]:
         raise OptionalDependencyError("qiskit is required for cache load") from e
     m = _normalize_cached_meta(load_json(meta))
     with qpy_path.open("rb") as f:
-        c = qpy.load(f)[0]
-    return c, m
+        circuits = list(qpy.load(f))
+    if not circuits:
+        raise ValueError(f"Cache entry {entry.dir} holds no circuit")
+    return circuits, m
 
 
-def save_compiled(entry: CacheEntry, circuit: Any, meta: Dict) -> None:
-    """Persist compiled and return a reference to the saved artifact.
+def load_compiled(entry: CacheEntry) -> Optional[Tuple[Any, Dict]]:
+    """Load the first cached circuit of an entry, with its metadata.
 
     Args:
         entry: CacheEntry describing where cached circuit artifacts are stored.
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
-        meta: Meta value consumed by this routine.
 
     Returns:
-        None. This method updates state or performs side effects only.
+        ``(circuit, meta)``, or ``None`` when the entry is incomplete.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is unavailable.
+    """
+    hit = load_compiled_ensemble(entry)
+    if hit is None:
+        return None
+    circuits, m = hit
+    return circuits[0], m
+
+
+def save_compiled(entry: CacheEntry, circuit: Any, meta: Dict) -> None:
+    """Persist a compiled circuit, or a list of them, with its metadata.
+
+    ``compiled.qpy`` and then ``meta.json`` are each written atomically, so
+    an interrupted save leaves an entry that reads as a miss rather than a
+    corrupt one.
+
+    Args:
+        entry: Where to store the circuits.
+        circuit: Compiled QuantumCircuit, or a list of them (a twirl ensemble).
+        meta: JSON-serializable compile metrics.
+
+    Raises:
+        OptionalDependencyError: If qiskit is not installed.
+        OSError: If the entry cannot be written.
+        Exception: Whatever QPY raises for a circuit it cannot serialize;
+            nothing is written then.
     """
     try:
         from qiskit import qpy

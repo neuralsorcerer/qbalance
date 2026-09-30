@@ -8,11 +8,12 @@ from qbalance.transpile.noise_aware_layout import (
     estimate_circuit_error,
     noise_aware_initial_layout,
 )
-from qbalance.transpile.pipeline import compile_one
+from qbalance.transpile.pipeline import compile_ensemble, compile_one
 from qbalance.transpile.suppression import apply_pauli_twirling, build_dd_pass_manager
 
 __all__ = [
     "compile_one",
+    "compile_ensemble",
     "estimate_circuit_error",
     "noise_aware_initial_layout",
     "apply_pauli_twirling",

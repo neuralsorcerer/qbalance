@@ -645,10 +645,11 @@ def _repeated_measurement_circuit():
 
 
 def test_twirled_ensembles_reuse_one_pass_manager(monkeypatch):
-    """Building a preset pass manager for a large backend is not free.
+    """A twirled strategy transpiles once, whatever its twirl count.
 
-    Only the noise-aware layout varies per twirled circuit, so an eight-twirl
-    strategy must build one pass manager, not eight identical ones.
+    Twirling is applied to the compiled circuit, so an eight-twirl strategy
+    builds one pass manager -- including with the noise-aware layout, which
+    depends only on the circuit being compiled.
     """
     pytest.importorskip("qiskit")
     from qiskit import QuantumCircuit
@@ -684,16 +685,15 @@ def test_twirled_ensembles_reuse_one_pass_manager(monkeypatch):
     assert len(builds) == 1
     assert metrics["depth"] > 0
 
-    # The noise-aware layout is per circuit, so it must still rebuild each time.
     builds.clear()
-    ensemble = []
+    twirled_inputs = []
 
     def capture(circuit, num_twirls, seed, target):
-        ensemble.extend([circuit] * num_twirls)
-        return list(ensemble)
+        twirled_inputs.append(circuit)
+        return [circuit.copy() for _ in range(num_twirls)]
 
     monkeypatch.setattr(pipeline, "apply_pauli_twirling", capture)
-    pipeline.compile_one(
+    instances, metrics = pipeline.compile_ensemble(
         qc,
         backend=backend,
         spec=StrategySpec(
@@ -705,7 +705,13 @@ def test_twirled_ensembles_reuse_one_pass_manager(monkeypatch):
         ),
         profile=False,
     )
-    assert len(builds) == 4
+    assert len(builds) == 1
+    assert builds[0] is not None  # the noise-aware layout reached the compile
+    # The twirl acts on the compiled, backend-native circuit.
+    assert len(twirled_inputs) == 1
+    assert twirled_inputs[0].num_qubits == backend.num_qubits
+    assert len(instances) == 4
+    assert metrics["twirl_instances"] == 4
 
 
 def test_count_two_qubit_ops_counts_exactly_the_two_qubit_gates():
@@ -874,8 +880,8 @@ def test_two_qubit_counting_agrees_across_the_two_implementations():
     """Both counters must exclude scheduling directives identically.
 
     ``extract_circuit_metrics`` and ``pipeline._count_two_qubit_ops`` both
-    report two_qubit_ops, from separate copies of the directive-name set
-    (a local literal and _DIRECTIVE_NAMES).  If they ever diverge, the metric
+    report two_qubit_ops, in separate implementations (sharing
+    ``utils.SCHEDULING_DIRECTIVES``).  If they ever diverge, the metric
     silently depends on which path produced it -- and a barrier spanning two
     qubits counting as a two-qubit gate would inflate the objective for
     otherwise identical circuits.
@@ -898,3 +904,707 @@ def test_two_qubit_counting_agrees_across_the_two_implementations():
         float(pipeline._count_two_qubit_ops(circuit))
         == extract_circuit_metrics(circuit)["two_qubit_ops"]
     )
+
+
+def test_depth_and_size_count_operations_not_idle_delays():
+    """An explicit idle delay is schedule, not a layer of operations."""
+    from qiskit import QuantumCircuit
+
+    from qbalance.metrics.circuit_metrics import extract_circuit_metrics
+    from qbalance.utils import operation_depth, operation_size
+
+    circuit = QuantumCircuit(2, 2)
+    circuit.h(0)
+    circuit.delay(160, 0)
+    circuit.delay(320, 1)
+    circuit.x(0)
+    circuit.barrier()
+    circuit.cx(0, 1)
+    circuit.measure([0, 1], [0, 1])
+
+    # Qiskit counts both delays: h, delay, x, cx, measure on qubit 0.
+    assert circuit.depth() == 5 and circuit.size() == 7
+    assert operation_depth(circuit) == 4
+    assert operation_size(circuit) == 5
+    metrics = extract_circuit_metrics(circuit)
+    assert (metrics["depth"], metrics["size"]) == (4.0, 5.0)
+    # The barrier still synchronizes the wires, as Qiskit's own depth does.
+    unsynchronized = circuit.copy_empty_like()
+    unsynchronized.h(0)
+    unsynchronized.x(0)
+    unsynchronized.x(0)
+    unsynchronized.barrier()
+    unsynchronized.x(1)
+    assert operation_depth(unsynchronized) == 4
+
+
+def test_dynamical_decoupling_does_not_bill_idle_delays_as_depth():
+    """Regression: DD's padding delays inflated depth and size.
+
+    Under the default objective each delay layer cost as much as a gate
+    layer, so a DD strategy on a Bell circuit scored as twice as deep as the
+    same compile without DD, although it runs for exactly as long.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.backends import resolve_backend
+    from qbalance.utils import operation_depth, operation_size
+
+    backend = resolve_backend("fake:generic:5")
+    bell = QuantumCircuit(2, 2)
+    bell.h(0)
+    bell.cx(0, 1)
+    bell.measure([0, 1], [0, 1])
+
+    plain, plain_m = pipeline.compile_ensemble(
+        bell, backend, StrategySpec(optimization_level=1)
+    )
+    (padded,), dd_m = pipeline.compile_ensemble(
+        bell,
+        backend,
+        StrategySpec(optimization_level=1, dynamical_decoupling=True),
+    )
+
+    assert dd_m["dd_applied"] is True
+    assert padded.count_ops().get("delay", 0) > 0
+    assert dd_m["depth"] == operation_depth(padded) < padded.depth()
+    assert dd_m["size"] == operation_size(padded) < padded.size()
+    # Only the inserted DD pulses are billed, never the delays around them.
+    pulses = sum(
+        count for name, count in padded.count_ops().items() if name in ("x", "y")
+    )
+    assert dd_m["size"] == plain_m["size"] + pulses
+    assert plain_m["depth"] == plain[0].depth()
+
+
+def test_measurement_twirl_is_inserted_before_dd_scheduling():
+    """Regression: the twirl's X gates were added after DD had scheduled.
+
+    An X inserted before one qubit's measurement after padding pushed that
+    measurement past the schedule the padding was built for, leaving an
+    idle window no DD sequence covered.  A circuit that is consistently
+    scheduled gains no delay when it is scheduled again.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.transpiler import PassManager
+    from qiskit.transpiler.passes import ALAPScheduleAnalysis, PadDelay
+
+    from qbalance.backends import resolve_backend
+
+    backend = resolve_backend("fake:generic:5")
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+
+    instances, metrics = pipeline.compile_ensemble(
+        qc,
+        backend,
+        StrategySpec(
+            optimization_level=1,
+            dynamical_decoupling=True,
+            measurement_twirling=True,
+            num_twirls=6,
+        ),
+    )
+
+    assert metrics["dd_applied"] is True
+    # Some instance flips only part of the measured qubits.
+    assert any(0 < len(flips) < 3 for flips in metrics["measurement_flip_maps"])
+    reschedule = PassManager(
+        [ALAPScheduleAnalysis(target=backend.target), PadDelay(target=backend.target)]
+    )
+    for instance in instances:
+        again = reschedule.run(instance)
+        assert again.count_ops().get("delay", 0) == instance.count_ops().get("delay", 0)
+
+
+def test_dynamical_decoupling_keeps_the_compiled_layout():
+    """Regression: the separate DD pass-manager run dropped the layout.
+
+    Its fresh property set carries no TranspileLayout, so every DD strategy
+    returned ``layout=None`` and lost the virtual-to-physical mapping.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=5, seed=0)
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+
+    plain, _ = pipeline.compile_one(qc, backend, StrategySpec(optimization_level=2))
+    for spec in (
+        StrategySpec(optimization_level=2, dynamical_decoupling=True),
+        StrategySpec(
+            optimization_level=2,
+            dynamical_decoupling=True,
+            measurement_twirling=True,
+        ),
+    ):
+        compiled, metrics = pipeline.compile_one(qc, backend, spec)
+        assert metrics["dd_applied"] is True
+        assert compiled.layout is not None
+        assert compiled.layout.initial_index_layout(
+            filter_ancillas=True
+        ) == plain.layout.initial_index_layout(filter_ancillas=True)
+
+
+class _CalibratedBackend:
+    """Backend stub exposing per-qubit readout error and T1/T2 in seconds."""
+
+    def __init__(self, readout, t1, t2):
+
+        self.num_qubits = len(readout)
+        self._readout = readout
+        self._t1 = t1
+        self._t2 = t2
+
+    def properties(self):
+
+        def item(name, value):
+            return types.SimpleNamespace(name=name, value=value)
+
+        qubits = []
+        for q in range(self.num_qubits):
+            entries = [item("readout_error", self._readout[q])]
+            if self._t1[q] is not None:
+                entries.append(item("T1", self._t1[q]))
+            if self._t2[q] is not None:
+                entries.append(item("T2", self._t2[q]))
+            qubits.append(entries)
+        return types.SimpleNamespace(qubits=qubits)
+
+
+def _single_qubit_circuit():
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1)
+    qc.h(0)
+    return qc
+
+
+def test_noise_aware_layout_does_not_favour_qubits_missing_coherence_data():
+    """Regression: a missing T1/T2 defaulted to 50e3 against values in seconds.
+
+    That default added ~1.0 to the quality score while real coherence times
+    (~1e-4 s) added ~1e-9, so an uncalibrated qubit beat every calibrated one
+    regardless of readout error.
+    """
+    backend = _CalibratedBackend(
+        readout=[0.01, 0.05],
+        t1=[1.2e-4, None],
+        t2=[0.9e-4, None],
+    )
+
+    layout = nal.noise_aware_initial_layout(backend, _single_qubit_circuit())
+
+    assert list(layout.get_physical_bits()) == [0]
+
+
+def test_noise_aware_layout_uses_coherence_to_separate_similar_readout():
+    """Coherence times must count whatever their units.
+
+    With the old fixed 1e-5 weight, times in seconds contributed ~1e-9, so
+    even a 0.05% readout difference outweighed a fourfold coherence gap.
+    """
+    backend = _CalibratedBackend(
+        readout=[0.0200, 0.0205],
+        t1=[0.5e-4, 2.0e-4],
+        t2=[0.5e-4, 2.0e-4],
+    )
+
+    layout = nal.noise_aware_initial_layout(backend, _single_qubit_circuit())
+
+    assert list(layout.get_physical_bits()) == [1]
+
+
+def _ghz_circuit():
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(3, 3)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.cx(1, 2)
+    qc.measure(range(3), range(3))
+    return qc
+
+
+def test_pauli_twirling_is_applied_to_the_compiled_circuit():
+    """Regression: twirls were compiled separately and only the best one kept.
+
+    A twirl suppresses noise only averaged over its random instances, and
+    twirling *before* transpilation lets optimization re-synthesize the
+    twirled blocks.  Every instance must be a target-native twirl of the one
+    compiled circuit, implement the same operation, and be returned.
+    """
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.quantum_info import Operator
+
+    backend = GenericBackendV2(num_qubits=5, seed=3)
+    qc = _ghz_circuit()
+    plain, _ = pipeline.compile_ensemble(
+        qc, backend, StrategySpec(optimization_level=3, seed_transpiler=4)
+    )
+    instances, metrics = pipeline.compile_ensemble(
+        qc,
+        backend,
+        StrategySpec(
+            optimization_level=3,
+            seed_transpiler=4,
+            pauli_twirling=True,
+            num_twirls=4,
+            seed_suppression=9,
+        ),
+    )
+
+    assert len(plain) == 1
+    assert len(instances) == 4
+    assert metrics["twirl_instances"] == 4
+    supported = set(backend.target.operation_names)
+    reference = Operator(plain[0].remove_final_measurements(inplace=False))
+    for instance in instances:
+        assert set(instance.count_ops()) <= supported
+        assert instance.count_ops()["cx"] == plain[0].count_ops()["cx"]
+        assert instance.layout is not None
+        assert Operator(instance.remove_final_measurements(inplace=False)).equiv(
+            reference
+        )
+    # The instances really are different random twirls.
+    assert len({str(instance.data) for instance in instances}) > 1
+
+
+def test_measurement_twirling_draws_one_flip_pattern_per_instance():
+    """Each instance needs its own pattern for the readout error to average."""
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=5, seed=3)
+    qc = _ghz_circuit()
+    spec = StrategySpec(measurement_twirling=True, num_twirls=6, seed_suppression=5)
+
+    instances, metrics = pipeline.compile_ensemble(qc, backend, spec)
+
+    maps = metrics["measurement_flip_maps"]
+    assert len(instances) == len(maps) == 6
+    assert metrics["measurement_flip_map"] == maps[0]
+    assert len({tuple(sorted(m.items())) for m in maps}) > 1
+    # A single-instance strategy with the same seed draws instance 0's pattern.
+    _, single = pipeline.compile_one(
+        qc, backend, StrategySpec(measurement_twirling=True, seed_suppression=5)
+    )
+    assert single["measurement_flip_map"] == maps[0]
+
+
+def test_dynamical_decoupling_reports_the_sequence_actually_applied():
+    """A target without ``y`` pads with XX even when XY4 was requested."""
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    backend = GenericBackendV2(num_qubits=5, seed=3)
+    assert "y" not in backend.target.operation_names
+
+    _, metrics = pipeline.compile_one(
+        _ghz_circuit(),
+        backend,
+        StrategySpec(optimization_level=1, dynamical_decoupling=True),
+    )
+
+    assert metrics["dd_applied"] is True
+    assert metrics["dd_sequence_applied"] == "XX"
+    assert suppression.dd_sequence_label(suppression._dd_sequence("XY4")) == "XY4"
+
+
+def test_compile_one_returns_the_first_ensemble_instance(monkeypatch):
+    first, second = object(), object()
+    monkeypatch.setattr(
+        pipeline,
+        "compile_ensemble",
+        lambda circuit, backend, spec, profile=False: ([first, second], {"d": 1}),
+    )
+
+    compiled, metrics = pipeline.compile_one(object(), object(), StrategySpec())
+
+    assert compiled is first
+    assert metrics == {"d": 1}
+
+
+def test_uncut_compiles_report_no_sampling_overhead():
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    _, metrics = pipeline.compile_one(
+        _ghz_circuit(), GenericBackendV2(num_qubits=5, seed=3), StrategySpec()
+    )
+
+    assert metrics["sampling_overhead"] == 1.0
+    assert metrics["twirl_instances"] == 1
+    assert metrics["measurement_flip_maps"] == [{}]
+
+
+def test_zne_compiles_report_the_shots_extrapolation_costs():
+    """Regression: a ZNE strategy was billed as if it ran the circuit once.
+
+    ZNE runs every noise factor on the full shot budget and extrapolates, so
+    matching an unmitigated run's precision takes ``n * sum(w_i**2)`` times
+    the shots.  Reported as 1.0, a ZNE candidate scored exactly like the same
+    compile without ZNE and was selected on ties, silently multiplying the
+    execution cost.
+    """
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.mitigation.zne import zne_sampling_overhead
+
+    # Monte-Carlo-checked values: linear at (1, 3, 5) and (1, 3), quadratic.
+    assert zne_sampling_overhead((1.0, 3.0, 5.0)) == pytest.approx(4.375)
+    assert zne_sampling_overhead((1.0, 3.0)) == pytest.approx(5.0)
+    assert zne_sampling_overhead((1.0, 3.0, 5.0), 2) == pytest.approx(15.65625)
+    # Folding realizes (1, 3, 3) here; the repeated point costs shots too.
+    assert zne_sampling_overhead((1.0, 2.0, 3.0)) == pytest.approx(7.125)
+    assert zne_sampling_overhead((1.0,), 0) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="distinct"):
+        zne_sampling_overhead((1.0, 2.0, 3.0), 2)
+
+    backend = GenericBackendV2(num_qubits=5, seed=3)
+    _, plain = pipeline.compile_one(_ghz_circuit(), backend, StrategySpec())
+    _, zne = pipeline.compile_one(_ghz_circuit(), backend, StrategySpec(zne=True))
+    assert zne["sampling_overhead"] == pytest.approx(4.375)
+    assert {k: zne[k] for k in ("depth", "two_qubit_ops")} == {
+        k: plain[k] for k in ("depth", "two_qubit_ops")
+    }
+
+
+def _line_backend_with_broken_coupler():
+    """Six-qubit line whose (1, 2) coupler is broken (error 1.0)."""
+    from qiskit.circuit.library import CXGate, Measure
+    from qiskit.transpiler import InstructionProperties, Target
+
+    target = Target(num_qubits=6)
+    cx_props = {}
+    for a in range(5):
+        error = 1.0 if (a, a + 1) == (1, 2) else 0.01
+        cx_props[(a, a + 1)] = InstructionProperties(error=error)
+        cx_props[(a + 1, a)] = InstructionProperties(error=error)
+    target.add_instruction(CXGate(), cx_props)
+    target.add_instruction(
+        Measure(), {(q,): InstructionProperties(error=0.01) for q in range(6)}
+    )
+    return types.SimpleNamespace(
+        target=target, num_qubits=6, coupling_map=target.build_coupling_map()
+    )
+
+
+def _chain_circuit(n):
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(n, n)
+    qc.h(0)
+    for q in range(n - 1):
+        qc.cx(q, q + 1)
+    qc.measure(range(n), range(n))
+    return qc
+
+
+def test_noise_aware_layout_places_interacting_qubits_on_coupled_pairs():
+    """Regression: the layout ignored the coupling map entirely.
+
+    It ranked qubits by calibration alone, so interacting qubits landed far
+    apart on sparse devices and routing multiplied the circuit (depth 594 vs
+    72 on a heavy-hex snapshot).
+    """
+    backend = _line_backend_with_broken_coupler()
+    qc = _chain_circuit(3)
+
+    layout = nal.noise_aware_initial_layout(backend, qc)
+
+    physical = [layout[qc.qubits[q]] for q in range(3)]
+    coupled = {tuple(edge) for edge in backend.coupling_map.get_edges()}
+    for a, b in ((0, 1), (1, 2)):
+        assert (physical[a], physical[b]) in coupled or (
+            physical[b],
+            physical[a],
+        ) in coupled
+
+
+def test_noise_aware_layout_avoids_broken_couplers():
+    """A coupler with error 1.0 must not carry the circuit's interactions."""
+    backend = _line_backend_with_broken_coupler()
+    qc = _chain_circuit(3)
+
+    layout = nal.noise_aware_initial_layout(backend, qc)
+
+    physical = {layout[qc.qubits[q]] for q in range(3)}
+    # The only chain of three that avoids the broken (1, 2) coupler.
+    assert physical == {3, 4, 5} or physical == {2, 3, 4}
+    assert not {1, 2} <= physical
+
+
+def test_noise_aware_compile_routes_no_worse_than_the_chain_needs():
+    """On a heavy-hex snapshot a chain needs no routing at all."""
+    fake = pytest.importorskip("qiskit_ibm_runtime.fake_provider")
+    backend = fake.FakeSherbrooke()
+    qc = _chain_circuit(8)
+
+    _, metrics = pipeline.compile_one(
+        qc,
+        backend,
+        StrategySpec(
+            optimization_level=2,
+            layout_method=pipeline.NOISE_AWARE_LAYOUT,
+            routing_method="sabre",
+        ),
+    )
+
+    assert metrics["two_qubit_ops"] == 7
+    assert metrics["estimated_error"] < 0.5
+
+
+def test_noise_aware_layout_does_not_route_around_a_poor_neighbour():
+    """Regression: a qubit with poor readout was skipped at the price of a hop.
+
+    The cost model charged readout where a qubit was placed, but routing
+    moves one of an uncoupled pair onto the path between them, so the qubit
+    is read out on the skipped qubit anyway -- after three extra gates.  On a
+    heavy-hex snapshot an eight-qubit chain came out with 16 two-qubit gates
+    instead of 7 and twice the estimated error of Qiskit's own layout.
+    """
+    from qiskit.circuit.library import CXGate, Measure
+    from qiskit.transpiler import InstructionProperties, Target
+
+    # Five-qubit line whose middle qubit reads out poorly: every chain of
+    # three adjacent qubits has to include it.
+    target = Target(num_qubits=5)
+    cx_props = {}
+    for a in range(4):
+        cx_props[(a, a + 1)] = InstructionProperties(error=0.01)
+        cx_props[(a + 1, a)] = InstructionProperties(error=0.01)
+    target.add_instruction(CXGate(), cx_props)
+    readout = {(q,): InstructionProperties(error=0.01) for q in range(5)}
+    readout[(2,)] = InstructionProperties(error=0.3)
+    target.add_instruction(Measure(), readout)
+    backend = types.SimpleNamespace(
+        target=target, num_qubits=5, coupling_map=target.build_coupling_map()
+    )
+    qc = _chain_circuit(3)
+
+    layout = nal.noise_aware_initial_layout(backend, qc)
+
+    physical = [layout[qc.qubits[q]] for q in range(3)]
+    assert all(abs(physical[q] - physical[q + 1]) == 1 for q in range(2))
+
+
+def test_usable_adjacency_drops_broken_couplers_only():
+    adjacency = [{1}, {0, 2}, {1, 3}, {2}]
+    errors = {(0, 1): 0.01, (1, 2): 1.0, (2, 3): 0.02}
+
+    assert nal._usable_adjacency(adjacency, errors) == [{1}, {0}, {3}, {2}]
+    # The caller's graph is left untouched.
+    assert adjacency == [{1}, {0, 2}, {1, 3}, {2}]
+    # With every coupler broken there is nothing better to plan with.
+    assert nal._usable_adjacency([{1}, {0}], {(0, 1): 1.0}) == [{1}, {0}]
+
+
+def test_noise_aware_compile_keeps_a_chain_unrouted_on_a_cz_snapshot():
+    fake = pytest.importorskip("qiskit_ibm_runtime.fake_provider")
+    backend = fake.FakeTorino()
+    qc = _chain_circuit(8)
+
+    for level in (1, 2):
+        _, metrics = pipeline.compile_one(
+            qc,
+            backend,
+            StrategySpec(
+                optimization_level=level,
+                layout_method=pipeline.NOISE_AWARE_LAYOUT,
+                routing_method="sabre",
+            ),
+        )
+        assert metrics["two_qubit_ops"] == 7
+        assert metrics["estimated_error"] < 0.2
+
+
+def test_noise_aware_layout_sees_the_interactions_of_wider_gates():
+    """Regression: gates on three or more qubits were invisible to the layout.
+
+    The layout runs on the circuit as written, where a Toffoli is still one
+    three-qubit gate; only literal two-qubit gates were counted, so a
+    Toffoli circuit looked interaction-free and was scattered across the
+    device (207 two-qubit gates after routing on a heavy-hex snapshot,
+    against 66 for SABRE's layout).
+    """
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(4)
+    qc.ccx(0, 1, 2)
+    qc.cx(2, 3)
+    qc.barrier(0, 3)
+    deg, weights = nal._logical_interactions(qc, 4)
+    assert weights == {(0, 1): 1.0, (0, 2): 1.0, (1, 2): 1.0, (2, 3): 1.0}
+    assert list(deg) == [2.0, 2.0, 3.0, 1.0]
+
+    # On a line, the Toffoli's three qubits must land on three adjacent
+    # qubits, clear of the broken coupler.
+    backend = _line_backend_with_broken_coupler()
+    toffoli = QuantumCircuit(3)
+    toffoli.ccx(0, 1, 2)
+    layout = nal.noise_aware_initial_layout(backend, toffoli)
+    physical = sorted(layout[toffoli.qubits[q]] for q in range(3))
+    assert physical in ([2, 3, 4], [3, 4, 5])
+
+
+def test_noise_aware_compile_keeps_toffoli_circuits_local():
+    fake = pytest.importorskip("qiskit_ibm_runtime.fake_provider")
+    from qiskit import QuantumCircuit
+
+    backend = fake.FakeSherbrooke()
+    qc = QuantumCircuit(6, 6)
+    for triple in [(0, 1, 2), (3, 4, 5), (1, 2, 3), (2, 3, 4), (0, 1, 2), (3, 4, 5)]:
+        qc.ccx(*triple)
+    qc.measure(range(6), range(6))
+
+    def two_qubit_ops(layout_method):
+        _, metrics = pipeline.compile_one(
+            qc,
+            backend,
+            StrategySpec(
+                optimization_level=1,
+                layout_method=layout_method,
+                routing_method="sabre",
+            ),
+        )
+        return metrics["two_qubit_ops"]
+
+    # Six Toffolis need 36 CNOTs before routing; SABRE's layout reaches 66.
+    assert two_qubit_ops(pipeline.NOISE_AWARE_LAYOUT) <= 1.25 * two_qubit_ops("sabre")
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_every_suppression_strategy_preserves_the_ideal_output(seed):
+    """Differential check: compiling, twirling, DD and folding change noise only.
+
+    Each strategy's instances, run noiselessly and untwirled with their own
+    flip maps, must reproduce the original circuit's output distribution, and
+    so must its ZNE-folded circuits.  Random circuits cover permuted and
+    partial measurements, several classical registers, three-qubit gates and
+    barriers.
+    """
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import ClassicalRegister, QuantumCircuit, QuantumRegister
+    from qiskit_aer import AerSimulator
+
+    from qbalance.backends import resolve_backend
+    from qbalance.execution.ensemble import instance_flip_maps, merge_counts
+    from qbalance.mitigation.zne import fold_global_for_backend
+
+    rng = np.random.default_rng(seed)
+    n = int(rng.integers(3, 6))
+    cut = int(rng.integers(1, n))
+    qc = QuantumCircuit(
+        QuantumRegister(n), ClassicalRegister(cut, "a"), ClassicalRegister(n, "b")
+    )
+    for _ in range(10):
+        a, b, c = (int(x) for x in rng.choice(n, size=3, replace=False))
+        kind = int(rng.integers(0, 5))
+        if kind == 0:
+            qc.ry(float(rng.uniform(0, 3)), a)
+        elif kind == 1:
+            qc.cx(a, b)
+        elif kind == 2:
+            qc.cp(float(rng.uniform(0, 3)), a, b)
+        elif kind == 3:
+            qc.ccx(a, b, c)
+        else:
+            qc.barrier(a, b)
+    # Permuted qubits into distinct clbits across both registers; the
+    # remaining clbits are never written.
+    qubits = [int(q) for q in rng.permutation(n)][: n - 1]
+    clbits = [int(c) for c in rng.choice(cut + n, size=n - 1, replace=False)]
+    for qubit, clbit in zip(qubits, clbits):
+        qc.measure(qubit, clbit)
+
+    ideal = AerSimulator()
+    backend = resolve_backend("fake:generic:6")
+    shots = 8000
+
+    def distribution(counts):
+        total = sum(counts.values())
+        return {key: value / total for key, value in counts.items()}
+
+    def tvd(p, q):
+        return 0.5 * sum(abs(p.get(k, 0) - q.get(k, 0)) for k in set(p) | set(q))
+
+    reference = distribution(
+        ideal.run(qc, shots=shots, seed_simulator=1).result().get_counts()
+    )
+    specs = [
+        StrategySpec(optimization_level=3, routing_method="sabre"),
+        StrategySpec(optimization_level=2, layout_method=pipeline.NOISE_AWARE_LAYOUT),
+        StrategySpec(optimization_level=2, pauli_twirling=True, num_twirls=3),
+        StrategySpec(
+            optimization_level=1,
+            dynamical_decoupling=True,
+            measurement_twirling=True,
+            num_twirls=3,
+        ),
+    ]
+    for spec in specs:
+        instances, metrics = pipeline.compile_ensemble(qc, backend, spec)
+        flip_maps = instance_flip_maps(metrics, len(instances))
+        counts = merge_counts(
+            suppression.apply_measurement_untwirl_counts(
+                ideal.run(instance, shots=shots // len(instances), seed_simulator=2)
+                .result()
+                .get_counts(),
+                flip_map,
+            )
+            for instance, flip_map in zip(instances, flip_maps)
+        )
+        assert tvd(reference, distribution(counts)) < 0.06, spec
+    compiled, _ = pipeline.compile_one(qc, backend, StrategySpec())
+    folded = fold_global_for_backend(compiled, backend, 3.0)
+    counts = ideal.run(folded, shots=shots, seed_simulator=3).result().get_counts()
+    assert tvd(reference, distribution(counts)) < 0.06
+
+
+def test_a_pauli_twirl_that_cannot_be_applied_makes_the_strategy_infeasible(
+    monkeypatch,
+):
+    """Regression: a failed twirl compiled on, untwirled but labeled twirled.
+
+    The candidate then reported ``pauli_twirling=True`` -- and could be
+    selected as such -- although no instance was twirled.
+    """
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.errors import QBalanceError
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError("gate cannot be twirled")
+
+    monkeypatch.setattr(pipeline, "apply_pauli_twirling", refuse)
+
+    with pytest.raises(QBalanceError, match="Pauli twirling failed.*cannot be twirled"):
+        pipeline.compile_ensemble(
+            _chain_circuit(3),
+            GenericBackendV2(num_qubits=3, seed=0),
+            StrategySpec(pauli_twirling=True, num_twirls=4),
+        )
+
+
+def test_noise_aware_layout_of_a_circuit_without_qubits_is_empty():
+    """Regression: a zero-qubit circuit crashed the placement (IndexError)."""
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    layout = nal.noise_aware_initial_layout(
+        GenericBackendV2(num_qubits=5, seed=0), QuantumCircuit(0)
+    )
+
+    assert layout is not None
+    assert len(layout.get_virtual_bits()) == 0

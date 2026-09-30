@@ -11,18 +11,22 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, cast
 
+from qbalance.strategies import StrategySpec
+
 
 def load_matrix(path: Path) -> Dict[str, Any]:
-    """Load matrix from serialized data or persisted storage.
+    """Read a matrix results file.
 
     Args:
-        path: Path value consumed by this routine.
+        path: JSON file written by ``run_matrix``.
 
     Returns:
-        Dict[str, Any] with the computed result.
+        The decoded top-level object.  Use :func:`matrix_results` to
+        validate its rows.
 
     Raises:
-        ValueError: If the file cannot be read or is not a JSON object.
+        ValueError: If the file cannot be read, is not JSON, or is not a
+            JSON object.
     """
     source = Path(path)
     try:
@@ -90,7 +94,8 @@ def matrix_results(data: Mapping[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
-_DEFAULT_ZNE_FACTORS = (1.0, 2.0, 3.0)
+# StrategySpec's own default, so default-factor strategies stay unlabelled.
+_DEFAULT_ZNE_FACTORS = tuple(StrategySpec.model_fields["zne_factors"].default)
 
 
 def _format_zne_factors(factors: Any) -> str:
@@ -111,13 +116,11 @@ def strategy_key(spec: Dict[str, Any]) -> str:
     strategies really do describe the same experiment.
 
     Args:
-        spec: Strategy/backend specification controlling compilation behavior.
+        spec: A serialized strategy (``StrategySpec.model_dump()``).
 
     Returns:
-        str with the computed result.
-
-    Raises:
-        None.
+        A comma-separated label such as
+        ``"opt2,route=sabre,twirl4,mthree"``.
     """
     parts = []
     parts.append(f"opt{spec.get('optimization_level')}")
@@ -138,7 +141,13 @@ def strategy_key(spec: Dict[str, Any]) -> str:
     if spec.get("dynamical_decoupling"):
         parts.append(f"dd={spec.get('dd_sequence','XY4')}")
     if spec.get("measurement_twirling"):
-        parts.append("meas_twirl")
+        # num_twirls sets the number of flip patterns too; with Pauli twirling
+        # on, the twirl label above already carries it.
+        num_twirls = spec.get("num_twirls", 1)
+        if not spec.get("pauli_twirling") and num_twirls != 1:
+            parts.append(f"meas_twirl{num_twirls}")
+        else:
+            parts.append("meas_twirl")
     if spec.get("pauli_twirling") or spec.get("measurement_twirling"):
         seed_suppression = spec.get("seed_suppression", 0)
         if seed_suppression != 0:
@@ -179,17 +188,41 @@ def sort_value(value: Any) -> float:
     return number if math.isfinite(number) else float("inf")
 
 
+# Metrics a matrix trial records when one of its stages fails.  A failed
+# execution or mitigation keeps its compile metrics, so without counting these
+# a report row looks exactly like one whose every trial succeeded.
+FAILURE_KEYS = (
+    "compile_error",
+    "cutting_error",
+    "exec_error",
+    "mthree_error",
+    "zne_error",
+)
+
+
+def failed_trials(rows: List[Dict[str, Any]]) -> int:
+    """Return how many of ``rows`` record a failed stage (see ``FAILURE_KEYS``)."""
+    failed = 0
+    for row in rows:
+        metrics = row.get("metrics")
+        if isinstance(metrics, Mapping) and any(metrics.get(k) for k in FAILURE_KEYS):
+            failed += 1
+    return failed
+
+
 def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, float]:
-    """Aggregate used by the qbalance workflow.
+    """Return the mean depth, two-qubit ops, estimated error and compile time.
+
+    These are the means of ``depth``, ``two_qubit_ops``, ``estimated_error``
+    and ``compile_time_s``, each over the rows whose metric is present and
+    finite, and NaN when no row has one; a failed trial therefore does not drag a mean
+    toward zero.
 
     Args:
-        rows: Rows value consumed by this routine.
+        rows: Matrix result rows, each with a ``metrics`` mapping.
 
     Returns:
-        Dict[str, float] with the computed result.
-
-    Raises:
-        None.
+        The four means, keyed by metric name.
     """
     keys = ("depth", "two_qubit_ops", "estimated_error", "compile_time_s")
     sums = {key: 0.0 for key in keys}

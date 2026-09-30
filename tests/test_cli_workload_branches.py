@@ -15,13 +15,14 @@ import numpy as np
 import pytest
 
 from qbalance import cli
+from qbalance.execution import ensemble
 from qbalance.mitigation import zne
 from qbalance.objectives import default_objective
 from qbalance.strategies import Strategy, StrategySpec
 from qbalance.transpile import noise_aware_layout as nal
 from qbalance.transpile import pipeline, suppression
 from qbalance.workflow import workload as wl
-from tests.system_stubs import _I, _PM, _Q, _Circ
+from tests.system_stubs import _I, _PM, _Q, _Circ, as_ensemble
 
 
 def test_remaining_branch_coverage(monkeypatch, tmp_path):
@@ -137,7 +138,9 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
 
     tw, fmap = suppression.apply_measurement_twirling(_CircWithCargs(), seed=1)
     assert isinstance(tw, _CircWithCargs)
-    assert fmap
+    # Without copy_empty_like an X can only be appended after the measurement,
+    # where it cannot flip the recorded bit, so no flip may be recorded.
+    assert fmap == {}
     counts = suppression.apply_measurement_untwirl_counts({"0": 3}, {})
     assert counts == {"0": 3}
     monkeypatch.setattr(np.random, "default_rng", orig_default_rng)
@@ -196,7 +199,7 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
     backends.resolve_backend = lambda b: object()
     monkeypatch.setitem(sys.modules, "qbalance.backends", backends)
     tp = types.ModuleType("qbalance.transpile.pipeline")
-    tp.compile_one = lambda qc, backend, spec, profile=False: (qc, {"depth": 1})
+    tp.compile_ensemble = lambda qc, backend, spec, profile=False: ([qc], {"depth": 1})
     monkeypatch.setitem(sys.modules, "qbalance.transpile.pipeline", tp)
 
     out = tmp_path / "compiled_existing"
@@ -286,6 +289,10 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
     )
 
     class Bnd:
+        def __init__(self, **kwargs):
+
+            _ = kwargs
+
         def observe(self, *a, **k):
 
             return None
@@ -297,29 +304,31 @@ def test_remaining_branch_coverage(monkeypatch, tmp_path):
 
     monkeypatch.setattr(wl, "BanditSearcher", Bnd)
     monkeypatch.setattr(
-        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+        wl,
+        "compile_ensemble",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
     monkeypatch.setattr(
         wl,
-        "find_cuts_best_effort",
+        "prepare_cutting_experiment",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("cut")),
     )
-    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"00": 4, "11": 4})
+    monkeypatch.setattr(ensemble, "run_counts", lambda *a, **k: {"00": 4, "11": 4})
     monkeypatch.setattr(
-        wl, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+        ensemble, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
     )
     monkeypatch.setattr(
-        wl,
-        "apply_mthree_mitigation",
+        ensemble,
+        "mitigate_twirled_counts",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("m3")),
     )
     monkeypatch.setattr(
-        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+        ensemble, "fold_global_for_backend", lambda compiled, backend, f: compiled
     )
     monkeypatch.setattr(
-        wl,
+        ensemble,
         "zne_extrapolate_counts",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("zne")),
     )
@@ -462,3 +471,406 @@ def test_cli_echoes_a_path_containing_brackets_verbatim(tmp_path):
     assert result.exit_code == 0, result.output
     assert out.is_dir()
     assert "run[cache]" in " ".join(result.output.split())
+
+
+def test_compile_overwrite_refuses_to_delete_the_source_dataset(tmp_path):
+    """Regression: ``compile DATA --out DATA --overwrite`` deleted the dataset.
+
+    The circuits were already loaded, so the compile then succeeded -- after
+    removing the directory it had been compiled from.
+    """
+    from qiskit import QuantumCircuit
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.h(0)
+    qc.measure(0, 0)
+    dataset_dir = tmp_path / "project" / "ds"
+    save_dataset(dataset_dir, [qc])
+
+    for out in (dataset_dir, dataset_dir.parent):
+        result = CliRunner().invoke(
+            app,
+            [
+                "compile",
+                str(dataset_dir),
+                "-b",
+                "fake:generic:2",
+                "-o",
+                str(out),
+                "--overwrite",
+            ],
+            env={"COLUMNS": "220"},
+        )
+        assert result.exit_code != 0
+        assert (dataset_dir / "qbalance_dataset.json").is_file()
+
+
+def test_compile_keeps_one_output_per_record_when_stems_collide(tmp_path):
+    """Records "bell.qpy" and "bell.qasm" share a stem but are two circuits."""
+    import json
+
+    from qiskit import QuantumCircuit, qpy
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    dataset_dir = tmp_path / "ds"
+    dataset_dir.mkdir()
+    first = QuantumCircuit(1, 1)
+    first.x(0)
+    first.measure(0, 0)
+    with (dataset_dir / "bell.qpy").open("wb") as handle:
+        qpy.dump(first, handle)
+    (dataset_dir / "bell.qasm").write_text(
+        'OPENQASM 2.0;\ninclude "qelib1.inc";\nqreg q[1];\ncreg c[1];\n'
+        "measure q[0] -> c[0];\n",
+        encoding="utf-8",
+    )
+    (dataset_dir / "qbalance_dataset.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "records": [
+                    {"name": "a", "artifact": "bell.qpy", "format": "qpy"},
+                    {"name": "b", "artifact": "bell.qasm", "format": "qasm"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = tmp_path / "compiled_out"
+    result = CliRunner().invoke(
+        app,
+        ["compile", str(dataset_dir), "-b", "fake:generic:2", "-o", str(out)],
+        env={"COLUMNS": "220"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert sorted(p.name for p in (out / "compiled").iterdir()) == [
+        "bell.qpy",
+        "bell_1.qpy",
+    ]
+    # meta.json says which file holds which record: the names alone cannot.
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    assert meta["artifacts"] == {"a": "compiled/bell.qpy", "b": "compiled/bell_1.qpy"}
+    with (out / meta["artifacts"]["b"]).open("rb") as handle:
+        assert qpy.load(handle)[0].count_ops().get("x", 0) == 0
+
+
+def test_a_failed_compile_keeps_the_previous_output(tmp_path, monkeypatch):
+    """Regression: compile --overwrite deleted --out before compiling.
+
+    A circuit that then failed to compile left a half-written directory where
+    the previous, complete output had been.
+    """
+    from qiskit import QuantumCircuit
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+    from qbalance.dataset import save_dataset
+
+    circuit = QuantumCircuit(1, 1, name="c0")
+    circuit.x(0)
+    circuit.measure(0, 0)
+    dataset_dir = tmp_path / "ds"
+    save_dataset(dataset_dir, [circuit])
+    out = tmp_path / "compiled_out"
+    args = ["compile", str(dataset_dir), "-b", "fake:generic:2", "-o", str(out)]
+
+    first = CliRunner().invoke(app, args, env={"COLUMNS": "220"})
+    assert first.exit_code == 0, first.output
+    before = {
+        str(path.relative_to(out)): path.read_bytes()
+        for path in sorted(out.rglob("*"))
+        if path.is_file()
+    }
+
+    def _cannot_compile(*a, **k):
+        raise RuntimeError("cannot compile")
+
+    monkeypatch.setattr(pipeline, "compile_ensemble", _cannot_compile)
+    second = CliRunner().invoke(app, [*args, "--overwrite"], env={"COLUMNS": "220"})
+
+    assert second.exit_code != 0
+    assert {
+        str(path.relative_to(out)): path.read_bytes()
+        for path in sorted(out.rglob("*"))
+        if path.is_file()
+    } == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["compiled_out", "ds"]
+
+
+def test_compile_checks_the_output_before_loading_the_dataset(tmp_path):
+    """--out is validated before any work, like adjust and dataset."""
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    taken = tmp_path / "taken"
+    taken.write_text("not a directory", encoding="utf-8")
+    result = CliRunner().invoke(
+        app,
+        [
+            "compile",
+            str(tmp_path / "missing"),
+            "-b",
+            "fake:generic:2",
+            "-o",
+            str(taken),
+        ],
+        env={"COLUMNS": "220"},
+    )
+
+    # The output problem is reported, not the missing dataset.
+    assert result.exit_code == 2
+    assert "exists" in result.output
+    assert taken.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_compile_writes_every_twirl_instance(tmp_path):
+    """The compiled QPY holds the whole ensemble, in flip-map order."""
+    import json
+
+    from qiskit import QuantumCircuit, qpy
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(2, 2, name="bell")
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    save_dataset(tmp_path / "ds", [qc])
+
+    out = tmp_path / "compiled"
+    result = CliRunner().invoke(
+        app,
+        [
+            "compile",
+            str(tmp_path / "ds"),
+            "-b",
+            "fake:generic:3",
+            "-o",
+            str(out),
+            "--pauli-twirling",
+            "--num-twirls",
+            "3",
+            "--meas-twirl",
+        ],
+        env={"COLUMNS": "220"},
+    )
+
+    assert result.exit_code == 0, result.output
+    with (out / "compiled" / "bell.qpy").open("rb") as handle:
+        instances = qpy.load(handle)
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    assert len(instances) == 3
+    assert meta["circuits"]["bell"]["twirl_instances"] == 3
+    assert len(meta["circuits"]["bell"]["measurement_flip_maps"]) == 3
+
+
+def test_cli_reports_user_errors_without_a_traceback(tmp_path, monkeypatch, capsys):
+    """Regression: every bad input printed a full traceback.
+
+    A missing dataset, an existing output directory, an unknown backend or an
+    invalid option are expected input errors; burying their one-line message
+    in a traceback made them read like crashes.  Genuine bugs keep theirs.
+    """
+    import sys
+
+    from qbalance import cli
+
+    def invoke(*argv):
+        monkeypatch.setattr(sys, "argv", ["qbalance", *argv])
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+        captured = capsys.readouterr()
+        return exit_info.value.code, types.SimpleNamespace(
+            err=_plain(captured.err), out=_plain(captured.out)
+        )
+
+    code, captured = invoke(
+        "adjust",
+        str(tmp_path / "nowhere"),
+        "-b",
+        "fake:generic:5",
+        "-o",
+        str(tmp_path / "o"),
+    )
+    assert code == 1
+    assert "Error:" in captured.err and "nowhere" in captured.err
+    assert "Traceback" not in captured.err + captured.out
+
+    # The file name arrives whole: the error line is never hard-wrapped.
+    # (Windows quotes the path with doubled backslashes, so match the name.)
+    assert "qbalance_dataset.json" in captured.err
+
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    save_dataset(tmp_path / "ds", _make_tiny()[:1])
+    code, captured = invoke(
+        "adjust",
+        str(tmp_path / "ds"),
+        "-b",
+        "nosuch:backend",
+        "-o",
+        str(tmp_path / "o"),
+    )
+    assert code == 1 and "Unknown backend kind 'nosuch'" in captured.err
+
+    code, captured = invoke("plugins", "list")
+    assert code == 0
+
+    def boom(*args, **kwargs):
+        raise KeyError("internal bug")
+
+    monkeypatch.setattr(cli.Workload, "from_path", boom)
+    monkeypatch.setattr(
+        sys, "argv", ["qbalance", "adjust", str(tmp_path), "-b", "b", "-o", "o"]
+    )
+    with pytest.raises(KeyError, match="internal bug"):
+        cli.main()
+
+
+def _plain(output: str) -> str:
+    """Rich output as plain words: no colors, panel borders or line wrapping.
+
+    CI forces colored output, and the usage-error panel wraps its message,
+    so a phrase can span ANSI codes, borders and a line break.
+    """
+    import re
+
+    text = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    text = re.sub(r"[\u2500-\u257f]", " ", text)
+    return " ".join(text.split())
+
+
+def test_compile_reports_an_uncompilable_circuit_without_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """Regression: Qiskit's TranspilerError escaped compile as a traceback.
+
+    A circuit wider than the device, or an unknown layout or routing method,
+    is bad input -- adjust and matrix record it per candidate -- yet compile
+    crashed with a full traceback.  It is now one line naming the circuit.
+    """
+    import sys
+
+    from qbalance import cli
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    dataset_dir = tmp_path / "ds"
+    save_dataset(dataset_dir, _make_tiny())  # qft4 needs 4 qubits
+
+    def invoke(*extra):
+        argv = ["qbalance", "compile", str(dataset_dir), "-o", str(tmp_path / "o")]
+        monkeypatch.setattr(sys, "argv", [*argv, *extra])
+        with pytest.raises(SystemExit) as exit_info:
+            cli.main()
+        captured = capsys.readouterr()
+        return exit_info.value.code, _plain(captured.err + captured.out)
+
+    code, output = invoke("-b", "fake:generic:2")
+    assert code == 1
+    assert "Traceback" not in output
+    assert (
+        "Error: Circuit 'ghz3' could not be compiled for fake:generic:2: "
+        "Number of qubits greater than device." in output
+    )
+
+    code, output = invoke("-b", "fake:generic:5", "--routing-method", "bogus")
+    assert code == 1
+    assert "Traceback" not in output
+    assert "Invalid plugin name bogus for stage routing" in output
+    assert not (tmp_path / "o").exists()
+
+
+def test_cli_checks_the_output_directory_before_running(tmp_path, monkeypatch):
+    """Regression: adjust found an unusable --out only when saving.
+
+    The whole search ran first, then save() refused the existing directory
+    (or the one holding the dataset) and the results were lost.
+    """
+    from typer.testing import CliRunner
+
+    from qbalance import cli
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    save_dataset(tmp_path / "ds", _make_tiny()[:1])
+    (tmp_path / "taken").mkdir()
+    ran: list = []
+    monkeypatch.setattr(
+        cli.Workload, "from_path", classmethod(lambda cls, d: ran.append(d))
+    )
+
+    for out, extra, message in (
+        (tmp_path / "taken", [], "use --overwrite"),
+        (tmp_path / "ds", ["--overwrite"], "contains the source dataset"),
+        (tmp_path, ["--overwrite"], "contains the source dataset"),
+    ):
+        result = CliRunner().invoke(
+            cli.app,
+            [
+                "adjust",
+                str(tmp_path / "ds"),
+                "-b",
+                "fake:generic:5",
+                "-o",
+                str(out),
+                *extra,
+            ],
+            env={"COLUMNS": "220"},
+        )
+        assert result.exit_code == 2, result.output
+        assert message in _plain(result.output)
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["dataset", "examples", "-o", str(tmp_path / "taken")],
+        env={"COLUMNS": "220"},
+    )
+    assert result.exit_code == 2 and "use --overwrite" in _plain(result.output)
+    assert ran == []  # nothing was computed
+
+
+def test_cli_help_describes_every_command_and_option():
+    """Regression: --help printed boilerplate docstrings.
+
+    The command help was the generated docstring -- "Adjust cmd used by the
+    qbalance workflow", an "Args:" list of ``typer.Option(...)`` reprs and
+    "Returns: Computed value produced by this routine" -- and several options
+    had no help at all.
+    """
+    import typer.main
+    from typer.testing import CliRunner
+
+    from qbalance.cli import app
+
+    runner = CliRunner()
+    # Recent Typer releases no longer build on click's classes, so the
+    # command tree is inspected by attribute rather than by type.
+    commands = typer.main.get_command(app).commands
+    assert set(commands) == {
+        "dataset",
+        "adjust",
+        "matrix",
+        "report",
+        "plugins",
+        "compile",
+    }
+    for name, command in commands.items():
+        output = runner.invoke(app, [name, "--help"], env={"COLUMNS": "200"}).output
+        for boilerplate in ("used by the qbalance workflow", "typer.Option", "Args:"):
+            assert boilerplate not in output, (name, boilerplate)
+        for param in command.params:
+            if getattr(param, "param_type_name", "") == "option":
+                assert param.help, (name, param.name)

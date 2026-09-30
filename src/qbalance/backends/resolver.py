@@ -18,16 +18,9 @@ BackendLike = Any
 
 
 def _load_backend_plugins() -> Dict[str, Callable[[str], BackendLike]]:
-    """Internal helper that load backend plugins.
+    """Return the resolver of every ``qbalance.backends`` entry point by name.
 
-    Args:
-        None.
-
-    Returns:
-        Dict[str, Callable[[str], BackendLike]] with the computed result.
-
-    Raises:
-        None.
+    A plugin that fails to import is logged and skipped.
     """
     eps = entry_points()
     group = eps.select(group="qbalance.backends")
@@ -44,16 +37,25 @@ _PLUGINS: Dict[str, Callable[[str], BackendLike]] | None = None
 
 
 def resolve_backend(spec_or_obj: Union[str, BackendLike]) -> BackendLike:
-    """Resolve a backend/plugin implementation from user-provided configuration.
+    """Return the backend a spec names, or ``spec_or_obj`` itself.
+
+    A string is dispatched on its kind, the part before the first ``:``,
+    to the resolver registered under the ``qbalance.backends`` entry-point
+    group (``fake`` and ``aer`` ship with qbalance).  Anything else is
+    taken to be a backend already and returned unchanged.
 
     Args:
-        spec_or_obj: Backend spec string or already-instantiated backend object.
+        spec_or_obj: A backend spec such as ``"fake:generic:5"``, or a
+            backend object.
 
     Returns:
-        BackendLike with the computed result.
+        The backend.
 
     Raises:
-        QBalanceError: Raised when input validation fails or a dependent operation cannot be completed.
+        QBalanceError: If the spec is empty or its kind has no plugin, or
+            the plugin rejects it.  ``OptionalDependencyError``, a
+            subclass, when the plugin needs a package that is not
+            installed.
     """
     if not isinstance(spec_or_obj, str):
         return spec_or_obj

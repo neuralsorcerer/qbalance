@@ -14,7 +14,7 @@ import pytest
 from qbalance.objectives import default_objective
 from qbalance.strategies import StrategySpec
 from qbalance.workflow import workload as wl
-from tests.system_stubs import _Circ
+from tests.system_stubs import _Circ, as_ensemble
 
 
 def test_no_regression_guard_keeps_baseline_when_candidates_are_worse(
@@ -31,7 +31,7 @@ def test_no_regression_guard_keeps_baseline_when_candidates_are_worse(
     monkeypatch.setattr(
         wl, "resolve_backend", lambda b: types.SimpleNamespace(name=lambda: "bk")
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
 
     def fake_compile(circuit, backend, spec, profile):
@@ -40,7 +40,7 @@ def test_no_regression_guard_keeps_baseline_when_candidates_are_worse(
         depth = 1 if is_baseline else 10
         return qc, {"depth": depth, "two_qubit_ops": 0, "estimated_error": 0.0}
 
-    monkeypatch.setattr(wl, "compile_one", fake_compile)
+    monkeypatch.setattr(wl, "compile_ensemble", as_ensemble(fake_compile))
     balanced = (
         wl.Workload.from_dataset(ds)
         .set_target("b")
@@ -133,3 +133,148 @@ def test_allow_regression_requires_boolean(monkeypatch, tmp_path):
         wl.Workload.from_dataset(ds).set_target("b").adjust(
             strategies=[StrategySpec()], allow_regression=0
         )
+
+
+@pytest.mark.parametrize("weight", [2.0, -2.0])
+def test_regression_guard_ignores_terms_the_baseline_cannot_have(weight):
+    """Execution-only metrics must not decide the guard.
+
+    The baseline is only compiled; a candidate may also have been executed.
+    Scoring each side on its own terms billed ``raw_top_prob`` as a regression
+    (positive weight) or an improvement (negative weight) even for a candidate
+    whose shared metrics are identical to the baseline's.
+    """
+    from qbalance.objectives import Objective
+
+    objective = Objective({"depth": 1.0, "raw_top_prob": weight})
+    baseline_spec = StrategySpec(optimization_level=1, routing_method="sabre")
+    baseline = {"depth": 5}
+    same = {"depth": 5, "raw_top_prob": 0.9, "objective_score": 5.0 + weight * 0.9}
+    worse = {"depth": 6, "raw_top_prob": 0.9, "objective_score": 6.0 + weight * 0.9}
+    chosen_spec = StrategySpec(optimization_level=2)
+
+    kept_spec, kept = wl._guard_against_regression(
+        baseline_spec, baseline, chosen_spec, same, objective
+    )
+    assert kept_spec == chosen_spec and kept is same
+
+    kept_spec, kept = wl._guard_against_regression(
+        baseline_spec, baseline, chosen_spec, worse, objective
+    )
+    assert kept_spec == baseline_spec
+    assert kept["selected_by_regression_guard"] is True
+
+
+def test_regression_guard_keeps_a_candidate_sharing_no_terms_with_the_baseline():
+    from qbalance.objectives import Objective
+
+    objective = Objective({"depth": 1.0, "raw_top_prob": 1.0})
+    chosen = {"raw_top_prob": 0.9, "objective_score": 0.9}
+    chosen_spec = StrategySpec(optimization_level=2)
+
+    kept_spec, kept = wl._guard_against_regression(
+        StrategySpec(optimization_level=1, routing_method="sabre"),
+        {"depth": 0.1},
+        chosen_spec,
+        chosen,
+        objective,
+    )
+
+    assert kept_spec == chosen_spec and kept is chosen
+
+
+def test_regression_guard_prefers_a_lower_ranked_candidate_to_the_baseline():
+    """Regression: the guard only ever tested the top candidate.
+
+    The top candidate can win on a term the baseline cannot have (here the
+    M3-mitigated parity) while regressing on the terms both share; the guard
+    then fell back to the baseline even though a lower-ranked candidate beat
+    it on every shared term.
+    """
+    from qbalance.objectives import Objective
+
+    objective = Objective(
+        {"raw_parity_expval": -100.0, "mitigated_parity_expval": -100.0}
+    )
+    baseline_spec = StrategySpec(optimization_level=1, routing_method="sabre")
+    baseline = {"raw_parity_expval": 0.949}
+    mitigated = StrategySpec(optimization_level=2, mthree=True)
+    better = StrategySpec(optimization_level=2, layout_method="sabre")
+    worse = StrategySpec(optimization_level=0)
+    ranked = [
+        (mitigated, {"raw_parity_expval": 0.942, "mitigated_parity_expval": 0.967}),
+        (worse, {"raw_parity_expval": 0.940}),
+        (better, {"raw_parity_expval": 0.962}),
+    ]
+
+    kept_spec, kept = wl._guard_against_regression(
+        baseline_spec,
+        baseline,
+        *ranked[0],
+        objective,
+        alternatives=ranked[1:],
+    )
+
+    assert kept_spec == better
+    assert kept["raw_parity_expval"] == 0.962
+    assert kept["selected_by_regression_guard"] is True
+    assert kept["rejected_candidate_spec"] == mitigated.model_dump()
+    assert ranked[2][1] == {"raw_parity_expval": 0.962}  # not mutated
+
+    # Only when every candidate regresses does the baseline come back.
+    kept_spec, kept = wl._guard_against_regression(
+        baseline_spec,
+        baseline,
+        *ranked[0],
+        objective,
+        alternatives=ranked[1:2],
+    )
+    assert kept_spec == baseline_spec
+    assert kept["raw_parity_expval"] == 0.949
+
+
+def test_adjust_guard_selects_the_non_regressing_candidate(monkeypatch, tmp_path):
+    from qbalance.objectives import Objective
+
+    qc = _Circ()
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    dsroot = tmp_path / "guard_alt_ds"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"x")
+    ds = wl.CircuitDataset(dsroot, [rec])
+    monkeypatch.setattr(ds, "load_circuits", lambda: [qc])
+    monkeypatch.setattr(
+        wl, "resolve_backend", lambda b: types.SimpleNamespace(name=lambda: "bk")
+    )
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+
+    def fake_compile(circuit, backend, spec, profile):
+        del circuit, backend, profile
+        depth = {1: 5, 2: 4, 3: 6}[spec.optimization_level]
+        metrics = {"depth": depth}
+        if spec.dynamical_decoupling:
+            # A term the baseline never reports, worth a lot to the objective.
+            metrics["bonus"] = 1.0
+        return qc, metrics
+
+    monkeypatch.setattr(wl, "compile_ensemble", as_ensemble(fake_compile))
+    balanced = (
+        wl.Workload.from_dataset(ds)
+        .set_target("b")
+        .adjust(
+            strategies=[
+                StrategySpec(optimization_level=3, dynamical_decoupling=True),
+                StrategySpec(optimization_level=2),
+            ],
+            objective=Objective({"depth": 1.0, "bonus": -10.0}),
+            allow_regression=False,
+        )
+    )
+
+    selected = balanced.selections["c0"]
+    assert selected.spec == StrategySpec(optimization_level=2)
+    assert selected.metrics["selected_by_regression_guard"] is True
+    rows = [row for row in balanced.candidate_rankings()["c0"] if row["selected"]]
+    # The guard-picked candidate is marked on its own row, not duplicated.
+    assert len(rows) == 1 and rows[0]["original_index"] == 1

@@ -67,12 +67,19 @@ def test_strategy_spec_accepts_valid_combination():
         zne=True,
         zne_factors=(1.0, 2.0, 3.0),
         zne_degree=1,
-        cutting=True,
         max_subcircuit_qubits=5,
         resilience_level=2,
     )
     assert spec.zne is True
     assert spec.max_subcircuit_qubits == 5
+
+    cut = StrategySpec(
+        cutting=True,
+        max_subcircuit_qubits=5,
+        dynamical_decoupling=True,
+        optimization_level=3,
+    )
+    assert cut.cutting is True
 
 
 def test_strategy_spec_allows_default_zne_fields_when_disabled():
@@ -122,7 +129,9 @@ def test_strategy_spec_accepts_and_round_trips_every_field():
         "zne": True,
         "zne_factors": (1.0, 3.0, 5.0),
         "zne_degree": 2,
-        "cutting": True,
+        # cutting cannot combine with twirling or mitigation; the cutting
+        # combinations are covered by test_cutting_rejects_unsupported_knobs.
+        "cutting": False,
         "max_subcircuit_qubits": 3,
         "resilience_level": 1,
     }
@@ -130,3 +139,55 @@ def test_strategy_spec_accepts_and_round_trips_every_field():
 
     assert StrategySpec(**spec.model_dump()) == spec
     assert StrategySpec(**json.loads(spec.model_dump_json())) == spec
+
+
+def test_dd_sequence_is_validated_and_normalized():
+    """An unknown sequence used to compile as XY4 while reported as itself."""
+    assert StrategySpec(dd_sequence=" xx ").dd_sequence == "XX"
+    assert StrategySpec(dd_sequence="yy") == StrategySpec(dd_sequence="YY")
+    assert StrategySpec().dd_sequence == "XY4"
+
+    for bad in ("XY8", "", None, 4):
+        with pytest.raises(ValueError, match="dd_sequence must be"):
+            StrategySpec(dd_sequence=bad)
+
+
+@pytest.mark.parametrize(
+    "knob", ["pauli_twirling", "measurement_twirling", "mthree", "zne"]
+)
+def test_cutting_rejects_unsupported_knobs(knob):
+    """A cut circuit yields an expectation value, not one count distribution.
+
+    Twirl flips, M3 and ZNE folding all act on a single count distribution,
+    so combining them with cutting used to be accepted and then silently do
+    nothing.
+    """
+    with pytest.raises(
+        ValueError, match=f"cutting=True cannot be combined with {knob}"
+    ):
+        StrategySpec(cutting=True, max_subcircuit_qubits=4, **{knob: True})
+
+    assert StrategySpec(
+        cutting=True, max_subcircuit_qubits=4, dynamical_decoupling=True
+    )
+
+
+@pytest.mark.parametrize("field", ["seed_transpiler", "seed_suppression"])
+def test_seeds_must_be_non_negative(field):
+    """Negative seeds reach numpy/Qiskit RNGs that reject them mid-compile."""
+    with pytest.raises(ValueError, match=f"{field} must be a non-negative integer"):
+        StrategySpec(**{field: -1})
+
+    assert getattr(StrategySpec(**{field: 0}), field) == 0
+    assert getattr(StrategySpec(**{field: None}), field) is None
+
+
+def test_zne_degree_must_fit_the_realized_fold_factors():
+    """(1, 2, 3) folds at (1, 3, 3): two noise levels cannot fit a quadratic."""
+    with pytest.raises(ValueError, match="distinct fold factors"):
+        StrategySpec(zne=True, zne_factors=(1.0, 2.0, 3.0), zne_degree=2)
+
+    assert StrategySpec(zne=True, zne_factors=(1.0, 3.0, 5.0), zne_degree=2)
+    # The default realizes three distinct levels.
+    assert StrategySpec().zne_factors == (1.0, 3.0, 5.0)
+    assert StrategySpec(zne=True, zne_degree=2).zne_degree == 2

@@ -12,16 +12,9 @@ import numpy as np
 
 
 def _normalized_cumsum(weights: np.ndarray) -> np.ndarray:
-    """Internal helper that normalized cumsum.
+    """Return the cumulative sum of normalized weights, ending at exactly 1.
 
-    Args:
-        weights: Weight configuration used by the objective/scoring routine.
-
-    Returns:
-        np.ndarray with the computed result.
-
-    Raises:
-        None.
+    Pinning the last entry absorbs the round-off of summing the weights.
     """
     cdf = np.cumsum(weights, dtype=float)
     if cdf.size:
@@ -30,17 +23,17 @@ def _normalized_cumsum(weights: np.ndarray) -> np.ndarray:
 
 
 def _as_1d_float_array(x: Iterable[float], *, name: str) -> np.ndarray:
-    """Internal helper that as 1d float array.
+    """Return ``x`` as a one-dimensional float array.
 
     Args:
-        x: Input numeric samples/observations.
-        name: Name/identifier for a circuit, dataset, or lookup record.
+        x: Numeric samples: an array-like or any iterable, generators included.
+        name: What ``x`` is, for the error messages.
 
     Returns:
-        np.ndarray with the computed result.
+        The values as a 1-D ``float`` array.  Finiteness is not checked.
 
     Raises:
-        ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+        ValueError: If a value is not a real number or ``x`` is not 1-D.
     """
     try:
         values = np.asarray(x, dtype=float)
@@ -62,17 +55,21 @@ def _as_1d_float_array(x: Iterable[float], *, name: str) -> np.ndarray:
 def _to_np(
     x: Iterable[float], w: Iterable[float] | None = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Internal helper that to np.
+    """Return validated samples and their weights normalized to sum to 1.
+
+    Negative weights count as 0.  Without weights, or when none is
+    positive, every sample weighs the same.
 
     Args:
-        x: Input numeric samples/observations.
-        w (default: None): Optional sample weights aligned with x.
+        x: Samples.
+        w (default: None): One weight per sample.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray] with the computed result.
+        ``(values, weights)`` as float arrays of equal length.
 
     Raises:
-        ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+        ValueError: If ``x`` is empty, not 1-D, or not finite, or ``w`` is
+            not finite or differs from ``x`` in length.
     """
     values = _as_1d_float_array(x, name="Input samples")
     if values.size == 0:
@@ -90,9 +87,9 @@ def _to_np(
     if not np.all(np.isfinite(weights)):
         raise ValueError("Weights must be finite real numbers.")
 
-    # Clamp negative entries in place to avoid an extra allocation on large
-    # arrays while preserving all positive magnitudes.
-    np.maximum(weights, 0.0, out=weights)
+    # Clamp negative entries into a new array: ``np.asarray`` returns a float
+    # input unchanged, so clamping in place would rewrite the caller's weights.
+    weights = np.maximum(weights, 0.0)
     max_weight = float(np.max(weights))
     if max_weight <= 0.0:
         weights = np.full(values.shape, 1.0 / values.size, dtype=float)
@@ -112,17 +109,21 @@ def _to_np(
 def weighted_cdf(
     x: Iterable[float], w: Iterable[float] | None = None
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Weighted cdf used by the qbalance workflow.
+    """Return the weighted empirical CDF of ``x``.
+
+    Negative weights count as 0; without weights, or when none is positive,
+    every sample weighs the same.
 
     Args:
-        x: Input numeric samples/observations.
-        w (default: None): Optional sample weights aligned with x.
+        x: Samples; non-empty, one-dimensional and finite.
+        w (default: None): One finite weight per sample.
 
     Returns:
-        Tuple[np.ndarray, np.ndarray] with the computed result.
+        ``(support, cdf)``: the sorted distinct sample values, and the CDF at
+        each of them (the last entry is exactly 1).
 
     Raises:
-        None.
+        ValueError: If the samples or weights are invalid.
     """
     values, weights = _to_np(x, w)
     order = np.argsort(values)
@@ -153,18 +154,9 @@ def weighted_cdf(
 
 
 def _cdf_on_grid(grid: np.ndarray, xs: np.ndarray, cdf: np.ndarray) -> np.ndarray:
-    """Internal helper that cdf on grid.
+    """Evaluate the step CDF ``(xs, cdf)`` at every point of ``grid``.
 
-    Args:
-        grid: Grid value consumed by this routine.
-        xs: Xs value consumed by this routine.
-        cdf: Cdf value consumed by this routine.
-
-    Returns:
-        np.ndarray with the computed result.
-
-    Raises:
-        None.
+    The CDF is right-continuous and 0 before its first support point.
     """
     idx = np.searchsorted(xs, grid, side="right") - 1
     out = np.zeros(grid.size, dtype=float)
@@ -179,19 +171,13 @@ def _aligned_cdfs(
     w1: Iterable[float] | None = None,
     w2: Iterable[float] | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Internal helper that aligned cdfs.
+    """Return two weighted empirical CDFs evaluated on a common grid.
 
-    Args:
-        x1: First numeric sample/observation array.
-        x2: Second numeric sample/observation array.
-        w1 (default: None): Optional sample weights for x1.
-        w2 (default: None): Optional sample weights for x2.
-
-    Returns:
-        Tuple[np.ndarray, np.ndarray, np.ndarray] with the computed result.
+    The grid is the union of both supports, on which both CDFs are exact
+    step functions.
 
     Raises:
-        None.
+        ValueError: If either sample or its weights are invalid.
     """
     xs1, c1 = weighted_cdf(x1, w1)
     xs2, c2 = weighted_cdf(x2, w2)
@@ -221,36 +207,45 @@ def ks_1d(
     w1: Iterable[float] | None = None,
     w2: Iterable[float] | None = None,
 ) -> float:
-    """Ks 1d used by the qbalance workflow.
+    """Return the Kolmogorov-Smirnov statistic between two weighted samples.
+
+    That is ``sup_t |F1(t) - F2(t)|`` for the weighted empirical CDFs of
+    :func:`weighted_cdf`.
 
     Args:
-        x1: First numeric sample/observation array.
-        x2: Second numeric sample/observation array.
-        w1 (default: None): Optional sample weights for x1.
-        w2 (default: None): Optional sample weights for x2.
+        x1: First sample.
+        x2: Second sample.
+        w1 (default: None): Weights of ``x1``.
+        w2 (default: None): Weights of ``x2``.
 
     Returns:
-        float with the computed result.
+        The statistic, in ``[0, 1]``.
 
     Raises:
-        None.
+        ValueError: If a sample or its weights are invalid (see
+            :func:`weighted_cdf`).
     """
     _, cdf1, cdf2 = _aligned_cdfs(x1, x2, w1, w2)
     return float(np.max(np.abs(cdf1 - cdf2)))
 
 
 def _integrate_piecewise_constant(values: np.ndarray, grid: np.ndarray) -> float:
-    """Internal helper that integrate piecewise constant.
+    """Integrate the step function taking ``values[i]`` on ``[grid[i], grid[i+1])``.
+
+    Both factors are scaled by their maxima before multiplying, so large
+    finite values and widths cannot overflow on the way to a finite result.
 
     Args:
-        values: Values value consumed by this routine.
-        grid: Grid value consumed by this routine.
+        values: Function value on each grid interval (the last is unused).
+        grid: Non-decreasing interval boundaries, the same length as
+            ``values``.
 
     Returns:
-        float with the computed result.
+        The integral; 0 for fewer than two grid points.
 
     Raises:
-        ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+        ValueError: If the shapes differ, an entry is not finite, the grid
+            decreases, or the integral is not finite.
     """
     if values.shape != grid.shape:
         raise ValueError("values and grid must have the same shape.")
@@ -301,19 +296,24 @@ def cvm_1d(
     w1: Iterable[float] | None = None,
     w2: Iterable[float] | None = None,
 ) -> float:
-    """Cvm 1d used by the qbalance workflow.
+    """Return the Cramér-von Mises distance between two weighted samples.
+
+    That is ``integral (F1(t) - F2(t))**2 dt`` for the weighted empirical
+    CDFs of :func:`weighted_cdf`, integrated over ``t``, so it carries the
+    units of the samples.
 
     Args:
-        x1: First numeric sample/observation array.
-        x2: Second numeric sample/observation array.
-        w1 (default: None): Optional sample weights for x1.
-        w2 (default: None): Optional sample weights for x2.
+        x1: First sample.
+        x2: Second sample.
+        w1 (default: None): Weights of ``x1``.
+        w2 (default: None): Weights of ``x2``.
 
     Returns:
-        float with the computed result.
+        The distance, ``>= 0``.
 
     Raises:
-        None.
+        ValueError: If a sample or its weights are invalid, or the integral
+            is not finite.
     """
     grid, cdf1, cdf2 = _aligned_cdfs(x1, x2, w1, w2)
     return _integrate_piecewise_constant((cdf1 - cdf2) ** 2, grid)
@@ -325,19 +325,23 @@ def emd_1d(
     w1: Iterable[float] | None = None,
     w2: Iterable[float] | None = None,
 ) -> float:
-    """Emd 1d used by the qbalance workflow.
+    """Return the earth mover's (Wasserstein-1) distance between two samples.
+
+    That is ``integral |F1(t) - F2(t)| dt`` for the weighted empirical CDFs
+    of :func:`weighted_cdf`.
 
     Args:
-        x1: First numeric sample/observation array.
-        x2: Second numeric sample/observation array.
-        w1 (default: None): Optional sample weights for x1.
-        w2 (default: None): Optional sample weights for x2.
+        x1: First sample.
+        x2: Second sample.
+        w1 (default: None): Weights of ``x1``.
+        w2 (default: None): Weights of ``x2``.
 
     Returns:
-        float with the computed result.
+        The distance, ``>= 0``, in the units of the samples.
 
     Raises:
-        None.
+        ValueError: If a sample or its weights are invalid, or the integral
+            is not finite.
     """
     grid, cdf1, cdf2 = _aligned_cdfs(x1, x2, w1, w2)
     return _integrate_piecewise_constant(np.abs(cdf1 - cdf2), grid)

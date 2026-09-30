@@ -144,3 +144,44 @@ def test_prepare_run_kwargs_keeps_kwargs_for_opaque_callables(monkeypatch):
     assert out == {"0": 4}
     assert seen["shots"] == 4
     assert seen["seed_simulator"] == 3
+
+
+def test_measurements_inside_control_flow_count_as_measurements():
+    """Regression: only top-level instructions were searched for a measure.
+
+    A dynamic circuit that measures only inside an ``if_else`` or
+    ``for_loop`` body was rejected as measuring nothing, although the
+    backend returns counts for it.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.execution.runner import _measures_nothing
+
+    looped = QuantumCircuit(1, 1)
+    looped.h(0)
+    with looped.for_loop(range(1)):
+        looped.measure(0, 0)
+    branched = QuantumCircuit(2, 2)
+    branched.measure(0, 0)
+    with branched.if_test((branched.clbits[0], 1)):
+        branched.measure(1, 1)
+    unmeasured = QuantumCircuit(1, 1)
+    with unmeasured.for_loop(range(1)):
+        unmeasured.x(0)
+
+    assert not _measures_nothing(looped)
+    assert not _measures_nothing(branched)
+    assert _measures_nothing(unmeasured)
+
+
+def test_run_counts_executes_a_circuit_that_measures_inside_a_loop():
+    aer = pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(1, 1)
+    qc.x(0)
+    with qc.for_loop(range(1)):
+        qc.measure(0, 0)
+
+    counts = runner.run_counts(aer.AerSimulator(), qc, shots=50, seed_simulator=1)
+    assert counts == {"1": 50}

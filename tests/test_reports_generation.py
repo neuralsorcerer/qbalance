@@ -115,6 +115,14 @@ def test_strategy_key_separates_behaviourally_distinct_strategies():
         StrategySpec(
             optimization_level=2, measurement_twirling=True, seed_suppression=5
         ),
+        # num_twirls is the number of flip patterns for measurement twirling.
+        StrategySpec(optimization_level=2, measurement_twirling=True, num_twirls=8),
+        StrategySpec(
+            optimization_level=2,
+            measurement_twirling=True,
+            pauli_twirling=True,
+            num_twirls=8,
+        ),
     ]
 
     keys = [report_common.strategy_key(spec.model_dump()) for spec in specs]
@@ -184,6 +192,16 @@ def test_report_rendering_rejects_malformed_matrix_files(tmp_path):
         report_md.render_markdown(broken, tmp_path / "out")
     with pytest.raises(ValueError, match="Could not read matrix JSON from"):
         report_md.render_markdown(tmp_path / "absent.json", tmp_path / "out")
+    # The matrix is read before the output directory is created, so a bad
+    # one leaves no empty report directory behind.
+    assert not (tmp_path / "out").exists()
+
+
+def test_html_report_leaves_no_directory_for_a_bad_matrix(tmp_path):
+    pytest.importorskip("jinja2")
+    with pytest.raises(ValueError, match="Could not read matrix JSON from"):
+        report_html.render_html(tmp_path / "absent.json", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
 
 
 def test_report_rendering_accepts_rows_without_metrics(tmp_path):
@@ -220,7 +238,7 @@ def test_strategy_key_labels_zne_factors_only_when_they_differ():
 
     custom = report_common.strategy_key(
         StrategySpec(
-            optimization_level=1, zne=True, zne_factors=(1.0, 3.0, 5.0)
+            optimization_level=1, zne=True, zne_factors=(1.0, 2.0, 3.0)
         ).model_dump()
     )
     assert custom.startswith("opt1,zne,zf=")
@@ -318,4 +336,55 @@ def test_markdown_report_keeps_a_pipe_inside_one_cell(tmp_path):
         " 1 ",
         " 0.01 ",
         " 0.1 ",
+        " 0/1 ",
     ]
+
+
+def test_reports_count_failed_trials(tmp_path):
+    """Regression: a failed trial looked exactly like a successful one.
+
+    A failed execution or mitigation keeps its compile metrics, so the report
+    showed normal means for strategies whose runs had all failed, and a failed
+    cut showed only ``nan`` with no hint why.
+    """
+    metrics = {"depth": 3, "two_qubit_ops": 1, "estimated_error": 0.01}
+    results = [
+        {"backend": "bk", "strategy": {"optimization_level": 1}, "metrics": m}
+        for m in (
+            dict(metrics),
+            dict(metrics, exec_error="backend offline"),
+            dict(metrics, zne_error="cannot fold"),
+            dict(metrics, mthree_error=""),  # an empty message is not a failure
+        )
+    ]
+    results.append(
+        {
+            "backend": "bk",
+            "strategy": {
+                "optimization_level": 1,
+                "cutting": True,
+                "max_subcircuit_qubits": 2,
+            },
+            "metrics": {"cutting_error": "mid-circuit measurement"},
+        }
+    )
+    path = tmp_path / "matrix.json"
+    path.write_text(json.dumps({"results": results}), encoding="utf-8")
+
+    assert report_common.failed_trials(results[:4]) == 2
+    rows = [
+        line
+        for line in report_md.render_markdown(path, tmp_path / "md")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.startswith("| `")
+    ]
+    failed = {row.split("|")[1].strip(): row.split("|")[-2].strip() for row in rows}
+    assert failed == {"`opt1`": "2/4", "`opt1,cut2`": "1/1"}
+
+    pytest.importorskip("jinja2")
+    rendered = report_html.render_html(path, tmp_path / "html").read_text(
+        encoding="utf-8"
+    )
+    assert "<th>failed trials</th>" in rendered
+    assert "<td>2/4</td>" in rendered and "<td>1/1</td>" in rendered

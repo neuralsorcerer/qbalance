@@ -12,17 +12,10 @@ from typing import Any, List, Tuple
 
 
 def _metric_value(metrics: Mapping[str, object] | None, key: str) -> float:
-    """Internal helper that metric value.
+    """Return ``metrics[key]`` as a float, or ``inf`` when it is unusable.
 
-    Args:
-        metrics: Mapping of metric names to numeric values used for scoring.
-        key: Stable key used to identify a cache artifact.
-
-    Returns:
-        float with the computed result.
-
-    Raises:
-        None.
+    A missing, non-numeric or non-finite value, and a ``None`` mapping,
+    count as ``inf``: the worst possible value when minimizing.
     """
     if metrics is None:
         return float("inf")
@@ -37,17 +30,20 @@ def _metric_value(metrics: Mapping[str, object] | None, key: str) -> float:
 def pareto_front(
     items: Sequence[Tuple[object, Mapping[str, object] | None]], keys: Sequence[str]
 ) -> List[int]:
-    """Pareto front used by the qbalance workflow.
+    """Return the indices of the non-dominated items, in input order.
+
+    Every key is minimized.  Item ``a`` dominates item ``b`` when ``a`` is
+    no worse on every key and strictly better on at least one.  A missing,
+    non-numeric or non-finite value (or a ``None`` metrics mapping) counts
+    as ``inf``.  Items with identical metric vectors are kept or dropped
+    together, and with no keys every item is on the front.
 
     Args:
-        items: Items value consumed by this routine.
-        keys: Keys value consumed by this routine.
+        items: ``(label, metrics)`` pairs; only the metrics are read.
+        keys: Metric names to minimize.
 
     Returns:
-        List[int] with the computed result.
-
-    Raises:
-        None.
+        The indices of the Pareto front.
     """
     n = len(items)
     if n == 0:

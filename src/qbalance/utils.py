@@ -9,13 +9,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
+from contextlib import contextmanager, suppress
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, cast
+from typing import Any, Dict, Iterator, Optional, cast
 
+import numpy as np
 from platformdirs import user_cache_dir
 
 # Concurrent replacements of the same destination can deny one another access
@@ -90,32 +93,36 @@ def validate_integral(
     return value_int
 
 
-def stable_hash_bytes(data: bytes) -> str:
-    """Stable hash bytes used by the qbalance workflow.
+def validate_flag(name: str, value: Any) -> bool:
+    """Validate a boolean option and return it as a builtin ``bool``.
+
+    Truthiness is not enough: ``execute="no"`` would otherwise run every
+    circuit.  NumPy booleans are accepted.
 
     Args:
-        data: Data value consumed by this routine.
+        name: User-facing option name used in error messages.
+        value: Candidate value to validate.
 
     Returns:
-        str with the computed result.
+        The value as a builtin ``bool``.
 
     Raises:
-        None.
+        ValueError: If the value is not a boolean.
     """
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{name} must be a boolean")
+    return bool(value)
+
+
+def stable_hash_bytes(data: bytes) -> str:
+    """Return the SHA-256 hex digest of ``data``."""
     return hashlib.sha256(data).hexdigest()
 
 
 def stable_hash_str(s: str) -> str:
-    """Stable hash str used by the qbalance workflow.
+    """Return the SHA-256 hex digest of ``s`` encoded as UTF-8.
 
-    Args:
-        s: S value consumed by this routine.
-
-    Returns:
-        str with the computed result.
-
-    Raises:
-        None.
+    Unlike ``hash(s)``, it is the same in every process.
     """
     return stable_hash_bytes(s.encode("utf-8"))
 
@@ -163,17 +170,63 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
             raise
 
 
-def dump_json(path: Path, obj: Dict[str, Any]) -> None:
-    """Dump json used by the qbalance workflow.
+@contextmanager
+def replacing_directory(target: Path) -> Iterator[Path]:
+    """Yield an empty staging directory that replaces ``target`` on success.
+
+    The staging directory is a sibling of ``target``, so the final rename
+    stays on one filesystem.  When the ``with`` block raises, ``target`` is
+    left exactly as it was and the staging directory is removed.  Otherwise
+    whatever is at ``target`` is moved aside, the staging directory renamed
+    into its place, and the old entry deleted; should that rename fail, the
+    old entry is put back.  Callers decide beforehand whether ``target`` may
+    be replaced at all.
 
     Args:
-        path: Path value consumed by this routine.
-        obj: Obj value consumed by this routine.
+        target: Directory to create or replace.
 
-    Returns:
-        None. This method updates state or performs side effects only.
+    Yields:
+        The staging directory to write the new contents into.
 
     Raises:
+        OSError: If the staging directory cannot be created or swapped in.
+    """
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    committed = False
+    try:
+        yield staging
+        backup = Path(f"{staging}.backup")
+        backed_up = False
+        try:
+            if os.path.lexists(target):
+                os.replace(target, backup)
+                backed_up = True
+            os.replace(staging, target)
+            committed = True
+        except BaseException:
+            if backed_up and not os.path.lexists(target):
+                os.replace(backup, target)
+            raise
+        # The new contents are in place: failing to delete the old ones must
+        # not report the completed replacement as a failure.
+        if backed_up:
+            if backup.is_dir() and not backup.is_symlink():
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                with suppress(OSError):
+                    backup.unlink()
+    finally:
+        if not committed:
+            shutil.rmtree(staging, ignore_errors=True)
+
+
+def dump_json(path: Path, obj: Dict[str, Any]) -> None:
+    """Write ``obj`` to ``path`` as indented JSON with sorted keys, atomically.
+
+    Raises:
+        TypeError: If ``obj`` is not JSON-serializable.
         OSError: If the file cannot be written.
     """
     payload = json.dumps(obj, indent=2, sort_keys=True)
@@ -181,16 +234,11 @@ def dump_json(path: Path, obj: Dict[str, Any]) -> None:
 
 
 def load_json(path: Path) -> Dict[str, Any]:
-    """Load json from serialized data or persisted storage.
-
-    Args:
-        path: Path value consumed by this routine.
-
-    Returns:
-        Dict[str, Any] with the computed result.
+    """Read and decode the JSON file at ``path``.
 
     Raises:
-        None.
+        OSError: If the file cannot be read.
+        ValueError: If it is not valid JSON (``json.JSONDecodeError``).
     """
     data = json.loads(path.read_text(encoding="utf-8"))
     return cast(Dict[str, Any], data)
@@ -206,7 +254,7 @@ def instruction_parts(entry: Any) -> tuple[Any, tuple[Any, ...], tuple[Any, ...]
         Tuple containing the operation object, qubit tuple, and clbit tuple.
 
     Raises:
-        ValueError: Raised when the entry cannot be interpreted as a circuit instruction.
+        ValueError: If the entry cannot be interpreted as a circuit instruction.
     """
     if hasattr(entry, "operation"):
         return entry.operation, tuple(entry.qubits), tuple(entry.clbits)
@@ -242,6 +290,63 @@ def shares_bit(bits: Any, other: Any) -> bool:
             if bit is candidate or bit == candidate:
                 return True
     return False
+
+
+# Instructions that neither change the quantum state nor read a classical bit.
+SCHEDULING_DIRECTIVES = frozenset({"barrier", "delay"})
+
+
+def is_terminal_measurement(
+    data: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]], index: int
+) -> bool:
+    """Return True when nothing after ``data[index]`` can observe that measurement.
+
+    A measurement is terminal only if no later instruction acts on the measured
+    qubit or touches the classical bit it wrote; scheduling directives are
+    transparent.
+
+    Args:
+        data: Instruction parts ``(operation, qubits, clbits)`` in circuit order.
+        index: Position of the measurement in ``data``.
+
+    Returns:
+        True when the measurement is terminal.
+
+    Raises:
+        None.
+    """
+    _, qargs, cargs = data[index]
+    for later_inst, later_qargs, later_cargs in data[index + 1 :]:
+        if getattr(later_inst, "name", "") in SCHEDULING_DIRECTIVES:
+            continue
+        if shares_bit(qargs, later_qargs) or shares_bit(cargs, later_cargs):
+            return False
+    return True
+
+
+def _counts_as_operation(instruction: Any) -> bool:
+    """Whether ``instruction`` adds to depth and size (it is not a directive)."""
+    operation = getattr(instruction, "operation", None)
+    if getattr(operation, "_directive", False):
+        return False
+    return getattr(operation, "name", "") not in SCHEDULING_DIRECTIVES
+
+
+def operation_depth(circuit: Any) -> int:
+    """Return the depth of ``circuit`` counting operations, not directives.
+
+    Qiskit's default depth already skips barriers but counts ``delay``.  A
+    scheduled circuit (dynamical decoupling pads every idle window with
+    delays) would then be several layers deeper than the same circuit left
+    unscheduled, although it runs for exactly as long.  Directives still
+    synchronize the wires they touch, as Qiskit's own barrier handling does.
+    """
+    return int(circuit.depth(filter_function=_counts_as_operation))
+
+
+def operation_size(circuit: Any) -> int:
+    """Return the number of operations in ``circuit``, excluding directives."""
+    return int(circuit.size(filter_function=_counts_as_operation))
 
 
 def bit_index(circuit: Any, bit: Any) -> int:
@@ -284,17 +389,69 @@ def bit_index(circuit: Any, bit: Any) -> int:
     raise AttributeError("Unable to determine bit index")
 
 
-def default_cache_dir(app: str = "qbalance") -> Path:
-    """Return the default cache dir configuration used by qbalance.
+def measured_qubits_by_clbit(circuit: Any) -> list[int]:
+    """Return the qubit measured into each clbit, ordered by clbit index.
+
+    Measurement mitigation needs the qubit that feeds every classical bit of
+    the observed bitstrings.  Compiled circuits are usually wider than the
+    number of measured bits, so ``range(num_qubits)`` mismatches the counts
+    keys on any backend wider than the logical circuit.  Falls back to
+    ``range(num_qubits)`` when no per-clbit mapping can be recovered.
 
     Args:
-        app (default: 'qbalance'): App value consumed by this routine.
+        circuit: Compiled circuit whose measurements to inspect.
 
     Returns:
-        Path with the computed result.
+        Physical qubit index per measured classical bit.
 
     Raises:
         None.
+    """
+    mapping = _measurement_map(circuit)
+    if not mapping:
+        return list(range(int(getattr(circuit, "num_qubits", 0) or 0)))
+    return [qubit for _, qubit in sorted(mapping.items())]
+
+
+def measured_clbits(circuit: Any) -> Optional[list[int]]:
+    """Return the classical bits measurements write, in increasing order.
+
+    The ``i``-th entry is the classical bit :func:`measured_qubits_by_clbit`'s
+    ``i``-th qubit feeds.  A circuit can carry classical bits no measurement
+    writes (``QuantumCircuit(3, 3)`` measuring two qubits); those stay ``0``
+    in every count key, and measurement mitigation has to skip them.
+
+    Returns:
+        The measured classical bit indices, or ``None`` when no per-bit
+        mapping can be recovered (matching the fallback of
+        :func:`measured_qubits_by_clbit`).
+    """
+    mapping = _measurement_map(circuit)
+    return sorted(mapping) if mapping else None
+
+
+def _measurement_map(circuit: Any) -> Dict[int, int]:
+    """Map each measured classical bit to the qubit last measured into it."""
+    mapping: Dict[int, int] = {}
+    try:
+        for entry in list(getattr(circuit, "data", None) or []):
+            inst, qargs, cargs = instruction_parts(entry)
+            if getattr(inst, "name", "") != "measure":
+                continue
+            if len(qargs) != 1 or len(cargs) != 1:
+                continue
+            mapping[bit_index(circuit, cargs[0])] = bit_index(circuit, qargs[0])
+    except Exception:
+        return {}
+    return mapping
+
+
+def default_cache_dir(app: str = "qbalance") -> Path:
+    """Return the platform's user cache directory for ``app``.
+
+    The path always ends in ``app``: platforms whose cache directory ends
+    in another component (``.../app/Cache`` on Windows) get ``app``
+    appended.  Nothing is created on disk.
     """
     cache_path = Path(user_cache_dir(app))
     if cache_path.name != app:

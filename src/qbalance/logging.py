@@ -49,16 +49,13 @@ def _configure_package_logger() -> None:
 
 
 def get_logger(name: str = LOGGER_NAME) -> logging.Logger:
-    """Return logger for the provided inputs.
+    """Return the logger ``name``, installing qbalance's default handler first.
+
+    See :func:`_configure_package_logger` for when a handler is installed.
 
     Args:
-        name (default: LOGGER_NAME): Name/identifier for a circuit, dataset, or lookup record.
-
-    Returns:
-        logging.Logger with the computed result.
-
-    Raises:
-        None.
+        name (default: LOGGER_NAME): Logger name; module loggers pass
+            ``__name__``, which falls under the ``qbalance`` package logger.
     """
     _configure_package_logger()
     return logging.getLogger(name)

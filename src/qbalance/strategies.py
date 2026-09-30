@@ -13,6 +13,9 @@ from typing import Any, Dict, Iterable, Mapping, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Dynamical-decoupling sequences qbalance knows how to build.
+_DD_SEQUENCES = frozenset({"XY4", "XX", "YY"})
+
 
 class StrategySpec(BaseModel):
     """A strategy = compilation knobs + suppression + mitigation knobs."""
@@ -28,14 +31,16 @@ class StrategySpec(BaseModel):
     pauli_twirling: bool = False
     num_twirls: int = 1
     dynamical_decoupling: bool = False
-    dd_sequence: str = "XY4"  # "XY4" | "XX" etc.
+    dd_sequence: str = "XY4"  # "XY4" | "XX" | "YY"
     measurement_twirling: bool = False
     seed_suppression: Optional[int] = 0
 
     # Mitigation knobs
     mthree: bool = False
     zne: bool = False
-    zne_factors: tuple[float, ...] = (1.0, 2.0, 3.0)
+    # Global folding realizes odd factors only, so the default asks for three
+    # distinct noise levels; (1, 2, 3) would run at (1, 3, 3).
+    zne_factors: tuple[float, ...] = (1.0, 3.0, 5.0)
     zne_degree: int = 1
 
     # Circuit cutting knobs (optional)
@@ -61,6 +66,22 @@ class StrategySpec(BaseModel):
             raise ValueError(f"{info.field_name} must be an integer, not a boolean")
         return value
 
+    @field_validator("dd_sequence", mode="before")
+    @classmethod
+    def _normalize_dd_sequence(cls, value: Any) -> Any:
+        # An unknown name used to fall back to XY4 silently, so "XY8" ran --
+        # and was reported as a distinct strategy -- while compiling exactly
+        # like XY4.  Reject it instead, and normalize case so "xx" and "XX"
+        # are one strategy.
+        if not isinstance(value, str):
+            raise ValueError("dd_sequence must be a string")
+        normalized = value.strip().upper()
+        if normalized not in _DD_SEQUENCES:
+            raise ValueError(
+                f"dd_sequence must be one of {', '.join(sorted(_DD_SEQUENCES))}"
+            )
+        return normalized
+
     @model_validator(mode="after")
     def _validate_cross_fields(self) -> "StrategySpec":
         if isinstance(self.optimization_level, bool):
@@ -69,6 +90,12 @@ class StrategySpec(BaseModel):
             raise ValueError("seed_transpiler must be an integer or None")
         if isinstance(self.seed_suppression, bool):
             raise ValueError("seed_suppression must be an integer or None")
+        # Both seeds reach numpy/Qiskit RNGs that reject negative values, which
+        # otherwise surfaces as an opaque error deep inside compilation.
+        for seed_field in ("seed_transpiler", "seed_suppression"):
+            seed_value = getattr(self, seed_field)
+            if seed_value is not None and seed_value < 0:
+                raise ValueError(f"{seed_field} must be a non-negative integer or None")
 
         if isinstance(self.num_twirls, bool) or self.num_twirls < 1:
             raise ValueError("num_twirls must be an integer >= 1")
@@ -93,6 +120,15 @@ class StrategySpec(BaseModel):
                 raise ValueError(
                     "zne_degree must be less than len(zne_factors) when zne=True"
                 )
+            from qbalance.mitigation.zne import realized_fold_factor
+
+            realized = {realized_fold_factor(f) for f in self.zne_factors}
+            if self.zne_degree >= len(realized):
+                raise ValueError(
+                    "zne_degree must be less than the number of distinct fold "
+                    f"factors zne_factors realize ({sorted(realized)}): folding "
+                    "rounds each factor up to an odd integer"
+                )
 
         if self.max_subcircuit_qubits is not None and (
             isinstance(self.max_subcircuit_qubits, bool)
@@ -101,6 +137,19 @@ class StrategySpec(BaseModel):
             raise ValueError("max_subcircuit_qubits must be an integer >= 1")
         if self.cutting and self.max_subcircuit_qubits is None:
             raise ValueError("max_subcircuit_qubits must be set when cutting=True")
+        if self.cutting:
+            # A cut circuit runs as sampled subexperiments whose results are
+            # recombined into an expectation value; there is no single count
+            # distribution for twirl flips, M3 or ZNE folding to act on.
+            unsupported = [
+                name
+                for name in ("pauli_twirling", "measurement_twirling", "mthree", "zne")
+                if getattr(self, name)
+            ]
+            if unsupported:
+                raise ValueError(
+                    "cutting=True cannot be combined with " + ", ".join(unsupported)
+                )
 
         if isinstance(self.resilience_level, bool):
             raise ValueError("resilience_level must be one of 0, 1, 2")
@@ -183,8 +232,30 @@ def _strategy_items_from_payload(payload: Any) -> Iterable[Any]:
 
 def coerce_strategy_specs(
     strategies: Iterable[StrategySpec | Mapping[str, Any]],
+    *,
+    deduplicate: bool = True,
 ) -> list[StrategySpec]:
-    """Validate, normalize, and de-duplicate an explicit strategy iterable."""
+    """Validate and normalize an explicit strategy iterable.
+
+    Args:
+        strategies: ``StrategySpec`` objects or mappings of their fields.
+        deduplicate (default: True): Drop repeats, keeping the first of each.
+
+    Returns:
+        The strategies as ``StrategySpec`` objects, in their given order.
+
+    Raises:
+        ValueError: If ``strategies`` is a single strategy or string rather
+            than an iterable of them, is empty, or holds an entry that is
+            neither a ``StrategySpec`` nor a mapping of valid fields.
+    """
+    if isinstance(strategies, (StrategySpec, Mapping)):
+        # Both are iterable -- over field pairs or keys -- which would
+        # otherwise surface as a baffling complaint about "entry 0".
+        raise ValueError(
+            "strategies must be an iterable of strategies, not a single "
+            "strategy; wrap it in a list"
+        )
     if isinstance(strategies, (str, bytes)) or not isinstance(strategies, Iterable):
         raise ValueError(
             "strategies must be an iterable of StrategySpec or mapping objects"
@@ -205,7 +276,7 @@ def coerce_strategy_specs(
         else:
             raise ValueError(f"Strategy entry {idx} must be a StrategySpec or mapping")
 
-        if normalized not in seen:
+        if not deduplicate or normalized not in seen:
             specs.append(normalized)
             seen.add(normalized)
 
@@ -218,6 +289,8 @@ def coerce_strategy_specs(
 
 @dataclass
 class Strategy:
+    """A strategy together with the metrics one evaluation of it produced."""
+
     spec: StrategySpec
     # Arbitrary metadata produced by execution/compile/analysis
     metrics: Dict[str, Any] = field(default_factory=dict)

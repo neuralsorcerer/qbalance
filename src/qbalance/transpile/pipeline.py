@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import time
 from importlib import import_module
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
-from qbalance.errors import OptionalDependencyError
+from qbalance.errors import OptionalDependencyError, QBalanceError
 from qbalance.logging import get_logger
+from qbalance.mitigation.zne import zne_sampling_overhead
 from qbalance.strategies import StrategySpec
 from qbalance.transpile.noise_aware_layout import (
     estimate_circuit_error,
@@ -22,12 +23,20 @@ from qbalance.transpile.suppression import (
     apply_measurement_twirling,
     apply_pauli_twirling,
     build_dd_pass_manager,
+    dd_sequence_label,
+    resolve_dd_sequence,
 )
-from qbalance.utils import backend_display_name, instruction_parts
+from qbalance.utils import (
+    SCHEDULING_DIRECTIVES,
+    backend_display_name,
+    instruction_parts,
+    operation_depth,
+    operation_size,
+)
 
 log = get_logger(__name__)
 
-_DIRECTIVE_NAMES = {"barrier", "delay"}
+_DIRECTIVE_NAMES = SCHEDULING_DIRECTIVES
 
 # qbalance-specific layout name.  Qiskit does not know this method; it is
 # realized by handing the computed layout to the preset pass manager as an
@@ -120,15 +129,20 @@ def _generate_stage_pm(backend: Any, spec: StrategySpec, initial_layout: Any = N
     is used only when :func:`_supports_preset_pass_manager` rejects the backend.
 
     Args:
-        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
-        spec: Strategy/backend specification controlling compilation behavior.
-        initial_layout (default: None): Layout applied before translation, when available.
+        backend: Backend to translate for; its basis gates are the
+            operations of its ``target``, or else the ``basis_gates`` of
+            its ``configuration()``.
+        spec: Strategy; only ``translation_method`` applies (default
+            ``"translator"``).
+        initial_layout (default: None): Layout applied before translation,
+            when the backend has a ``target``.
 
     Returns:
-        Computed value produced by this routine.
+        A pass manager that applies the layout (when given), unrolls gates on
+        three or more qubits, and translates to the backend's basis.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit's stage generators are unavailable.
     """
     try:
         from qiskit.transpiler import PassManager
@@ -180,7 +194,7 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
     test stubs) fall back to the translation-only stage pipeline.
 
     Args:
-        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
+        backend: Backend to compile for.
         spec: Strategy/backend specification controlling compilation behavior.
         initial_layout (default: None): Explicit initial layout, used for the
             ``qbalance_noise_aware`` layout method.
@@ -189,7 +203,7 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
         Pass manager that compiles a circuit for ``backend`` under ``spec``.
 
     Raises:
-        OptionalDependencyError: Raised when qiskit pass-manager builders are unavailable.
+        OptionalDependencyError: If qiskit's pass-manager builders are unavailable.
         TranspilerError: Raised when the strategy names an unknown layout,
             routing, or translation method.
     """
@@ -221,122 +235,238 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
     return _generate_stage_pm(backend, spec, initial_layout=initial_layout)
 
 
-def compile_one(
+def _restore_layout(result: Any, source: Any) -> Any:
+    """Carry ``source``'s TranspileLayout over to ``result`` when it was dropped.
+
+    A separate ``PassManager.run`` (dynamical decoupling, re-translation) starts
+    from an empty property set, so its output carries no TranspileLayout even
+    though it keeps the qubits the compile placed.  Without this every such
+    strategy loses the virtual-to-physical mapping callers need for observables.
+    """
+    if getattr(result, "_layout", None) is None:
+        layout = getattr(source, "_layout", None)
+        if layout is not None:
+            result._layout = layout
+    return result
+
+
+def _instance_seed(seed: Any, index: int) -> Any:
+    """Return the suppression seed for ensemble instance ``index``.
+
+    Instance 0 keeps the strategy's own seed; later instances get distinct,
+    reproducible seeds so each draws its own random flip pattern.
+    """
+    return None if seed is None else int(seed) + index
+
+
+def _circuit_metrics(backend: Any, circuit: Any) -> Dict[str, Any]:
+    """Structural and estimated-error metrics of one compiled circuit."""
+    metrics: Dict[str, Any] = {
+        # Idle delays (dynamical decoupling pads every idle window with them)
+        # are schedule, not operations: counting them would make a scheduled
+        # circuit look deeper than the identical unscheduled one.
+        "depth": operation_depth(circuit),
+        "size": operation_size(circuit),
+        "width": int(circuit.num_qubits),
+        "two_qubit_ops": int(_count_two_qubit_ops(circuit)),
+    }
+    try:
+        metrics["estimated_error"] = float(estimate_circuit_error(backend, circuit))
+    except Exception:
+        metrics["estimated_error"] = None
+    return metrics
+
+
+def _twirl_instance_count(spec: StrategySpec) -> int:
+    """Number of randomized instances a strategy compiles into."""
+    if spec.pauli_twirling or spec.measurement_twirling:
+        return max(1, int(spec.num_twirls))
+    return 1
+
+
+def compile_ensemble(
     circuit: Any,
     backend: Any,
     spec: StrategySpec,
     profile: bool = False,
-) -> Tuple[Any, Dict[str, Any]]:
-    """Compile one used by the qbalance workflow.
+) -> Tuple[List[Any], Dict[str, Any]]:
+    """Compile ``circuit`` once and expand it into its twirled instances.
+
+    The circuit is transpiled a single time.  Pauli twirling is then applied
+    to the compiled, target-native circuit -- as Qiskit recommends for
+    :func:`~qiskit.circuit.pauli_twirl_2q_gates`, whose ``target`` keeps the
+    inserted Paulis native.  Twirling *before* transpilation, as earlier
+    releases did, lets optimization re-synthesize the twirled two-qubit blocks
+    and erase the twirl.  Measurement twirling and then dynamical decoupling
+    are applied to every instance, each instance drawing its own flip pattern;
+    DD comes last because it schedules the circuit it pads.
+
+    A twirl only suppresses noise on average over its random instances, so all
+    of them are returned; executing a single one gains nothing.  Without
+    twirling the ensemble has one instance.
 
     Args:
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
-        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
-        spec: Strategy/backend specification controlling compilation behavior.
-        profile (default: False): Whether pass-level transpiler profiling is enabled.
+        circuit: QuantumCircuit to compile.
+        backend: Backend (or backend-like handle) to compile for.
+        spec: Strategy controlling compilation and suppression.
+        profile (default: False): Record pass-level transpiler profiling.
 
     Returns:
-        Tuple[Any, Dict[str, Any]] with the computed result.
+        ``(instances, metrics)``.  ``metrics`` describes the whole ensemble:
+        structural metrics and ``estimated_error`` are the maxima over the
+        instances, ``measurement_flip_maps`` holds one flip map per instance
+        (``measurement_flip_map`` repeats the first), and ``twirl_instances``
+        is the ensemble size.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If qiskit is unavailable.
     """
     try:
         import_module("qiskit.converters")
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit required") from e
 
-    # Suppression before compile (twirling can be done pre or post; we keep pre-compile)
-    twirled_ensemble = [circuit]
-    if spec.pauli_twirling:
-        twirled_ensemble = apply_pauli_twirling(
-            circuit,
-            num_twirls=max(1, spec.num_twirls),
-            seed=spec.seed_suppression,
-            target=getattr(backend, "target", None),
-        )
-
     profile_report = ProfileReport()
+    initial_layout = None
+    if spec.layout_method == NOISE_AWARE_LAYOUT:
+        try:
+            initial_layout = noise_aware_initial_layout(backend, circuit)
+        except Exception as e:
+            log.warning(
+                "Noise-aware layout failed (continuing with the default layout): %s",
+                e,
+            )
+    pm = _generate_pm(backend, spec, initial_layout=initial_layout)
 
-    # choose best in ensemble by objective proxy (depth + estimated error)
-    best_score = float("inf")
-    best = None
-    best_metrics = None
+    cb = make_callback(profile_report) if profile else None
+    t0 = time.time()
+    compiled = pm.run(circuit, callback=cb) if cb is not None else pm.run(circuit)
+    t1 = time.time()
 
-    # Only the noise-aware layout varies per twirled circuit; every other
-    # strategy yields the same pass manager, and building one for a large
-    # backend is not free, so build it once for the whole ensemble.
-    uses_noise_aware_layout = spec.layout_method == NOISE_AWARE_LAYOUT
-    shared_pm = None if uses_noise_aware_layout else _generate_pm(backend, spec)
+    target = getattr(backend, "target", None)
+    count = _twirl_instance_count(spec)
+    instances: List[Any] = [compiled]
+    if spec.pauli_twirling:
+        try:
+            twirled = apply_pauli_twirling(
+                compiled,
+                num_twirls=count,
+                seed=spec.seed_suppression,
+                target=target,
+            )
+            if target is None:
+                # Without a Target the inserted Paulis are not synthesized to
+                # the backend basis; re-translate so every instance still runs.
+                retranslate = _generate_stage_pm(backend, spec)
+                twirled = [retranslate.run(instance) for instance in twirled]
+            instances = [_restore_layout(instance, compiled) for instance in twirled]
+        except Exception as e:
+            # Continuing untwirled would report -- and let selection pick -- a
+            # pauli_twirling strategy that twirled nothing.  Like any other
+            # strategy the backend cannot compile, it is infeasible instead.
+            raise QBalanceError(f"Pauli twirling failed for this backend: {e}") from e
+    if spec.measurement_twirling and len(instances) < count:
+        # Measurement twirling alone still needs one instance per flip pattern.
+        instances = instances + [compiled] * (count - len(instances))
 
-    for tw in twirled_ensemble:
-        if uses_noise_aware_layout:
-            initial_layout = None
-            try:
-                initial_layout = noise_aware_initial_layout(backend, tw)
-            except Exception as e:
-                log.warning(
-                    "Noise-aware layout failed (continuing with the default layout): %s",
-                    e,
-                )
-            pm = _generate_pm(backend, spec, initial_layout=initial_layout)
+    dd_pm = None
+    dd_label = None
+    if spec.dynamical_decoupling:
+        try:
+            dd_pm = build_dd_pass_manager(backend, spec.dd_sequence)
+        except Exception as e:
+            log.warning("DD insertion failed (continuing without DD): %s", e)
         else:
-            pm = shared_pm
-
-        cb = make_callback(profile_report) if profile else None
-        t0 = time.time()
-        out = pm.run(tw, callback=cb) if cb is not None else pm.run(tw)
-        t1 = time.time()
-
-        dd_applied = False
-        if spec.dynamical_decoupling:
             try:
-                dd_pm = build_dd_pass_manager(backend, spec.dd_sequence)
-                out = dd_pm.run(out)
-                dd_applied = True
-            except Exception as e:
-                log.warning("DD insertion failed (continuing without DD): %s", e)
+                dd_label = dd_sequence_label(
+                    resolve_dd_sequence(backend, spec.dd_sequence)
+                )
+            except Exception:
+                dd_label = None
 
+    finished: List[Any] = []
+    flip_maps: List[Dict[int, int]] = []
+    dd_flags: List[bool] = []
+    for index, instance in enumerate(instances):
+        out = instance
         flip_map: Dict[int, int] = {}
         if spec.measurement_twirling:
             try:
                 out, flip_map = apply_measurement_twirling(
-                    out, seed=spec.seed_suppression
+                    out, seed=_instance_seed(spec.seed_suppression, index)
                 )
             except Exception as e:
                 log.warning("Measurement twirling failed (continuing): %s", e)
 
-        m = {
-            "compile_time_s": float(t1 - t0),
-            "depth": int(out.depth()),
-            "size": int(out.size()),
-            "width": int(out.num_qubits),
-            "two_qubit_ops": int(_count_two_qubit_ops(out)),
-            "dd_applied": bool(dd_applied),
-            "measurement_flip_map": flip_map,
-        }
-        try:
-            m["estimated_error"] = float(estimate_circuit_error(backend, out))
-        except Exception:
-            m["estimated_error"] = None
+        # DD schedules the circuit and pads its idle windows, so it runs last:
+        # a gate inserted afterwards (a measurement-twirl X) would shift the
+        # measurement it precedes past the schedule the padding was built for.
+        dd_applied = False
+        if dd_pm is not None:
+            try:
+                out = _restore_layout(dd_pm.run(out), instance)
+                dd_applied = True
+            except Exception as e:
+                log.warning("DD insertion failed (continuing without DD): %s", e)
 
-        # score for selection within twirling ensemble
-        estimated_error = m.get("estimated_error")
-        err_value = (
-            float(estimated_error) if isinstance(estimated_error, (int, float)) else 0.0
-        )
-        depth_value = m.get("depth", 0)
-        depth_score = (
-            float(depth_value) if isinstance(depth_value, (int, float)) else 0.0
-        )
-        score = depth_score + 10.0 * err_value
-        if score < best_score:
-            best_score = score
-            best = out
-            best_metrics = m
+        finished.append(out)
+        flip_maps.append(flip_map)
+        dd_flags.append(dd_applied)
 
-    assert best is not None and best_metrics is not None
+    per_instance = [_circuit_metrics(backend, out) for out in finished]
+    errors = [
+        m["estimated_error"] for m in per_instance if m["estimated_error"] is not None
+    ]
+    metrics: Dict[str, Any] = {
+        "compile_time_s": float(t1 - t0),
+        "depth": max(m["depth"] for m in per_instance),
+        "size": max(m["size"] for m in per_instance),
+        "width": max(m["width"] for m in per_instance),
+        "two_qubit_ops": max(m["two_qubit_ops"] for m in per_instance),
+        "estimated_error": max(errors) if errors else None,
+        "dd_applied": bool(dd_flags) and all(dd_flags),
+        "measurement_flip_map": flip_maps[0],
+        "measurement_flip_maps": flip_maps,
+        "twirl_instances": len(finished),
+        # The shots a given precision costs relative to running the circuit
+        # once: 1 unless ZNE must also run it at every noise factor and
+        # extrapolate (cutting overrides this with its quasi-probability cost).
+        "sampling_overhead": (
+            zne_sampling_overhead(spec.zne_factors, spec.zne_degree)
+            if spec.zne
+            else 1.0
+        ),
+    }
+    if metrics["dd_applied"] and dd_label is not None:
+        metrics["dd_sequence_applied"] = dd_label
     if profile:
-        best_metrics["pass_profile"] = profile_report.to_json()
+        metrics["pass_profile"] = profile_report.to_json()
+    return finished, metrics
 
-    return best, best_metrics
+
+def compile_one(
+    circuit: Any,
+    backend: Any,
+    spec: StrategySpec,
+    profile: bool = False,
+) -> Tuple[Any, Dict[str, Any]]:
+    """Compile ``circuit`` and return its first instance with ensemble metrics.
+
+    Equivalent to :func:`compile_ensemble` for strategies without twirling.
+    With twirling the metrics describe the whole ensemble; run every instance
+    from :func:`compile_ensemble` to obtain the twirled result.
+
+    Args:
+        circuit: QuantumCircuit instance to compile.
+        backend: Backend object (or backend-like handle) to compile for.
+        spec: Strategy specification controlling compilation behavior.
+        profile (default: False): Whether pass-level transpiler profiling is enabled.
+
+    Returns:
+        ``(compiled_circuit, metrics)``.
+
+    Raises:
+        OptionalDependencyError: If qiskit is unavailable.
+    """
+    instances, metrics = compile_ensemble(circuit, backend, spec, profile=profile)
+    return instances[0], metrics

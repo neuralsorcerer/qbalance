@@ -48,6 +48,8 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 myst_enable_extensions = [
     "colon_fence",
     "deflist",
+    # $...$ and $$...$$ math, which GitHub renders too.
+    "dollarmath",
     "fieldlist",
     "substitution",
     "tasklist",

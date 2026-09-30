@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Tuple
 from qbalance.errors import OptionalDependencyError
 from qbalance.reports.common import (
     aggregate,
+    failed_trials,
     load_matrix,
     matrix_results,
     sort_value,
@@ -21,18 +22,21 @@ from qbalance.reports.common import (
 
 
 def render_html(matrix_json: Path, out_dir: Path) -> Path:
-    """Render html used by the qbalance workflow.
+    """Write an HTML report of a matrix run to ``out_dir/report.html``.
+
+    The tables are those of :func:`~qbalance.reports.markdown.render_markdown`.
+    Every value taken from the matrix file is HTML-escaped.
 
     Args:
-        matrix_json: Matrix json value consumed by this routine.
-        out_dir: Out dir value consumed by this routine.
+        matrix_json: Matrix results written by ``run_matrix``.
+        out_dir: Directory to write into; created if missing.
 
     Returns:
-        Path with the computed result.
+        The path of the written report.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
-        ValueError: Raised when the matrix JSON cannot be read or has an unusable shape.
+        OptionalDependencyError: If jinja2 is not installed.
+        ValueError: If the matrix JSON cannot be read or has an unusable shape.
     """
     try:
         from jinja2 import Template
@@ -41,10 +45,11 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
             "jinja2 is required (install qbalance[report])"
         ) from e
 
+    # Read and validate before touching out_dir, so a bad matrix leaves no
+    # empty report directory behind.
+    results = matrix_results(load_matrix(matrix_json))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    data = load_matrix(matrix_json)
-    results = matrix_results(data)
 
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(
         lambda: defaultdict(list)
@@ -57,17 +62,17 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
     model: List[Dict[str, Any]] = []
     for backend, strat_map in grouped.items():
         rows: List[Dict[str, Any]] = []
-        items: List[Tuple[str, Dict[str, float]]] = []
+        items: List[Tuple[str, Dict[str, float], str]] = []
         for sk, rs in strat_map.items():
             agg = aggregate(rs)
-            items.append((sk, agg))
+            items.append((sk, agg, f"{failed_trials(rs)}/{len(rs)}"))
         items.sort(
             key=lambda t: (
                 sort_value(t[1].get("depth")),
                 sort_value(t[1].get("two_qubit_ops")),
             )
         )
-        for sk, agg in items:
+        for sk, agg, failed in items:
             rows.append(
                 {
                     "strategy": sk,
@@ -75,6 +80,7 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
                     "twoq": agg["two_qubit_ops"],
                     "err": agg["estimated_error"],
                     "compile": agg["compile_time_s"],
+                    "failed": failed,
                 }
             )
         model.append({"backend": backend, "rows": rows})
@@ -103,7 +109,7 @@ code { background: #f3f3f3; padding: 1px 4px; border-radius: 4px; }
 <h2>Backend: {{ b.backend }}</h2>
 <table>
 <thead>
-<tr><th>Strategy</th><th>mean depth</th><th>mean 2q ops</th><th>mean est error</th><th>mean compile time (s)</th></tr>
+<tr><th>Strategy</th><th>mean depth</th><th>mean 2q ops</th><th>mean est error</th><th>mean compile time (s)</th><th>failed trials</th></tr>
 </thead>
 <tbody>
 {% for r in b.rows %}
@@ -113,6 +119,7 @@ code { background: #f3f3f3; padding: 1px 4px; border-radius: 4px; }
 <td>{{ "%.4g"|format(r.twoq) }}</td>
 <td>{{ "%.4g"|format(r.err) }}</td>
 <td>{{ "%.4g"|format(r.compile) }}</td>
+<td>{{ r.failed }}</td>
 </tr>
 {% endfor %}
 </tbody>

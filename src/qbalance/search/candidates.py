@@ -11,18 +11,31 @@ from typing import List
 
 from qbalance.strategies import StrategySpec
 
+# Instances per measurement-twirled candidate, as for the Pauli-twirled ones.
+_MEASUREMENT_TWIRLS = 8
+
 
 def default_candidate_strategies(
     max_candidates: int = 24, seed: int = 0
 ) -> List[StrategySpec]:
-    """Return the default candidate strategies configuration used by qbalance.
+    """Return the built-in candidate strategies ``adjust`` searches by default.
+
+    The pool holds 23 distinct strategies: optimization levels 0 to 3 with
+    default routing, SABRE routing, SABRE layout and routing, and the
+    noise-aware layout with SABRE routing; at level 2 with SABRE routing,
+    Pauli twirling, dynamical decoupling, measurement twirling, all three
+    combined, M3 with measurement twirling, and ZNE with measurement
+    twirling (8 twirl instances each); and a cutting candidate with 4-qubit
+    subcircuits.  ``StrategySpec(optimization_level=0)`` stays first and
+    the rest are shuffled with ``random.Random(seed)``.
 
     Args:
-        max_candidates (default: 24): Max candidates value consumed by this routine.
-        seed (default: 0): Seed used for deterministic randomization.
+        max_candidates (default: 24): How many strategies to return, at most.
+        seed (default: 0): Seed of the shuffle.
 
     Returns:
-        List[StrategySpec] with the computed result.
+        The first ``max_candidates`` strategies of the shuffled pool; ``[]``
+        when ``max_candidates <= 0``.
 
     Raises:
         ValueError: If max_candidates is not an integer, or if seed is not an integer.
@@ -39,17 +52,7 @@ def default_candidate_strategies(
     seen = set()
 
     def _add(spec: StrategySpec) -> bool:
-        """Internal helper that add.
-
-        Args:
-            spec: Strategy/backend specification controlling compilation behavior.
-
-        Returns:
-            bool with the computed result.
-
-        Raises:
-            None.
-        """
+        """Record ``spec`` unless seen; return whether the pool is now full."""
         if spec in seen:
             return False
         seen.add(spec)
@@ -93,9 +96,15 @@ def default_candidate_strategies(
             dd_sequence="XY4",
         )
     )
+    # A measurement twirl symmetrizes readout error only averaged over its
+    # flip patterns; a single instance is one fixed pattern, which merely
+    # relabels which outcomes suffer the larger error.
     pool.append(
         StrategySpec(
-            optimization_level=2, routing_method="sabre", measurement_twirling=True
+            optimization_level=2,
+            routing_method="sabre",
+            measurement_twirling=True,
+            num_twirls=_MEASUREMENT_TWIRLS,
         )
     )
 
@@ -119,6 +128,7 @@ def default_candidate_strategies(
             routing_method="sabre",
             mthree=True,
             measurement_twirling=True,
+            num_twirls=_MEASUREMENT_TWIRLS,
         )
     )
     pool.append(
@@ -127,12 +137,22 @@ def default_candidate_strategies(
             routing_method="sabre",
             zne=True,
             measurement_twirling=True,
+            num_twirls=_MEASUREMENT_TWIRLS,
         )
     )
 
-    # Cutting (optional)
+    # Cutting (optional).  Subexperiments are small, and at optimization
+    # level 1 Qiskit keeps a small circuit on qubits 0.. whenever that trivial
+    # layout fits the coupling map, whatever their error rates; the noise-aware
+    # layout places every subexperiment on good qubits instead.
     pool.append(
-        StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=4)
+        StrategySpec(
+            optimization_level=1,
+            layout_method="qbalance_noise_aware",
+            routing_method="sabre",
+            cutting=True,
+            max_subcircuit_qubits=4,
+        )
     )
 
     if len(pool) > 1:

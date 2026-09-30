@@ -340,11 +340,12 @@ def test_main_entrypoint_runs_cli(monkeypatch):
     cli_mod = types.ModuleType("qbalance.cli")
     called = {"v": 0}
 
-    def app():
+    def main():
 
         called["v"] += 1
 
-    cli_mod.app = app
+    # ``python -m qbalance`` goes through main(), which reports user errors.
+    cli_mod.main = main
     monkeypatch.setitem(sys.modules, "qbalance.cli", cli_mod)
     monkeypatch.delitem(sys.modules, "qbalance.__main__", raising=False)
     __import__("qbalance.__main__")
@@ -823,3 +824,119 @@ def test_package_namespace_matches_its_declared_api():
     # Everything promised is actually there.
     assert all(hasattr(qbalance, name) for name in exported)
     assert len(exported) == len(qbalance.__all__), "__all__ has duplicates"
+
+
+def test_compile_cache_round_trips_a_twirl_ensemble(tmp_path):
+    """Every instance of a twirled compile must come back from the cache."""
+    from qiskit import QuantumCircuit
+
+    from qbalance import cache
+
+    circuits = []
+    for index in range(3):
+        qc = QuantumCircuit(1, 1, name=f"instance{index}")
+        qc.x(0)
+        qc.measure(0, 0)
+        circuits.append(qc)
+    entry = cache.get_entry("ab" * 32, tmp_path)
+    cache.save_compiled(
+        entry,
+        circuits,
+        {
+            "twirl_instances": 3,
+            "measurement_flip_map": {0: 1},
+            "measurement_flip_maps": [{0: 1}, {}, {0: 1}],
+        },
+    )
+
+    loaded = cache.load_compiled_ensemble(entry)
+    assert loaded is not None
+    loaded_circuits, meta = loaded
+    assert [c.name for c in loaded_circuits] == ["instance0", "instance1", "instance2"]
+    # JSON stringifies the flip-map keys; they come back as clbit integers.
+    assert meta["measurement_flip_maps"] == [{0: 1}, {}, {0: 1}]
+    first, _ = cache.load_compiled(entry)
+    assert first.name == "instance0"
+
+
+def test_ensemble_bookkeeping_helpers():
+    from qbalance.execution.ensemble import (
+        instance_flip_maps,
+        merge_counts,
+        split_shots,
+    )
+
+    assert split_shots(10, 3) == [4, 3, 3]
+    assert split_shots(2, 4) == [1, 1, 0, 0]
+    assert sum(split_shots(1024, 7)) == 1024
+    with pytest.raises(ValueError):
+        split_shots(0, 1)
+
+    assert instance_flip_maps({"measurement_flip_maps": [{"0": 1}, {}]}, 2) == [
+        {0: 1},
+        {},
+    ]
+    assert instance_flip_maps({"measurement_flip_map": {1: 1}}, 1) == [{1: 1}]
+    with pytest.raises(ValueError, match="expected 2 measurement flip maps"):
+        instance_flip_maps({"measurement_flip_map": {}}, 2)
+
+    assert merge_counts([{"0": 1, "1": 2}, {"1": 3}]) == {"0": 1, "1": 5}
+
+
+def test_replacing_directory_creates_and_then_replaces_a_directory(tmp_path):
+    target = tmp_path / "out"
+    with utils_module.replacing_directory(target) as staging:
+        # Staged beside the target, so the final rename stays on one filesystem.
+        assert staging.parent == tmp_path and staging.is_dir()
+        assert not target.exists()
+        (staging / "first.txt").write_text("one", encoding="utf-8")
+    assert (target / "first.txt").read_text(encoding="utf-8") == "one"
+
+    with utils_module.replacing_directory(target) as staging:
+        (staging / "second.txt").write_text("two", encoding="utf-8")
+    assert [p.name for p in target.iterdir()] == ["second.txt"]
+    # Neither the staging directory nor the moved-aside original is left over.
+    assert [p.name for p in tmp_path.iterdir()] == ["out"]
+
+
+def test_replacing_directory_keeps_the_target_when_the_block_fails(tmp_path):
+    target = tmp_path / "out"
+    target.mkdir()
+    (target / "keep.txt").write_text("precious", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="half written"):
+        with utils_module.replacing_directory(target) as staging:
+            (staging / "partial.txt").write_text("x", encoding="utf-8")
+            raise RuntimeError("half written")
+
+    assert [p.name for p in target.iterdir()] == ["keep.txt"]
+    assert (target / "keep.txt").read_text(encoding="utf-8") == "precious"
+    assert [p.name for p in tmp_path.iterdir()] == ["out"]
+
+
+def test_replacing_directory_replaces_a_link_not_what_it_points_to(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "keep.txt").write_text("precious", encoding="utf-8")
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+    with utils_module.replacing_directory(link) as staging:
+        (staging / "new.txt").write_text("new", encoding="utf-8")
+
+    assert not link.is_symlink()
+    assert [p.name for p in link.iterdir()] == ["new.txt"]
+    assert (real / "keep.txt").read_text(encoding="utf-8") == "precious"
+
+
+def test_validate_flag_accepts_booleans_only():
+    import numpy as np
+
+    assert utils_module.validate_flag("execute", True) is True
+    assert utils_module.validate_flag("execute", np.bool_(False)) is False
+    for value in ("no", 0, 1, None, 1.0):
+        with pytest.raises(ValueError, match="execute must be a boolean"):
+            utils_module.validate_flag("execute", value)

@@ -12,23 +12,19 @@ from typing import Any, Dict, Optional
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
+from qbalance.utils import instruction_parts
 
 log = get_logger(__name__)
 
 
 def _ensure_backend(backend: Any) -> Any:
-    # If backend can't run, try to wrap with AerSimulator.from_backend
+    """Return ``backend`` if it can run circuits, else an Aer simulator of it.
 
-    """Internal helper that ensure backend.
-
-    Args:
-        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
-
-    Returns:
-        Any with the computed result.
+    A backend without ``run`` is wrapped in ``AerSimulator.from_backend``.
 
     Raises:
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        OptionalDependencyError: If wrapping is needed and qiskit-aer is not
+            installed.
     """
     if hasattr(backend, "run"):
         return backend
@@ -42,17 +38,10 @@ def _ensure_backend(backend: Any) -> Any:
 
 
 def _prepare_run_kwargs(func: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Internal helper that prepare run kwargs.
+    """Return the subset of ``kwargs`` that ``func`` accepts.
 
-    Args:
-        func: Func value consumed by this routine.
-        kwargs: Kwargs value consumed by this routine.
-
-    Returns:
-        Dict[str, Any] with the computed result.
-
-    Raises:
-        None.
+    Every keyword is kept when ``func`` takes ``**kwargs`` or its signature
+    cannot be inspected.
     """
     try:
         params = inspect.signature(func).parameters.values()
@@ -71,6 +60,30 @@ def _prepare_run_kwargs(func: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in kwargs.items() if k in allowed}
 
 
+def _measures_nothing(circuit: Any) -> bool:
+    """Whether ``circuit`` is a real circuit without a single measurement."""
+    data = getattr(circuit, "data", None)
+    if data is None or not hasattr(circuit, "num_clbits"):
+        return False  # not a QuantumCircuit; let the backend decide
+    return not _contains_measurement(data)
+
+
+def _contains_measurement(data: Any) -> bool:
+    """Whether ``data`` holds a measurement, inside control-flow blocks too.
+
+    A dynamic circuit can measure only within an ``if_else`` or ``for_loop``
+    body; those measurements still produce counts.
+    """
+    for entry in data:
+        operation = instruction_parts(entry)[0]
+        if getattr(operation, "name", "") == "measure":
+            return True
+        for block in getattr(operation, "blocks", None) or ():
+            if _contains_measurement(getattr(block, "data", None) or ()):
+                return True
+    return False
+
+
 def run_counts(
     backend: Any,
     circuit: Any,
@@ -78,20 +91,30 @@ def run_counts(
     seed_simulator: Optional[int] = None,
     seed_transpiler: Optional[int] = None,
 ) -> Dict[str, int]:
-    """Execute counts and return the collected results.
+    """Run ``circuit`` on ``backend`` and return its counts.
+
+    A backend without ``run`` is executed through
+    ``AerSimulator.from_backend``.  The seeds are passed only to ``run``
+    methods that accept them.
 
     Args:
-        backend: Backend object (or backend-like handle) used for compilation, property lookup, or execution.
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
-        shots (default: 1024): Number of shots used when executing circuits on a backend.
-        seed_simulator (default: None): Seed forwarded to simulator backends when supported.
-        seed_transpiler (default: None): Seed forwarded to transpiler-aware backend run methods when supported.
+        backend: Backend to run on.
+        circuit: Compiled circuit with at least one measurement
+            (measurements inside control-flow blocks count).
+        shots (default: 1024): Number of shots, a positive integer.
+        seed_simulator (default: None): Simulator seed.
+        seed_transpiler (default: None): Transpiler seed, for backends
+            whose ``run`` transpiles.
 
     Returns:
-        Dict[str, int] with the computed result.
+        Counts keyed by Qiskit bitstrings.
 
     Raises:
-        ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+        ValueError: If ``shots`` is not a positive integer, a seed is not an
+            integer or ``None`` (booleans are rejected), or the circuit
+            measures nothing.
+        OptionalDependencyError: If the backend has no ``run`` and
+            qiskit-aer is not installed.
     """
     if not isinstance(shots, Integral) or isinstance(shots, bool) or shots <= 0:
         raise ValueError("shots must be a positive integer.")
@@ -103,6 +126,14 @@ def run_counts(
         not isinstance(seed_transpiler, Integral) or isinstance(seed_transpiler, bool)
     ):
         raise ValueError("seed_transpiler must be an integer or None.")
+
+    if _measures_nothing(circuit):
+        # Backends answer with an opaque "No counts for experiment <object at
+        # 0x...>" long after the job was submitted.
+        raise ValueError(
+            f"Circuit {getattr(circuit, 'name', '')!r} has no measurements, "
+            "so executing it yields no counts."
+        )
 
     b = _ensure_backend(backend)
     run_callable = b.run

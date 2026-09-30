@@ -8,7 +8,7 @@ qbalance is a workflow toolkit for balancing quantum compilation, noise-suppress
 - [Strategy configuration](strategies.md): `StrategySpec` fields, validation rules, default candidates, and JSON strategy files.
 - [CLI guide](cli.md): command-by-command reference for `dataset`, `adjust`, `matrix`, `report`, `plugins`, and `compile`.
 - [Artifacts and reports](artifacts.md): dataset layouts, balanced workload outputs, matrix JSON, and report generation.
-- [API reference](api-references.md): public Python API, lower-level modules, extension points, and validation behavior.
+- [API reference](api-references.md): every public name, with its validation rules, the formulas it computes, and runnable examples with their outputs.
 
 ```{toctree}
 :maxdepth: 2

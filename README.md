@@ -12,6 +12,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 [![Qiskit Ecosystem](https://qisk.it/e-88affdcb)](https://qisk.it/e)
 [![Current Release](https://img.shields.io/github/release/neuralsorcerer/qbalance.svg)](https://github.com/neuralsorcerer/qbalance/releases)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Qiskit](https://img.shields.io/badge/Qiskit-2.0%2B-purple?logo=qiskit&logoColor=white)](https://www.ibm.com/quantum/qiskit/)
 [![Test Linux](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml?query=branch%3Amain)
 [![Test MacOS](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/macos.yml?query=branch%3Amain)
@@ -57,15 +58,15 @@ qbalance provides a single workflow that keeps these trade-offs explicit and rep
 - **Backend resolution**: plugin-based backend specification (`fake:*`, `aer:*`, custom).
 - **Strategy model**: immutable `StrategySpec` with compile/suppression/mitigation controls.
 - **Search modes**:
-  - `grid`: evaluate all candidates in sequence.
-  - `bandit`: warmup + adaptive ordering via a Bayesian linear surrogate.
+  - `grid`: evaluate candidates in order (all of them, or the first `max_evaluations`).
+  - `bandit`: warmup + adaptive proposals via a Bayesian linear surrogate, spending a `max_evaluations` budget per circuit on the most promising candidates.
 - **Selection modes**:
   - direct objective minimization,
   - optional Pareto filtering before tie-break by objective.
 - **Mitigation/Suppression knobs**: Pauli twirling, dynamical decoupling, measurement twirling, M3, ZNE, optional cutting.
 - **Diagnostics**: baseline-vs-selected distribution distances (EMD/CVM/KS).
 - **Reporting**: markdown + optional HTML from matrix JSON.
-- **Caching**: compiled-circuit cache keyed by backend + circuit fingerprint + strategy payload.
+- **Caching**: compiled-circuit cache keyed by backend (spec, name, and calibration digest) + circuit fingerprint + strategy payload + profile flag + toolchain version.
 
 ---
 
@@ -120,7 +121,7 @@ balanced = wl.adjust(
     seed=7,                # deterministic candidate ordering
     cache_root="./.qbalance-cache",
     profile=False,
-    allow_regression=False,  # optional: keep baseline if candidates regress
+    allow_regression=False,  # optional: never select a candidate worse than the baseline
 )
 
 # 4) inspect/persist artifacts
@@ -140,19 +141,34 @@ print(reloaded.summary())
 # Create built-in dataset
 python -m qbalance dataset examples --out ./circuits --overwrite
 
-# Run per-circuit adjustment
+# Objective weights (lower score is better): the defaults without the
+# wall-clock compile-time term, so scores are reproducible
+cat > objective.json <<'JSON'
+{"depth": 1.0, "two_qubit_ops": 2.0, "estimated_error": 10.0, "sampling_overhead": 1.0}
+JSON
+
+# Run per-circuit adjustment over the default candidate pool; bandit search
+# spends a budget of 8 evaluations per circuit
 python -m qbalance adjust ./circuits \
   --backend fake:generic:5 \
   --out ./balanced \
   --search bandit \
+  --max-evaluations 8 \
   --pareto \
-  --max-candidates 24 \
   --seed 7 \
   --cache-root ./.qbalance-cache \
-  --strategies ./strategies.json \
   --objective ./objective.json \
   --no-regression \
   --overwrite
+
+# A fixed strategy list for the matrix
+cat > strategies.json <<'JSON'
+{"strategies": [
+  {"optimization_level": 1, "routing_method": "sabre"},
+  {"optimization_level": 2, "layout_method": "qbalance_noise_aware", "routing_method": "sabre"},
+  {"optimization_level": 2, "routing_method": "sabre", "measurement_twirling": true, "num_twirls": 8}
+]}
+JSON
 
 # Evaluate fixed strategy matrix across backends
 python -m qbalance matrix ./circuits \
@@ -180,10 +196,10 @@ CircuitDataset
    ├── set_target("fake:generic:5" | "aer:..." | custom plugin)
    │
    └── adjust(...)
-         ├── baseline compile
-         ├── candidate ordering (grid | bandit)
-         ├── compile (+ optional suppression/cutting)
-         ├── optional execution (+ mitigation)
+         ├── baseline (compiled, and executed when execute=True)
+         ├── candidate search (grid | bandit, optional max_evaluations budget)
+         ├── compile once (+ twirl instances, DD, or cut subexperiments)
+         ├── optional execution of every instance (+ mitigation)
          ├── objective scoring
          └── choose best (optional Pareto pre-filter)
                ↓
@@ -282,29 +298,39 @@ J = 1.0\cdot\text{depth}
   + 2.0\cdot\text{two\_qubit\_ops}
   + 10.0\cdot\text{estimated\_error}
   + 0.1\cdot\text{compile\_time\_s}
+  + 1.0\cdot\text{sampling\_overhead}
 ```
 
 Interpretation:
 
 - higher `estimated_error` is penalized strongly (weight 10),
 - two-qubit operation count has moderate penalty (weight 2),
-- compile time contributes but with a small coefficient (0.1).
+- compile time contributes but with a small coefficient (0.1),
+- `sampling_overhead` is 1 for a circuit that runs once (a constant that never reorders those candidates) and charges ZNE and cut candidates for their extra shots (see below),
+- `depth` counts operation layers; scheduling directives (`barrier`, `delay`) add none, so the idle delays dynamical decoupling inserts are not billed.
 
 ### 2) Finite-safe scoring behavior
 
-For each objective term, qbalance ignores a term when the metric is missing, non-numeric, or non-finite. In selection fallback logic, if no finite objective term contributes, the candidate is treated as effectively worst-case (score $+\infty$).
+For each objective term, qbalance ignores a term when the metric is missing, non-numeric, or non-finite. Selection then distinguishes two cases: a candidate that reports an objective metric only with invalid values (`None`, non-numeric, or non-finite) is treated as worst-case (score $+\infty$), while a metric no candidate reports at all simply contributes nothing, so an objective made only of such terms scores every candidate 0 and keeps the first. `adjust` logs a warning naming every objective term that no evaluated metrics report (a misspelled name, or an execution metric without `execute=True`).
 
 ### 2b) Reproducibility of `objective_score`
 
-Compilation itself is deterministic: with a fixed `seed`, two cold-cache runs produce identical strategy selections and identical `depth`, `two_qubit_ops` and `estimated_error` values. The default objective, however, weights `compile_time_s` at `0.1`, and compile time is wall-clock, so `objective_score` varies slightly between runs and can in principle reorder two candidates whose other metrics are nearly tied. Drop the `compile_time_s` term to make scores and selection bit-reproducible:
+Compilation itself is deterministic: with a fixed `seed`, two cold-cache runs produce identical `depth`, `two_qubit_ops` and `estimated_error` values for every candidate. So does execution on simulators: twirl instances, M3's calibration and ZNE's folded circuits all run with seeds derived from `seed`, so executed and mitigated metrics repeat exactly, whether the compiled circuits come fresh or from the cache. The default objective, however, weights `compile_time_s` at `0.1`, and compile time is wall-clock, so `objective_score` varies between runs. Candidates that compile to the same depth, two-qubit count, error and overhead (optimization levels 2 and 3 often do) are then ordered by timing noise, so which of them is selected can change from one cold-cache run to the next; a rerun on a warm cache replays the recorded compile times and repeats its selections. Drop the `compile_time_s` term to make scores and selection bit-reproducible:
 
 ```python
 from qbalance import Objective
 
 objective = Objective(
-    weights={"depth": 1.0, "two_qubit_ops": 2.0, "estimated_error": 10.0}
+    weights={
+        "depth": 1.0,
+        "two_qubit_ops": 2.0,
+        "estimated_error": 10.0,
+        "sampling_overhead": 1.0,
+    }
 )
 ```
+
+The default objective's `sampling_overhead` term is the factor by which a strategy multiplies the shots a given precision needs. It is `1.0` for a circuit that runs once, the quasi-probability sampling overhead (9 per cut CNOT, multiplied over the cuts) for circuit cutting, and $n\sum_i w_i^2$ for ZNE, where $w_i$ are the least-squares weights that give the extrapolated value from the $n$ noise factors (4.375 for the default linear fit at factors 1, 3, 5). So a cut candidate's shallower subexperiments, or a ZNE candidate's mitigation, are weighed against the extra shots they cost; without it a ZNE strategy scored like the same compile without ZNE.
 
 ### 3) Pareto pre-filtering
 
@@ -312,7 +338,8 @@ With `pareto=True`, qbalance first computes a non-dominated set on:
 
 - `depth`,
 - `two_qubit_ops`,
-- `estimated_error`.
+- `estimated_error`,
+- `sampling_overhead` (1 for a circuit that runs once; without it a cut candidate's shallower subexperiments would dominate every uncut candidate regardless of their shot cost).
 
 Candidate $a$ dominates candidate $b$ iff:
 
@@ -324,7 +351,7 @@ Then qbalance chooses the minimum-objective strategy within that Pareto front.
 
 ### 4) Bandit proposal model
 
-In `bandit` mode, candidate ordering after warmup uses a Thompson-sampling style linear surrogate:
+In `bandit` mode, candidates after warmup are proposed by a Thompson-sampling style linear surrogate over each circuit's score relative to its baseline, $y=(s-s_{\text{base}})/|s_{\text{base}}|$, so one model can learn from circuits of any size:
 
 ```math
 \mathbf{y} \approx X\mathbf{w},\qquad
@@ -333,7 +360,7 @@ In `bandit` mode, candidate ordering after warmup uses a Thompson-sampling style
 \mu = \Lambda^{-1}\frac{1}{\sigma^2}X^T\mathbf{y}
 ```
 
-A sample $\tilde{\mathbf{w}}\sim\mathcal{N}(\mu,\Lambda^{-1})$ is drawn implicitly from the Cholesky factor of $\Lambda$, and candidates are ranked by linear score $\phi(s)^T\tilde{\mathbf{w}}$ (lower is preferred).
+A sample $\tilde{\mathbf{w}}\sim\mathcal{N}(\mu,\Lambda^{-1})$ is drawn implicitly from the Cholesky factor of $\Lambda$, and candidates are ranked by linear score $\phi(s)^T\tilde{\mathbf{w}}$ (lower is preferred). The noise variance $\sigma^2$ is the sample variance of the observed $y$. Proposals stop once `max_evaluations` candidates have been evaluated; without a budget every candidate is evaluated and the proposals only reorder the work.
 
 ### 5) Distribution diagnostics
 
@@ -369,6 +396,10 @@ When execution is available, helper metrics may include:
 
 with $p_i = c_i / \sum_j c_j$.
 
+- Z-parity expectation over the measured bits, $\langle Z\otimes\cdots\otimes Z\rangle=\sum_i (-1)^{|b_i|}p_i$, reported for every execution path so they can be compared: `raw_parity_expval` (observed counts), `mitigated_parity_expval` (M3), `zne_parity_expval` (zero-noise extrapolated) and `cut_parity_expval` (reconstructed from cut subexperiments).
+
+Twirled strategies run every twirl instance on an equal share of the shots and pool the untwirled counts, since a twirl only suppresses noise averaged over its instances.
+
 ---
 
 ## Caching and computational performance
@@ -376,10 +407,10 @@ with $p_i = c_i / \sum_j c_j$.
 Compiled circuits may be reused via cache key:
 
 ```math
-\text{key}=\text{SHA256}(\text{backend\_name}:\text{circuit\_fingerprint}:\text{strategy\_json})
+\text{key}=\text{SHA256}(\text{toolchain}:\text{backend\_spec}\,|\,\text{calibration}\,|\,\text{backend\_name}:\text{circuit\_fingerprint}:\text{strategy\_json}:\text{profile})
 ```
 
-This avoids redundant transpilation for repeated `(circuit, backend, strategy)` tuples.
+This avoids redundant transpilation for repeated `(circuit, backend, strategy)` tuples. The toolchain part (cache format and Qiskit version) and the calibration digest (the backend's gate errors and durations, qubit coherence times and frequencies, `dt`, and the calibration date when the backend reports one) make a new Qiskit, a changed pipeline, or a recalibrated device miss the cache instead of reusing layouts and `estimated_error` computed from stale data.
 
 Additional performance-relevant behavior:
 
@@ -404,6 +435,7 @@ Saved adjustment results also include per-circuit `candidate_rankings` derived f
 ```json
 {
   "version": 1,
+  "metadata": {"dataset_dir": "...", "backends": ["..."], "execute": false, "shots": 1024, "seed": 0, "profile": false},
   "results": [
     {
       "circuit": "...",
@@ -418,7 +450,7 @@ Saved adjustment results also include per-circuit `candidate_rankings` derived f
 ### `report` output directory
 
 - `report.md`,
-- optional HTML files when `--html` is used and report dependencies are installed.
+- `report.html` when `--html` is used (requires the `report` extra).
 
 ---
 
@@ -431,6 +463,8 @@ python -m qbalance dataset examples --out ./circuits --overwrite
 ```
 
 ### `adjust`
+
+The strategy and objective files are optional inputs; their formats are described below.
 
 ```bash
 python -m qbalance adjust ./circuits \
@@ -450,9 +484,9 @@ python -m qbalance adjust ./circuits \
 
 Use `--objective` to tune the metric trade-off used for candidate ranking and no-regression checks. The file may be a direct mapping such as `{"depth": 1.0, "two_qubit_ops": 2.0}`, an object with a `weights` field, or a saved-results object with an `objective` field. The loader rejects empty mappings, blank metric names, booleans, non-numeric values, and non-finite values.
 
-Use `--no-regression` when the final selection should fall back to the baseline compile instead of accepting the best feasible candidate with a worse objective score; equal scores and incomparable baselines do not trigger fallback.
+Use `--no-regression` when the final selection must never score worse than the baseline strategy on the objective terms both report (the baseline runs no mitigation, so mitigation-derived terms are not compared): a regressing top candidate is replaced by the best-ranked one that does not regress, and the baseline is kept only when every candidate regresses; equal scores and incomparable baselines do not trigger fallback.
 
-A strategy JSON file may be either one strategy object, a list of strategy objects, or an object with a `strategies` list:
+A strategy JSON file may be one strategy object, a list of strategy objects, an object with a `strategies` list, or a saved `results.json` / matrix JSON whose strategies are reused:
 
 ```json
 {
@@ -533,12 +567,12 @@ python -m qbalance plugins list
 
 - `adjust()` without `.set_target(...)` raises `ValueError`.
 - Invalid search mode raises `ValueError`.
-- If no candidate can be evaluated, selection raises `RuntimeError`.
-- `matrix` validates `shots` as positive integer and validates integer seed.
+- If no candidate of a circuit is feasible, `adjust()` raises `QBalanceError` (a `RuntimeError`) listing the failures.
+- `matrix` validates `shots` as a positive integer and `seed` as a non-negative integer.
 - `matrix` raises `ValueError` if dataset record count and loaded circuit count mismatch.
 - Existing output paths require explicit overwrite flags.
 - Optional dependency features require installed extras.
-- Execution/mitigation exceptions are captured in metrics (e.g., `exec_error`, `mthree_error`, `zne_error`) so runs can continue.
+- Cutting, compilation, execution, and mitigation failures are captured in metrics (`cutting_error`, `compile_error`, `exec_error`, `mthree_error`, `zne_error`) so runs can continue; in `adjust` such a candidate is kept in the history but is infeasible for selection.
 
 ---
 
@@ -547,7 +581,7 @@ python -m qbalance plugins list
 For a dataset with $N$ circuits and $S$ strategy candidates per circuit:
 
 - **Grid search** evaluates up to $N\times S$ candidates.
-- **Bandit search** also compiles/evaluates up to $N\times S$ candidates in the worst case, but may discover strong candidates earlier due to adaptive ordering.
+- **Bandit search** evaluates $N\times\min(B, S)$ candidates for a `max_evaluations` budget $B$, spending the budget on the candidates its surrogate expects to score best (grid search with the same budget takes the first $B$ in order). Without a budget both modes evaluate all $N\times S$.
 - **Pareto filtering** in practice is close to linear in small fronts, with a quadratic worst-case bound on the number of unique objective vectors.
 
 If a compile cache hit occurs, effective transpilation cost is reduced from repeated compile cost $T_{compile}$ to key lookup + deserialization overhead.
@@ -556,8 +590,9 @@ If a compile cache hit occurs, effective transpilation cost is reduced from repe
 ## Development
 
 ```bash
-# Install editable package with all extras
-pip install -e ".[all]"
+# Install editable package with all extras, plus the hook runner
+# (pre-commit is not part of any extra)
+pip install -e ".[all]" pre-commit
 
 # Install hooks once
 pre-commit install

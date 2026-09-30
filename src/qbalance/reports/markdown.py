@@ -11,6 +11,7 @@ from typing import Any, Dict, List
 
 from qbalance.reports.common import (
     aggregate,
+    failed_trials,
     load_matrix,
     matrix_results,
     sort_value,
@@ -28,22 +29,30 @@ def _table_cell(value: str) -> str:
 
 
 def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
-    """Render markdown used by the qbalance workflow.
+    """Write a Markdown report of a matrix run to ``out_dir/report.md``.
+
+    Trials are grouped by backend, then by strategy (see
+    :func:`~qbalance.reports.common.strategy_key`).  Each strategy row gives
+    the mean depth, two-qubit operations, estimated error and compile time
+    over its trials (see :func:`~qbalance.reports.common.aggregate`) and how
+    many trials recorded a failed stage.  Rows are sorted by mean depth,
+    then by mean two-qubit operations.
 
     Args:
-        matrix_json: Matrix json value consumed by this routine.
-        out_dir: Out dir value consumed by this routine.
+        matrix_json: Matrix results written by ``run_matrix``.
+        out_dir: Directory to write into; created if missing.
 
     Returns:
-        Path with the computed result.
+        The path of the written report.
 
     Raises:
-        ValueError: Raised when the matrix JSON cannot be read or has an unusable shape.
+        ValueError: If the matrix JSON cannot be read or has an unusable shape.
     """
+    # Read and validate before touching out_dir, so a bad matrix leaves no
+    # empty report directory behind.
+    results = matrix_results(load_matrix(matrix_json))
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    data = load_matrix(matrix_json)
-    results = matrix_results(data)
 
     # group by backend -> strategy
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -58,23 +67,23 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
     for backend, strat_map in grouped.items():
         lines.append(f"## Backend: {backend}\n")
         lines.append(
-            "| Strategy | mean depth | mean 2q ops | mean est error | mean compile time (s) |"
+            "| Strategy | mean depth | mean 2q ops | mean est error | mean compile time (s) | failed trials |"
         )
-        lines.append("|---|---:|---:|---:|---:|")
+        lines.append("|---|---:|---:|---:|---:|---:|")
         # sort by depth then 2q
         items = []
         for sk, rows in strat_map.items():
             agg = aggregate(rows)
-            items.append((sk, agg))
+            items.append((sk, agg, f"{failed_trials(rows)}/{len(rows)}"))
         items.sort(
             key=lambda t: (
                 sort_value(t[1].get("depth")),
                 sort_value(t[1].get("two_qubit_ops")),
             )
         )
-        for sk, agg in items:
+        for sk, agg, failed in items:
             lines.append(
-                f"| `{_table_cell(sk)}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} |"
+                f"| `{_table_cell(sk)}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} | {failed} |"
             )
         lines.append("")
     out = out_dir / "report.md"

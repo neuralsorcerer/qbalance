@@ -8,27 +8,35 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from qbalance.utils import instruction_parts
+from qbalance.utils import (
+    SCHEDULING_DIRECTIVES,
+    instruction_parts,
+    operation_depth,
+    operation_size,
+)
 
 
 def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
-    """Extract circuit metrics used by the qbalance workflow.
+    """Return structural metrics of ``circuit``, as floats.
+
+    ``depth`` and ``size`` count operations only: barriers and delays are
+    directives, not operations (see :func:`qbalance.utils.operation_depth`).
+    ``width`` is the number of qubits, ``two_qubit_ops`` counts operations
+    on exactly two qubits, ``measures`` the measurements, and ``t_count``
+    the ``t`` and ``tdg`` gates.
 
     Args:
-        circuit: QuantumCircuit instance to inspect, transform, or execute.
+        circuit: The circuit, typically a compiled one.
 
     Returns:
-        Dict[str, float] with the computed result.
-
-    Raises:
-        None.
+        ``depth``, ``size``, ``width``, ``two_qubit_ops``, ``measures`` and
+        ``t_count``.
     """
-    directive_names = {"barrier", "delay"}
     instruction_data = [instruction_parts(entry) for entry in circuit.data]
     twoq = sum(
         1
         for inst, qargs, _ in instruction_data
-        if len(qargs) == 2 and getattr(inst, "name", "") not in directive_names
+        if len(qargs) == 2 and getattr(inst, "name", "") not in SCHEDULING_DIRECTIVES
     )
     meas = sum(
         1 for inst, _, _ in instruction_data if getattr(inst, "name", "") == "measure"
@@ -39,8 +47,8 @@ def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
         if getattr(inst, "name", "") in ("t", "tdg")
     )
     return {
-        "depth": float(circuit.depth()),
-        "size": float(circuit.size()),
+        "depth": float(operation_depth(circuit)),
+        "size": float(operation_size(circuit)),
         "width": float(circuit.num_qubits),
         "two_qubit_ops": float(twoq),
         "measures": float(meas),

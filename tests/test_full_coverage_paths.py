@@ -11,11 +11,12 @@ import types
 
 import pytest
 
+from qbalance.execution import ensemble
 from qbalance.strategies import StrategySpec
 from qbalance.transpile import noise_aware_layout as nal
 from qbalance.transpile import pipeline, suppression
 from qbalance.workflow import workload as wl
-from tests.system_stubs import _I, _PM, _Q, _Circ
+from tests.system_stubs import _I, _PM, _Q, _Circ, as_ensemble
 
 
 def test_finalize_full_coverage_paths(monkeypatch, tmp_path):
@@ -120,6 +121,10 @@ def test_finalize_full_coverage_paths(monkeypatch, tmp_path):
     )
 
     class BanditFull:
+        def __init__(self, **kwargs):
+
+            _ = kwargs
+
         def observe(self, *a, **k):
 
             return None
@@ -131,22 +136,24 @@ def test_finalize_full_coverage_paths(monkeypatch, tmp_path):
 
     monkeypatch.setattr(wl, "BanditSearcher", BanditFull)
     monkeypatch.setattr(
-        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+        wl,
+        "compile_ensemble",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
-    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"00": 9, "11": 1})
+    monkeypatch.setattr(ensemble, "run_counts", lambda *a, **k: {"00": 9, "11": 1})
     monkeypatch.setattr(
-        wl, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+        ensemble, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
     )
     monkeypatch.setattr(
-        wl, "apply_mthree_mitigation", lambda *a, **k: {"00": 0.8, "11": 0.2}
+        ensemble, "mitigate_twirled_counts", lambda *a, **k: {"00": 0.8, "11": 0.2}
     )
     monkeypatch.setattr(
-        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
+        ensemble, "fold_global_for_backend", lambda compiled, backend, f: compiled
     )
     monkeypatch.setattr(
-        wl, "zne_extrapolate_counts", lambda *a, **k: {"00": 0.7, "11": 0.3}
+        ensemble, "zne_extrapolate_counts", lambda *a, **k: {"00": 0.7, "11": 0.3}
     )
 
     bw = (
@@ -188,13 +195,15 @@ def test_execute_without_mitigation_still_records_raw_counts_metrics(
         lambda max_candidates, seed: [StrategySpec()],
     )
     monkeypatch.setattr(
-        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+        wl,
+        "compile_ensemble",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
-    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"00": 9, "11": 1})
+    monkeypatch.setattr(ensemble, "run_counts", lambda *a, **k: {"00": 9, "11": 1})
     monkeypatch.setattr(
-        wl, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+        ensemble, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
     )
 
     # Neither mitigation runs, so their metrics must be absent entirely.
@@ -202,8 +211,8 @@ def test_execute_without_mitigation_still_records_raw_counts_metrics(
 
         raise AssertionError("mitigation must not run without mthree/zne")
 
-    monkeypatch.setattr(wl, "apply_mthree_mitigation", _unexpected)
-    monkeypatch.setattr(wl, "zne_extrapolate_counts", _unexpected)
+    monkeypatch.setattr(ensemble, "mitigate_twirled_counts", _unexpected)
+    monkeypatch.setattr(ensemble, "zne_extrapolate_counts", _unexpected)
 
     bw = (
         wl.Workload.from_dataset(ds)

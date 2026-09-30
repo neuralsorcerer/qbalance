@@ -346,3 +346,20 @@ def test_integrate_piecewise_constant_allows_a_flat_grid_segment():
         )
         == 0.0
     )
+
+
+def test_distances_do_not_modify_the_callers_weights():
+    """Regression: negative weights were clamped in the caller's own array.
+
+    ``np.asarray`` returns a float64 array unchanged, so the in-place clamp
+    rewrote the weights the caller passed in.
+    """
+    w1 = np.array([1.0, -2.0, 3.0])
+    w2 = np.array([-1.0, 2.0, 0.5])
+    before = (w1.copy(), w2.copy())
+
+    for distance in (ks_1d, emd_1d, cvm_1d):
+        distance([1.0, 2.0, 3.0], [1.5, 2.5, 3.5], w1=w1, w2=w2)
+
+    np.testing.assert_array_equal(w1, before[0])
+    np.testing.assert_array_equal(w2, before[1])

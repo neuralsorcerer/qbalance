@@ -32,25 +32,25 @@ classifiers = [
 dependencies = [
   "numpy>=1.22",
   "pydantic>=2.5",
-  "typer>=0.9",
+  "typer>=0.16",
   "rich>=13.7",
   "platformdirs>=4.0",
   "qiskit>=2.0,<3",
 ]
 
 [project.optional-dependencies]
-aer = ["qiskit-aer>=0.14"]
-runtime = ["qiskit-ibm-runtime>=0.24"]
+aer = ["qiskit-aer>=0.16.4"]
+runtime = ["qiskit-ibm-runtime>=0.37"]
 mitigation = ["mthree>=3.0.0"]
-cutting = ["qiskit-addon-cutting>=0.7.0"]
+cutting = ["qiskit-addon-cutting>=0.10.0"]
 report = ["jinja2>=3.1", "matplotlib>=3.7", "pandas>=2.0"]
 dev = ["pytest>=7.4", "ruff>=0.5", "mypy>=1.7", "types-PyYAML"]
 docs = ["sphinx>=8.1,<9.0", "myst-parser>=4.0", "furo>=2024.8.6"]
 all = [
-  "qiskit-aer>=0.14",
-  "qiskit-ibm-runtime>=0.24",
+  "qiskit-aer>=0.16.4",
+  "qiskit-ibm-runtime>=0.37",
   "mthree>=3.0.0",
-  "qiskit-addon-cutting>=0.7.0",
+  "qiskit-addon-cutting>=0.10.0",
   "jinja2>=3.1",
   "matplotlib>=3.7",
   "pandas>=2.0",
@@ -69,7 +69,7 @@ Repository = "https://github.com/neuralsorcerer/qbalance"
 "Bug Tracker" = "https://github.com/neuralsorcerer/qbalance/issues"
 
 [project.scripts]
-qbalance = "qbalance.cli:app"
+qbalance = "qbalance.cli:main"
 
 [project.entry-points."qbalance.backends"]
 "fake" = "qbalance.backends.fake:resolve"

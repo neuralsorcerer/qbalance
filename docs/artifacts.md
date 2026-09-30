@@ -15,7 +15,7 @@ Each index record contains:
 
 - `name`: circuit identifier,
 - `artifact`: relative artifact path,
-- `format`: usually `"qpy"` or `"qasm"`,
+- `format`: `"qpy"` (what `save_dataset` writes) or `"qasm"`,
 - `metadata`: optional JSON metadata.
 
 Create datasets programmatically with `qbalance.save_dataset(...)` and load them with `qbalance.load_dataset(...)` or `qbalance.load_data("tiny")`.
@@ -33,12 +33,14 @@ Create datasets programmatically with `qbalance.save_dataset(...)` and load them
   summary.txt
 ```
 
+The copied `dataset/` holds exactly the workload's own records: its index is written from them rather than copied from the source, so a workload adjusted on one half of a `split()` saves and reloads cleanly.
+
 `results.json` includes:
 
 - `backend_spec`,
 - `objective`: objective weights,
-- `selections`: selected strategy specs and metrics per circuit. When `allow_regression=False` falls back to the baseline, the selected metrics include guard metadata such as `selected_by_regression_guard`, `rejected_candidate_spec`, and `rejected_candidate_objective_score`;
-- `baseline_metrics`: baseline compile metrics per circuit,
+- `selections`: selected strategy specs and metrics per circuit. When `allow_regression=False` rejects the top candidate (falling back to the best non-regressing candidate, or to the baseline when every candidate regresses), the selected metrics include guard metadata such as `selected_by_regression_guard`, `rejected_candidate_spec`, and `rejected_candidate_objective_score`;
+- `baseline_metrics`: baseline strategy metrics per circuit (compile metrics, plus execution metrics when `execute=True`),
 - `selection_diagnostics`: derived per-circuit baseline-vs-selected diagnostics,
 - `candidate_rankings`: derived per-circuit objective-ranked candidate leaderboards,
 - `evaluation_history`: every evaluated candidate strategy and metrics per circuit, in evaluation order.
@@ -58,6 +60,7 @@ A minimal shape is:
       "baseline_objective_score": 4.0,
       "selected_objective_score": 3.0,
       "objective_delta": -1.0,
+      "comparable_objective_terms": ["depth"],
       "objective_improved": true,
       "objective_terms": {
         "baseline": {"depth": 4.0},
@@ -107,11 +110,13 @@ A minimal shape is:
 
 `BalancedWorkload.to_download(zip_path, overwrite=False)` creates a ZIP bundle containing the same saved workload layout.
 
+Both write their output under a temporary name beside the destination and move it into place only once it is complete, so a failed save or export leaves an existing one intact; `save_dataset` and `qbalance compile` do the same.
+
 
 Selection diagnostics are JSON-safe and finite-aware:
 
-- `baseline_objective_score`, `selected_objective_score`, and `objective_delta` are numeric only when at least one finite weighted objective term contributes on both sides; otherwise they are `null`.
-- `objective_improved` is `true`/`false` for comparable objective scores and `null` when the baseline and selected scores cannot be compared.
+- `baseline_objective_score`, `selected_objective_score`, and `objective_delta` are numeric only when at least one finite weighted objective term contributes on both sides; otherwise they are `null`. `objective_delta` is computed over `comparable_objective_terms`, the terms both sides report.
+- `objective_improved` is `true` when the selection is no worse than the baseline (`objective_delta <= 0`, so a tie counts, as it does for the regression guard), `false` when it is worse, and `null` when the baseline and selected scores cannot be compared.
 - `objective_terms` records each finite weighted objective contribution used in the score.
 - `metric_deltas` contains `baseline`, `selected`, `delta`, and `relative_delta` values for common compile metrics; invalid or non-finite inputs become `null`.
 
@@ -159,7 +164,7 @@ print(balanced.summary())
 }
 ```
 
-The top-level `metadata` block records the run context used to produce the artifact: dataset path, backend specs, execution/profile flags, shot count, and seed. `results` contains one row per backend/circuit/strategy combination. When `execute=True`, metrics can include counts, shot totals, execution errors, and ZNE probabilities depending on the strategy and backend.
+The top-level `metadata` block records the run context used to produce the artifact: dataset path, backend specs, execution/profile flags, shot count, and seed. `results` contains one row per backend/circuit/strategy combination. When `execute=True`, metrics can include counts, shot totals, M3-mitigated probabilities (`mthree_probs`), ZNE probabilities (`zne_probs`) with their realized fold factors, the reconstructed parity of a cut circuit (`cut_parity_expval`), and the reason a stage failed (`exec_error`, `mthree_error`, `zne_error`; `compile_error` and `cutting_error` replace the compile metrics of a strategy the backend could not compile or a circuit that could not be cut), depending on the strategy and backend.
 
 ## Reports
 
@@ -176,4 +181,4 @@ pip install "qbalance[report]"
 python -m qbalance report ./matrix.json --out ./report --html
 ```
 
-The report layer groups matrix rows by serialized strategy settings and aggregates numeric metrics such as depth, two-qubit operation count, estimated error, and compile time.
+The report layer groups matrix rows per backend and per strategy label and shows, for each, the means of depth, two-qubit operation count, estimated error, and compile time over its trials, sorted by mean depth and then mean two-qubit count. Each row also shows `failed trials` (`k/n`): how many of its trials recorded `compile_error`, `cutting_error`, `exec_error`, `mthree_error`, or `zne_error`. A failed execution or mitigation keeps its compile metrics, so this column is what distinguishes it from a successful row.

@@ -21,3 +21,46 @@ jobs:
           pip install -e ".[dev]"
       - name: Run tests
         run: pytest -q
+
+  # The job above installs only the dev extra, so every test that needs Aer,
+  # mthree, qiskit-addon-cutting or the IBM fake devices is skipped there --
+  # including all execution, M3, ZNE and cutting tests.  This job runs them.
+  test-all-extras:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,all]"
+      - name: Run tests
+        run: pytest -q -rs
+
+  # Installs the oldest release every declared lower bound allows, so a bound
+  # that no longer holds (a dependency whose oldest allowed release breaks
+  # with qbalance or with Qiskit 2) fails here instead of on a user's machine.
+  # The docs examples record exact outputs of specific releases and are left
+  # to the job above.
+  test-lowest-versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip uv
+          uv pip install --system --resolution lowest-direct -e ".[dev,aer,runtime,mitigation,cutting,report]"
+      # The oldest supported numpy bundles OpenBLAS 0.3.20, which picks its
+      # kernels from the CPU.  Record both, so a numerical failure here can be
+      # traced to the runner hardware it happened on.
+      - name: Show CPU and BLAS kernel
+        run: |
+          lscpu | grep "Model name"
+          OPENBLAS_VERBOSE=2 python -c "import numpy; print('numpy', numpy.__version__)"
+      - name: Run tests
+        run: pytest -q -rs --deselect tests/test_docs_examples.py::test_docs_examples

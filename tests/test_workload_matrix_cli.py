@@ -22,13 +22,15 @@ from qbalance import cli
 from qbalance.benchmarking import matrix as matrix_mod
 from qbalance.cutting import addon_cutting
 from qbalance.errors import OptionalDependencyError
+from qbalance.execution import ensemble
 from qbalance.mitigation import zne
 from qbalance.objectives import Objective, default_objective
 from qbalance.reports import common as report_common
 from qbalance.strategies import Strategy, StrategySpec
 from qbalance.transpile import suppression
+from qbalance.utils import measured_qubits_by_clbit
 from qbalance.workflow import workload as wl
-from tests.system_stubs import _Circ
+from tests.system_stubs import _Circ, as_ensemble
 
 
 def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
@@ -77,42 +79,46 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         wl,
-        "compile_one",
-        lambda circuit, backend, spec, profile: (
-            qc,
-            {
-                "depth": spec.optimization_level + 1,
-                "two_qubit_ops": 1,
-                "estimated_error": 0.1,
-                "measurement_flip_map": {},
-            },
+        "compile_ensemble",
+        as_ensemble(
+            lambda circuit, backend, spec, profile: (
+                qc,
+                {
+                    "depth": spec.optimization_level + 1,
+                    "two_qubit_ops": 1,
+                    "estimated_error": 0.1,
+                    "measurement_flip_map": {},
+                },
+            )
         ),
     )
     monkeypatch.setattr(
-        wl,
+        ensemble,
         "run_counts",
         lambda backend, compiled, shots, seed_simulator: {"00": 5, "11": 5},
     )
     monkeypatch.setattr(
-        wl, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+        ensemble, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+    )
+    monkeypatch.setattr(
+        ensemble,
+        "mitigate_twirled_counts",
+        lambda backend, raw_counts, flip_maps, measured_qubits, seed: {"00": 1.0},
+    )
+    monkeypatch.setattr(
+        ensemble, "fold_global_for_backend", lambda compiled, backend, f: compiled
+    )
+    monkeypatch.setattr(
+        ensemble,
+        "zne_extrapolate_counts",
+        lambda factors, counts_pf, degree: {"00": 1.0},
     )
     monkeypatch.setattr(
         wl,
-        "apply_mthree_mitigation",
-        lambda backend, counts, measured_qubits, shots: {"00": 1.0},
+        "prepare_cutting_experiment",
+        lambda circuit, max_subcircuit_qubits: None,
     )
-    monkeypatch.setattr(
-        wl, "fold_global_for_backend", lambda compiled, backend, f: compiled
-    )
-    monkeypatch.setattr(
-        wl, "zne_extrapolate_counts", lambda factors, counts_pf, degree: {"00": 1.0}
-    )
-    monkeypatch.setattr(
-        wl,
-        "find_cuts_best_effort",
-        lambda working, max_subcircuit_qubits: (working, {"x": 1}),
-    )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
 
     work = wl.Workload.from_dataset(ds).set_target("fake:generic:2")
@@ -140,15 +146,17 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     z = balanced.to_download(tmp_path / "bundle.zip", overwrite=True)
     assert z.exists()
 
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: (qc, {"depth": 1}))
+    monkeypatch.setattr(
+        wl, "load_compiled_ensemble", lambda entry: ([qc], {"depth": 1})
+    )
     hit_c, hit_m = wl._compile_cached(qc, object(), StrategySpec(), False, tmp_path)
-    assert hit_c is qc
+    assert hit_c == [qc]
     assert hit_m["depth"] == 1
 
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
     miss_c, miss_m = wl._compile_cached(qc, object(), StrategySpec(), False, tmp_path)
-    assert miss_c is qc
+    assert miss_c == [qc]
     assert miss_m["depth"] >= 1
 
     with pytest.raises(RuntimeError):
@@ -168,20 +176,22 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
     monkeypatch.setattr(
         matrix_mod,
-        "compile_one",
-        lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}}),
+        "compile_ensemble",
+        as_ensemble(
+            lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}})
+        ),
     )
     monkeypatch.setattr(
-        matrix_mod,
+        ensemble,
         "run_counts",
         lambda backend, compiled, shots, seed_simulator: {"0": 1},
     )
     monkeypatch.setattr(
-        matrix_mod, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
+        ensemble, "apply_measurement_untwirl_counts", lambda counts, flip_map: counts
     )
-    monkeypatch.setattr(matrix_mod, "fold_global_for_backend", lambda c, backend, f: c)
+    monkeypatch.setattr(ensemble, "fold_global_for_backend", lambda c, backend, f: c)
     monkeypatch.setattr(
-        matrix_mod,
+        ensemble,
         "zne_extrapolate_counts",
         lambda factors, counts_pf, degree: {"0": 1.0},
     )
@@ -257,11 +267,13 @@ def test_additional_branch_coverage(monkeypatch, tmp_path):
     monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
     monkeypatch.setattr(
         matrix_mod,
-        "compile_one",
-        lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}}),
+        "compile_ensemble",
+        as_ensemble(
+            lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}})
+        ),
     )
     monkeypatch.setattr(
-        matrix_mod,
+        ensemble,
         "run_counts",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
     )
@@ -372,7 +384,7 @@ def test_cli_full_commands(monkeypatch, tmp_path):
     backends.resolve_backend = lambda b: object()
     monkeypatch.setitem(sys.modules, "qbalance.backends", backends)
     tp = types.ModuleType("qbalance.transpile.pipeline")
-    tp.compile_one = lambda qc, backend, spec, profile=False: (qc, {"depth": 1})
+    tp.compile_ensemble = lambda qc, backend, spec, profile=False: ([qc], {"depth": 1})
     monkeypatch.setitem(sys.modules, "qbalance.transpile.pipeline", tp)
 
     qiskit = types.ModuleType("qiskit")
@@ -474,32 +486,27 @@ def test_workload_additional_branches(monkeypatch, tmp_path):
     monkeypatch.setattr(
         wl,
         "default_candidate_strategies",
-        lambda max_candidates, seed: [
-            StrategySpec(mthree=True, zne=True, cutting=True, max_subcircuit_qubits=1)
-        ],
+        lambda max_candidates, seed: [StrategySpec(mthree=True, zne=True)],
     )
     monkeypatch.setattr(
         wl,
-        "find_cuts_best_effort",
-        lambda working, max_subcircuit_qubits: (working, {"cuts": 1}),
-    )
-    monkeypatch.setattr(
-        wl,
-        "compile_one",
-        lambda *a, **k: (
-            _Circ(),
-            {
-                "measurement_flip_map": {0: 1},
-                "depth": 1,
-                "two_qubit_ops": 1,
-                "estimated_error": 0.1,
-            },
+        "compile_ensemble",
+        as_ensemble(
+            lambda *a, **k: (
+                _Circ(),
+                {
+                    "measurement_flip_map": {0: 1},
+                    "depth": 1,
+                    "two_qubit_ops": 1,
+                    "estimated_error": 0.1,
+                },
+            )
         ),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
     monkeypatch.setattr(
-        wl,
+        ensemble,
         "run_counts",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("exec fail")),
     )
@@ -523,17 +530,16 @@ def test_run_matrix_validates_dataset_lengths_and_precomputes_strategies(
     with pytest.raises(ValueError, match="length mismatch"):
         matrix_mod.run_matrix(tmp_path, ["b"], [StrategySpec()], tmp_path / "bad.json")
 
-    class CountingSpec:
-        def __init__(self):
+    # Serialization is pure, so each strategy is dumped once, not per trial.
+    spec = StrategySpec(optimization_level=2)
+    real_dump = StrategySpec.model_dump
+    dumped = []
 
-            self.calls = 0
+    def counting_dump(self, *args, **kwargs):
+        dumped.append(self)
+        return real_dump(self, *args, **kwargs)
 
-        def model_dump(self):
-
-            self.calls += 1
-            return {"id": 1}
-
-    spec = CountingSpec()
+    monkeypatch.setattr(StrategySpec, "model_dump", counting_dump)
     ds_ok = types.SimpleNamespace(
         records=[types.SimpleNamespace(name="c0"), types.SimpleNamespace(name="c1")],
         load_circuits=lambda: [_Circ(), _Circ()],
@@ -542,17 +548,20 @@ def test_run_matrix_validates_dataset_lengths_and_precomputes_strategies(
     monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
     monkeypatch.setattr(
         matrix_mod,
-        "compile_one",
-        lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}}),
+        "compile_ensemble",
+        as_ensemble(
+            lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}})
+        ),
     )
 
     out = matrix_mod.run_matrix(tmp_path, ["b0", "b1"], [spec], tmp_path / "ok.json")
     assert out.exists()
-    assert spec.calls == 1
+    assert dumped == [spec]
 
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert len(payload["results"]) == 4
-    assert all(entry["strategy"] == {"id": 1} for entry in payload["results"])
+    serialized = json.loads(json.dumps(real_dump(spec)))
+    assert all(entry["strategy"] == serialized for entry in payload["results"])
 
 
 def test_run_matrix_rejects_non_positive_shots(monkeypatch, tmp_path):
@@ -592,12 +601,12 @@ def test_run_matrix_rejects_non_integer_seed(monkeypatch, tmp_path):
     ds = types.SimpleNamespace(records=[], load_circuits=lambda: [])
     monkeypatch.setattr(matrix_mod, "load_dataset", lambda p: ds)
 
-    with pytest.raises(ValueError, match="seed must be an integer"):
+    with pytest.raises(ValueError, match="seed must be a non-negative integer"):
         matrix_mod.run_matrix(
             tmp_path, ["b"], [StrategySpec()], tmp_path / "x.json", seed=1.5
         )
 
-    with pytest.raises(ValueError, match="seed must be an integer"):
+    with pytest.raises(ValueError, match="seed must be a non-negative integer"):
         matrix_mod.run_matrix(
             tmp_path, ["b"], [StrategySpec()], tmp_path / "x.json", seed=True
         )
@@ -845,7 +854,7 @@ def test_compile_cache_separates_profile_mode(monkeypatch, tmp_path):
         return circuit, metrics
 
     monkeypatch.setattr(wl, "fingerprint_circuit", lambda circuit: "fingerprint")
-    monkeypatch.setattr(wl, "compile_one", fake_compile)
+    monkeypatch.setattr(wl, "compile_ensemble", as_ensemble(fake_compile))
 
     from qiskit import QuantumCircuit
 
@@ -1308,6 +1317,13 @@ def test_cli_seed_and_cache_options_forwarded(monkeypatch, tmp_path):
     cli.matrix_cmd(tmp_path, ["b"], tmp_path / "m.json", seed=456, shots=88)
     assert matrix_kwargs["seed"] == 456
     assert matrix_kwargs["shots"] == 88
+    # A single flip pattern relabels readout error instead of averaging it.
+    twirled = [
+        spec
+        for spec in matrix_kwargs["strategies"]
+        if spec.measurement_twirling or spec.pauli_twirling
+    ]
+    assert twirled and all(spec.num_twirls > 1 for spec in twirled)
 
 
 def test_workload_adjust_validates_numeric_options(tmp_path):
@@ -1344,8 +1360,10 @@ def test_run_matrix_writes_reproducibility_metadata(monkeypatch, tmp_path):
     monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
     monkeypatch.setattr(
         matrix_mod,
-        "compile_one",
-        lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}}),
+        "compile_ensemble",
+        as_ensemble(
+            lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}})
+        ),
     )
 
     out = matrix_mod.run_matrix(
@@ -1394,7 +1412,7 @@ def test_workload_adjust_accepts_integral_types_and_cache_root_string(
             "compile_time_s": 0.0,
         }
 
-    monkeypatch.setattr(wl, "_compile_cached", fake_compile_cached)
+    monkeypatch.setattr(wl, "_compile_cached", as_ensemble(fake_compile_cached))
     result = (
         wl.Workload.from_dataset(ds)
         .set_target("b")
@@ -1431,7 +1449,7 @@ def test_bandit_skips_non_finite_observations(monkeypatch, tmp_path):
             return circuit, {"depth": float("inf")}
         return circuit, {"depth": 1, "two_qubit_ops": 0, "estimated_error": 0.0}
 
-    monkeypatch.setattr(wl, "_compile_cached", fake_compile_cached)
+    monkeypatch.setattr(wl, "_compile_cached", as_ensemble(fake_compile_cached))
     result = (
         wl.Workload.from_dataset(ds)
         .set_target("b")
@@ -1635,8 +1653,57 @@ def test_adjust_threads_the_backend_spec_into_the_compile_cache_key(
         cache_root=tmp_path / "cache",
     )
 
+    from qbalance.backends import resolve_backend
+
+    fingerprint = wl._calibration_fingerprint(resolve_backend("fake:generic:5"))
     assert seen
-    assert set(seen) == {"fake:generic:5"}
+    assert set(seen) == {f"fake:generic:5|cal={fingerprint}"}
+
+
+def test_a_recalibrated_backend_does_not_reuse_stale_compiles(monkeypatch, tmp_path):
+    """Regression: the compile cache ignored calibration data.
+
+    A device keeps its name and spec across recalibrations, but the
+    noise-aware layout and ``estimated_error`` derive from its error rates, so
+    a cache keyed on the spec kept serving layouts and error estimates computed
+    from calibrations that no longer applied.
+    """
+    pytest.importorskip("qiskit")
+    from qbalance.backends import resolve_backend
+    from qbalance.builtin_data import _make_tiny
+    from qbalance.dataset import save_dataset
+
+    before = resolve_backend("fake:generic:5")
+    after = resolve_backend("fake:generic:5")
+    assert wl._calibration_fingerprint(before) == wl._calibration_fingerprint(after)
+    # Recalibrate: every two-qubit gate on the device gets worse.
+    for name in after.target.operation_names:
+        for qargs, props in after.target[name].items():
+            if qargs is not None and len(qargs) == 2 and props is not None:
+                props.error = min(1.0, 5 * (props.error or 0.01))
+    assert wl._calibration_fingerprint(before) != wl._calibration_fingerprint(after)
+    assert wl._calibration_fingerprint(object()) == "none"
+    # A target whose operations cannot be listed cannot be described.
+    broken = types.SimpleNamespace(target=types.SimpleNamespace(operation_names=None))
+    assert wl._calibration_fingerprint(broken) == "unknown"
+
+    save_dataset(tmp_path / "ds", _make_tiny()[:1], overwrite=True)
+    spec = StrategySpec(optimization_level=1, routing_method="sabre")
+
+    def _adjust(backend):
+        monkeypatch.setattr(wl, "resolve_backend", lambda _spec: backend)
+        balanced = (
+            wl.Workload.from_path(tmp_path / "ds")
+            .set_target("fake:generic:5")
+            .adjust(strategies=[spec], cache_root=tmp_path / "cache")
+        )
+        (selection,) = balanced.selections.values()
+        return selection.metrics["estimated_error"]
+
+    stale = _adjust(before)
+    fresh = _adjust(after)
+    assert fresh > stale
+    assert _adjust(before) == stale
 
 
 def test_compile_cache_survives_a_corrupt_entry(tmp_path, monkeypatch):
@@ -1776,7 +1843,7 @@ def test_a_skipped_cutting_candidate_says_why(monkeypatch, caplog):
     """
     monkeypatch.setattr(
         wl,
-        "find_cuts_best_effort",
+        "prepare_cutting_experiment",
         lambda circuit, width: (_ for _ in ()).throw(RuntimeError("cannot cut")),
     )
 
@@ -1793,9 +1860,62 @@ def test_a_skipped_cutting_candidate_says_why(monkeypatch, caplog):
             cache_root=None,
         )
 
-    assert metrics is None
+    # Recorded as infeasible, with the reason, rather than silently dropped.
+    assert metrics["cutting_error"] == "cannot cut"
+    assert metrics["strategy_failure_reason"] == "cutting_failed"
     assert "cannot cut" in caplog.text
-    assert "Skipping candidate" in caplog.text
+    assert "Candidate is infeasible" in caplog.text
+
+
+def test_executed_runs_are_reproducible_cold_or_warm(tmp_path):
+    """A fixed seed reproduces execution and mitigation results too.
+
+    Twirl instances, M3 calibration and ZNE folds all run on seeded
+    simulators, so two cold-cache runs, and a warm-cache run whose compiled
+    circuits come back from the QPY cache, must agree on every execution
+    metric -- not just on the compile metrics.
+    """
+    pytest.importorskip("qiskit_aer")
+    pytest.importorskip("mthree")
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+    from qbalance.objectives import Objective
+
+    bell = QuantumCircuit(2, 2, name="bell")
+    bell.h(0)
+    bell.cx(0, 1)
+    bell.measure([0, 1], [0, 1])
+    save_dataset(tmp_path / "ds", [bell])
+    specs = [
+        StrategySpec(optimization_level=1, routing_method="sabre"),
+        StrategySpec(measurement_twirling=True, num_twirls=3, mthree=True),
+        StrategySpec(measurement_twirling=True, num_twirls=3, zne=True),
+    ]
+    objective = Objective({"depth": 1.0, "raw_parity_expval": -1.0})
+
+    def run(cache_name):
+        balanced = (
+            wl.Workload.from_path(tmp_path / "ds")
+            .set_target("fake:generic:5")
+            .adjust(
+                strategies=specs,
+                objective=objective,
+                execute=True,
+                shots=500,
+                seed=3,
+                cache_root=tmp_path / cache_name,
+            )
+        )
+        return [
+            {k: v for k, v in h.metrics.items() if k != "compile_time_s"}
+            for h in balanced.evaluation_history["bell"]
+        ]
+
+    cold = run("cache-a")
+    assert cold == run("cache-b")
+    assert cold == run("cache-a")  # warm: circuits reloaded from the cache
+    assert {"mitigated_parity_expval", "zne_parity_expval"} <= set().union(*cold)
 
 
 def test_adjust_is_reproducible_across_cold_caches(tmp_path):
@@ -1991,7 +2111,8 @@ def test_summary_reports_how_many_circuits_improved(tmp_path):
     line = next(
         line for line in balanced.summary().splitlines() if "objective deltas" in line
     )
-    assert "improved=2/3" in line
+    # The headline counts strict gains; a tie is reported as unchanged.
+    assert "improved=1/3 unchanged=1/3" in line
 
 
 def test_to_download_writes_a_fresh_zip_without_overwrite(tmp_path):
@@ -2083,7 +2204,7 @@ def test_selection_diagnostics_reports_relative_deltas(tmp_path):
     }
 
 
-def test_final_measurement_qubits_skips_malformed_measurements():
+def test_measured_qubits_by_clbit_skips_malformed_measurements():
     """Only one-qubit/one-clbit measurements define the clbit -> qubit map.
 
     A measurement carrying more than one qubit or no clbit at all cannot say
@@ -2101,7 +2222,7 @@ def test_final_measurement_qubits_skips_malformed_measurements():
             (_I("barrier"), [_Q(0)], []),
         ]
 
-    assert wl._final_measurement_qubits(_MalformedCirc()) == [2]
+    assert measured_qubits_by_clbit(_MalformedCirc()) == [2]
 
 
 def test_selection_diagnostics_handles_a_metric_present_on_only_one_side(tmp_path):
@@ -2155,6 +2276,69 @@ def _one_circuit_workload(tmp_path, name="ds_dl"):
     )
 
 
+def _file_contents(root):
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def test_a_failed_overwrite_keeps_the_previous_save(tmp_path, monkeypatch):
+    """Regression: save(overwrite=True) deleted out_dir before writing.
+
+    A failure while writing -- a full disk, an unreadable artifact -- then
+    left a half-written directory where a complete earlier save had been.
+    """
+    balanced = _one_circuit_workload(tmp_path, name="ds_keep")
+    out = tmp_path / "saved"
+    balanced.save(out)
+    before = _file_contents(out)
+
+    def _disk_full(*a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wl.shutil, "copy2", _disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        balanced.save(out, overwrite=True)
+
+    assert _file_contents(out) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ds_keep", "saved"]
+
+
+def test_a_failed_export_keeps_the_previous_archive(tmp_path, monkeypatch):
+    """Regression: to_download truncated an existing archive before writing."""
+    balanced = _one_circuit_workload(tmp_path, name="ds_zip_keep")
+    zip_path = tmp_path / "workload.zip"
+    zip_path.write_bytes(b"precious")
+
+    def _disk_full(self, *a, **k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(wl.zipfile.ZipFile, "write", _disk_full)
+    with pytest.raises(OSError, match="disk full"):
+        balanced.to_download(zip_path, overwrite=True)
+
+    assert zip_path.read_bytes() == b"precious"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["ds_zip_keep", "workload.zip"]
+
+
+def test_save_treats_a_dangling_link_as_an_existing_path(tmp_path):
+    """A dangling link reports exists() == False, yet a save would replace it."""
+    balanced = _one_circuit_workload(tmp_path, name="ds_link")
+    link = tmp_path / "saved"
+    try:
+        link.symlink_to(tmp_path / "missing", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+    with pytest.raises(FileExistsError):
+        balanced.save(link)
+    with pytest.raises(NotADirectoryError):
+        balanced.save(link, overwrite=True)
+    assert link.is_symlink()
+
+
 def test_to_download_refuses_to_overwrite_by_default(tmp_path):
     """Exporting must not silently destroy an existing archive."""
     balanced = _one_circuit_workload(tmp_path)
@@ -2190,6 +2374,10 @@ def test_grid_search_never_consults_the_bandit(tmp_path, monkeypatch):
     ds = wl.CircuitDataset(dsroot, [rec])
 
     class _BanditThatMustNotBeUsed:
+        def __init__(self, **kwargs):
+
+            _ = kwargs
+
         def observe(self, *a, **k):
 
             raise AssertionError("grid search must not consult the bandit")
@@ -2213,9 +2401,11 @@ def test_grid_search_never_consults_the_bandit(tmp_path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+        wl,
+        "compile_ensemble",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
 
     balanced = (
@@ -2240,9 +2430,9 @@ def test_candidate_is_not_cut_without_the_cutting_flag(tmp_path, monkeypatch):
 
         raise AssertionError("cutting must not run when spec.cutting is False")
 
-    monkeypatch.setattr(wl, "find_cuts_best_effort", _must_not_cut)
+    monkeypatch.setattr(wl, "prepare_cutting_experiment", _must_not_cut)
     monkeypatch.setattr(
-        wl, "_compile_cached", lambda *a, **k: (_Circ(), {"depth": 2.0})
+        wl, "_compile_cached", as_ensemble(lambda *a, **k: (_Circ(), {"depth": 2.0}))
     )
 
     metrics = wl._evaluate_candidate(
@@ -2260,43 +2450,73 @@ def test_candidate_is_not_cut_without_the_cutting_flag(tmp_path, monkeypatch):
     assert metrics is not None
 
 
-def test_mitigation_receives_untwirled_counts(tmp_path, monkeypatch):
-    """Measurement twirling is undone before the counts reach mitigation.
+def test_mitigation_receives_raw_counts_and_each_instance_flip_map(
+    tmp_path, monkeypatch
+):
+    """M3 corrects the counts as measured; twirl flips are undone afterwards.
 
-    Feeding twirled counts to mthree corrects the wrong bitstrings, which
-    degrades the result silently rather than raising.
+    M3 calibrates the physical readout channel.  Where a twirl flip was
+    applied, the untwirled bit's 0->1 and 1->0 error rates are swapped
+    relative to that calibration, so correcting untwirled counts silently
+    biases every asymmetric-readout result (a true 50/50 state comes back as
+    roughly 26/74 at a 20% 1->0 error rate).  The workload therefore hands
+    mitigation the raw counts of every instance together with that
+    instance's own flip map.
     """
     from tests.system_stubs import _Circ
 
-    seen: dict[str, int] = {}
+    seen: list = []
 
-    def _capture(backend, counts, **kwargs):
+    def _capture(backend, raw_counts, flip_maps, measured_qubits, seed, clbits):
 
-        seen.update(counts)
-        return {"0": 1.0}
+        assert seed == 3
+        # The stub circuit's measurement writes no classical bit it can name.
+        assert clbits is None
+        seen.append((list(raw_counts), list(flip_maps)))
+        return {"0": 0.25, "1": 0.75}
 
+    ensemble_metrics = {
+        "measurement_flip_map": {0: 1},
+        "measurement_flip_maps": [{0: 1}, {}],
+        "twirl_instances": 2,
+    }
     monkeypatch.setattr(
         wl,
         "_compile_cached",
-        lambda *a, **k: (_Circ(), {"measurement_flip_map": {0: 1}}),
+        lambda *a, **k: ([_Circ(), _Circ()], dict(ensemble_metrics)),
     )
-    monkeypatch.setattr(wl, "run_counts", lambda *a, **k: {"0": 8, "1": 2})
-    monkeypatch.setattr(wl, "apply_mthree_mitigation", _capture)
+    shots_seen: list = []
 
-    wl._evaluate_candidate(
+    def _run(backend, circuit, shots, seed_simulator):
+
+        shots_seen.append((shots, seed_simulator))
+        return {"0": 8, "1": 2} if len(shots_seen) == 1 else {"0": 1, "1": 9}
+
+    monkeypatch.setattr(ensemble, "run_counts", _run)
+    monkeypatch.setattr(ensemble, "mitigate_twirled_counts", _capture)
+
+    metrics = wl._evaluate_candidate(
         _Circ(),
         types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
-        StrategySpec(mthree=True),
+        StrategySpec(mthree=True, measurement_twirling=True, num_twirls=2),
         objective=Objective({"depth": 1.0}),
         execute=True,
-        shots=10,
-        seed=0,
+        shots=20,
+        seed=3,
         profile=False,
         cache_root=tmp_path,
     )
 
-    # clbit 0 was flipped during twirling, so every key flips back.
-    assert seen == {"1": 8, "0": 2}
+    # Every instance ran, on its own share of the shots and its own seed ...
+    assert shots_seen == [(10, 3), (10, 4)]
+    # ... mitigation saw each instance's counts exactly as measured, paired
+    # with the flip map that instance was compiled with ...
+    assert seen == [([{"0": 8, "1": 2}, {"0": 1, "1": 9}], [{0: 1}, {}])]
+    # ... and the raw metrics pool the untwirled instances: instance 0 flips
+    # back to {"1": 8, "0": 2}, instance 1 is unflipped.
+    assert metrics is not None
+    assert metrics["raw_top_prob"] == pytest.approx(17 / 20)
+    assert metrics["mitigated_top_prob"] == 0.75
 
 
 def test_compile_cache_key_separates_backends_sharing_a_class(tmp_path, monkeypatch):
@@ -2315,9 +2535,11 @@ def test_compile_cache_key_separates_backends_sharing_a_class(tmp_path, monkeypa
         return types.SimpleNamespace(dir=tmp_path)
 
     monkeypatch.setattr(wl, "get_entry", _record)
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
-    monkeypatch.setattr(wl, "compile_one", lambda *a, **k: (_Circ(), {}))
+    monkeypatch.setattr(
+        wl, "compile_ensemble", as_ensemble(lambda *a, **k: (_Circ(), {}))
+    )
     monkeypatch.setattr(wl, "fingerprint_circuit", lambda c: "fingerprint")
 
     class _Backend:
@@ -2417,9 +2639,11 @@ def test_regression_guard_is_off_by_default(tmp_path, monkeypatch):
         lambda max_candidates, seed: [StrategySpec()],
     )
     monkeypatch.setattr(
-        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+        wl,
+        "compile_ensemble",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
 
     wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust(
@@ -2463,9 +2687,11 @@ def test_adjust_does_not_use_pareto_selection_by_default(tmp_path, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        wl, "compile_one", lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})
+        wl,
+        "compile_ensemble",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
     )
-    monkeypatch.setattr(wl, "load_compiled", lambda entry: None)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
     monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
 
     balanced = (
@@ -2491,7 +2717,7 @@ def test_adjust_requires_a_positive_candidate_budget(tmp_path):
             workload.adjust(max_candidates=budget)
 
 
-def test_final_measurement_qubits_falls_back_to_the_full_width(tmp_path):
+def test_measured_qubits_by_clbit_falls_back_to_the_full_width(tmp_path):
     """With no recoverable mapping, every qubit is assumed measured in order.
 
     Returning an empty list instead would hand mthree no qubits to correct,
@@ -2511,9 +2737,9 @@ def test_final_measurement_qubits_falls_back_to_the_full_width(tmp_path):
         num_qubits = None
         data = []
 
-    assert wl._final_measurement_qubits(_NoMeasurements()) == [0, 1, 2]
-    assert wl._final_measurement_qubits(_NoWidth()) == []
-    assert wl._final_measurement_qubits(_NullWidth()) == []
+    assert measured_qubits_by_clbit(_NoMeasurements()) == [0, 1, 2]
+    assert measured_qubits_by_clbit(_NoWidth()) == []
+    assert measured_qubits_by_clbit(_NullWidth()) == []
 
 
 def test_to_download_creates_missing_parent_directories(tmp_path):
@@ -2587,8 +2813,8 @@ def test_to_download_cleanup_does_not_mask_the_original_failure(tmp_path, monkey
     def _rmtree(path, ignore_errors=False):
 
         if not armed["on"]:
-            # save() clears its own target with a plain rmtree, and that call
-            # is supposed to work -- and to fail loudly if it cannot.
+            # Anything save() removes before the archive step must behave
+            # normally; only the cleanup under the propagating error fails.
             return real_rmtree(path, ignore_errors=ignore_errors)
         if ignore_errors:
             return
@@ -2620,8 +2846,8 @@ def test_matrix_output_is_written_atomically(tmp_path, monkeypatch):
     monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
     monkeypatch.setattr(
         matrix_mod,
-        "compile_one",
-        lambda qc, backend, spec, profile: (qc, {"depth": 1.0}),
+        "compile_ensemble",
+        as_ensemble(lambda qc, backend, spec, profile: (qc, {"depth": 1.0})),
     )
 
     out_json = tmp_path / "matrix.json"
@@ -2657,10 +2883,11 @@ def test_documented_adjust_parameters_match_the_signature():
     if not doc_path.is_file():
         pytest.skip("docs are not present in this checkout")
 
+    # The table runs from its header to the first blank line.
     block = (
         doc_path.read_text(encoding="utf-8")
-        .split("`adjust` parameters:")[1]
-        .split("Validation and edge-case")[0]
+        .split("| Parameter | Default | Description |")[1]
+        .split("\n\n")[0]
     )
     documented = dict(
         re.findall(r"^\|\s*`([a-z_]+)`\s*\|\s*`([^`]*)`\s*\|", block, re.M)
@@ -2686,3 +2913,1240 @@ def test_documented_adjust_parameters_match_the_signature():
         return repr(value).replace("'", '"')
 
     assert {name: rendered(value) for name, value in actual.items()} == documented
+
+
+def test_zne_extrapolates_against_realized_fold_factors(tmp_path, monkeypatch):
+    """Regression: the fit used requested factors, not the ones folding ran.
+
+    Folding only realizes odd factors, so the default ``(1, 2, 3)`` runs at
+    ``(1, 3, 3)``.  Fitting against ``(1, 2, 3)`` placed the second sample at
+    the wrong noise level and biased the zero-noise estimate.
+    """
+    from tests.system_stubs import _Circ
+
+    captured: list[list[float]] = []
+
+    def _extrapolate(factors, counts_pf, degree):
+
+        captured.append(list(factors))
+        return {"0": 1.0}
+
+    monkeypatch.setattr(
+        wl,
+        "_compile_cached",
+        as_ensemble(lambda *a, **k: (_Circ(), {"measurement_flip_map": {}})),
+    )
+    monkeypatch.setattr(ensemble, "run_counts", lambda *a, **k: {"0": 8, "1": 2})
+    monkeypatch.setattr(ensemble, "fold_global_for_backend", lambda c, backend, f: c)
+    monkeypatch.setattr(ensemble, "zne_extrapolate_counts", _extrapolate)
+
+    metrics = wl._evaluate_candidate(
+        _Circ(),
+        types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+        StrategySpec(zne=True, zne_factors=(1.0, 2.0, 3.0, 4.0)),
+        objective=Objective({"depth": 1.0}),
+        execute=False,
+        shots=10,
+        seed=0,
+        profile=False,
+        cache_root=tmp_path,
+    )
+
+    assert captured == [[1.0, 3.0, 3.0, 5.0]]
+    assert metrics is not None
+    assert metrics["zne_realized_factors"] == [1.0, 3.0, 3.0, 5.0]
+    assert "zne_error" not in metrics
+
+    # The matrix runner extrapolates the same way.
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.h(0)
+    qc.measure(0, 0)
+    dsroot = tmp_path / "zne_matrix_ds"
+    save_dataset(dsroot, [qc])
+    captured.clear()
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_ensemble",
+        as_ensemble(
+            lambda qc, backend, spec, profile: (qc, {"measurement_flip_map": {}})
+        ),
+    )
+    monkeypatch.setattr(
+        ensemble,
+        "run_counts",
+        lambda backend, compiled, shots, seed_simulator: {"0": 1},
+    )
+    monkeypatch.setattr(ensemble, "fold_global_for_backend", lambda c, backend, f: c)
+    monkeypatch.setattr(ensemble, "zne_extrapolate_counts", _extrapolate)
+
+    out = matrix_mod.run_matrix(
+        dsroot,
+        ["b"],
+        [StrategySpec(zne=True, zne_factors=(1.0, 2.0, 3.0))],
+        tmp_path / "zne.json",
+        execute=True,
+    )
+
+    assert captured == [[1.0, 3.0, 3.0]]
+    row = json.loads(out.read_text(encoding="utf-8"))["results"][0]
+    assert row["metrics"]["zne_realized_factors"] == [1.0, 3.0, 3.0]
+
+
+def test_a_cut_candidate_whose_subexperiments_cannot_compile_is_skipped(
+    tmp_path, monkeypatch, caplog
+):
+    """A subexperiment the backend cannot run skips that one candidate.
+
+    For example a subcircuit wider than the device: the failure belongs to
+    this candidate and must not abort the whole run.
+    """
+    from qbalance.cutting.addon_cutting import CuttingExperiment
+    from tests.system_stubs import _Circ
+
+    experiment = CuttingExperiment(
+        subexperiments={0: [_Circ()]},
+        coefficients=[(1.0, None)],
+        subobservables={0: None},
+        measured_qubits=[0],
+        metadata={"cut_count": 1, "sampling_overhead": 9.0},
+    )
+    monkeypatch.setattr(
+        wl, "prepare_cutting_experiment", lambda circuit, width: experiment
+    )
+
+    def _fail(*a, **k):
+
+        raise RuntimeError("subcircuit is wider than the device")
+
+    monkeypatch.setattr(wl, "_compile_cached", _fail)
+
+    with caplog.at_level("WARNING", logger="qbalance.workflow.workload"):
+        metrics = wl._evaluate_candidate(
+            _Circ(),
+            object(),
+            StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=3),
+            objective=default_objective(),
+            execute=False,
+            shots=10,
+            seed=0,
+            profile=False,
+            cache_root=tmp_path,
+        )
+
+    assert metrics["compile_error"] == "subcircuit is wider than the device"
+    assert metrics["strategy_failure_reason"] == "compile_failed"
+    assert metrics["sampling_overhead"] == 9.0  # the cut it could not compile
+    assert "could not be compiled" in caplog.text
+    assert "wider than the device" in caplog.text
+
+    # An uncut candidate that cannot compile is recorded as infeasible: it
+    # stays in the history with its reason instead of aborting the run --
+    # which would also stop a cut candidate from ever handling a circuit
+    # wider than the device.
+    metrics = wl._evaluate_candidate(
+        _Circ(),
+        object(),
+        StrategySpec(optimization_level=1),
+        objective=default_objective(),
+        execute=False,
+        shots=10,
+        seed=0,
+        profile=False,
+        cache_root=tmp_path,
+    )
+    assert metrics["compile_error"] == "subcircuit is wider than the device"
+    assert metrics["strategy_failed"] is True
+    assert metrics["strategy_failure_reason"] == "compile_failed"
+    assert metrics["objective_score"] == float("inf")
+
+
+def test_a_circuit_wider_than_the_backend_is_handled_by_cutting(tmp_path):
+    """Regression: one circuit wider than the device aborted the whole run.
+
+    Its uncut baseline and candidates raise TranspilerError at compile time.
+    That used to propagate out of ``adjust`` and ``run_matrix``, losing every
+    other circuit's results -- and preventing the cutting candidate, whose
+    subcircuits do fit, from ever being evaluated.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+    from qbalance.reports.common import failed_trials
+
+    wide = QuantumCircuit(7, 7, name="wide")
+    wide.h(0)
+    for qubit in range(6):
+        wide.cx(qubit, qubit + 1)
+    wide.measure(range(7), range(7))
+    bell = QuantumCircuit(2, 2, name="bell")
+    bell.h(0)
+    bell.cx(0, 1)
+    bell.measure([0, 1], [0, 1])
+    save_dataset(tmp_path / "ds", [wide, bell])
+    cut = StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=4)
+    specs = [StrategySpec(optimization_level=2), cut]
+
+    balanced = (
+        wl.Workload.from_path(tmp_path / "ds")
+        .set_target("fake:generic:5")
+        .adjust(strategies=specs, cache_root=tmp_path / "cache")
+    )
+
+    assert balanced.selections["wide"].spec == cut
+    assert balanced.selections["wide"].metrics["cut_count"] >= 1
+    assert balanced.baseline_metrics["wide"]["strategy_failure_reason"] == (
+        "compile_failed"
+    )
+    uncut = balanced.evaluation_history["wide"][0].metrics
+    assert uncut["compile_error"]
+    assert uncut["strategy_failure_reason"] == "compile_failed"
+    assert balanced.selections["bell"].spec in specs
+    # Reporting copes with a baseline that has no metrics to compare.
+    assert "circuits: 2" in balanced.summary()
+    assert balanced.selection_diagnostics()["wide"]["objective_improved"] is None
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds", ["fake:generic:5"], specs, tmp_path / "m.json"
+    )
+    rows = json.loads(out.read_text(encoding="utf-8"))["results"]
+    assert len(rows) == 4
+    assert failed_trials(rows) == 1
+    assert "compile_error" in rows[0]["metrics"]
+
+
+def test_executing_a_circuit_without_measurements_says_so():
+    from qiskit import QuantumCircuit
+
+    from qbalance.execution import run_counts
+
+    qc = QuantumCircuit(2, name="unmeasured")
+    qc.h(0)
+    with pytest.raises(ValueError, match="'unmeasured' has no measurements"):
+        run_counts(object(), qc, shots=10)
+
+
+def test_compile_cache_key_includes_the_toolchain(tmp_path, monkeypatch):
+    """A qiskit upgrade or a compile-pipeline change must miss the cache.
+
+    Otherwise results compiled by the previous toolchain keep being served as
+    if the running code had produced them.
+    """
+    from tests.system_stubs import _Circ
+
+    keys: list[str] = []
+
+    def _record(key_hash, root=None):
+
+        keys.append(key_hash)
+        return types.SimpleNamespace(dir=tmp_path)
+
+    monkeypatch.setattr(wl, "get_entry", _record)
+    monkeypatch.setattr(wl, "load_compiled_ensemble", lambda entry: None)
+    monkeypatch.setattr(wl, "save_compiled", lambda entry, compiled, m: None)
+    monkeypatch.setattr(
+        wl, "compile_ensemble", as_ensemble(lambda *a, **k: (_Circ(), {}))
+    )
+    monkeypatch.setattr(wl, "fingerprint_circuit", lambda c: "fingerprint")
+
+    def _key() -> str:
+
+        wl._compile_cached(_Circ(), object(), StrategySpec(), False, tmp_path)
+        return keys[-1]
+
+    real_qiskit_version = wl._qiskit_version
+    baseline = _key()
+    assert _key() == baseline
+
+    monkeypatch.setattr(wl, "_qiskit_version", lambda: "0.0.0-other")
+    other_qiskit = _key()
+    monkeypatch.setattr(wl, "_qiskit_version", real_qiskit_version)
+    monkeypatch.setattr(wl, "_COMPILE_CACHE_VERSION", wl._COMPILE_CACHE_VERSION + 1)
+    other_pipeline = _key()
+
+    assert len({baseline, other_qiskit, other_pipeline}) == 3
+
+
+def test_saved_workload_built_on_a_split_reloads(tmp_path):
+    """Regression: saving copied the source index, which lists both halves.
+
+    The artifacts of the records outside this workload were not copied, so
+    load_balanced_workload rejected the workload's own saved output.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    circuits = []
+    for name in ("a", "b", "c", "d"):
+        qc = QuantumCircuit(2, 2, name=name)
+        qc.h(0)
+        qc.cx(0, 1)
+        qc.measure([0, 1], [0, 1])
+        circuits.append(qc)
+    dataset = save_dataset(tmp_path / "ds", circuits)
+    train, test = dataset.split(seed=0, frac_train=0.5)
+    assert len(train) == 2 and len(test) == 2
+
+    balanced = (
+        wl.Workload.from_dataset(train)
+        .set_target("fake:generic:3")
+        .adjust(
+            strategies=[StrategySpec(optimization_level=1)],
+            cache_root=tmp_path / "cache",
+        )
+    )
+    balanced.save(tmp_path / "out")
+
+    loaded = wl.load_balanced_workload(tmp_path / "out")
+    assert sorted(loaded.dataset.names()) == sorted(train.names())
+    assert set(loaded.selections) == set(train.names())
+    assert len(loaded.dataset.load_circuits()) == 2
+
+
+def test_adjust_rejects_a_negative_seed_up_front(tmp_path):
+    """The seed seeds numpy's generator, which rejects negative values."""
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    ds = wl.CircuitDataset(tmp_path, [rec])
+
+    with pytest.raises(ValueError, match="seed must be a non-negative integer"):
+        wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust(seed=-1)
+
+
+@pytest.mark.parametrize("flag", ["pareto", "execute", "profile", "allow_regression"])
+def test_adjust_rejects_a_flag_that_is_not_a_boolean(tmp_path, flag):
+    """Regression: flags were only truth-tested, so execute="no" executed."""
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    ds = wl.CircuitDataset(tmp_path, [rec])
+
+    with pytest.raises(ValueError, match=f"{flag} must be a boolean"):
+        wl.Workload.from_dataset(ds).set_target("fake:generic:2").adjust(**{flag: "no"})
+
+
+def test_adjust_accepts_numpy_booleans_and_a_mapping_objective(tmp_path):
+    """NumPy booleans are booleans, and a weight mapping is an objective.
+
+    ``objective={"depth": 1.0}`` used to fail deep inside with
+    "'dict' object has no attribute 'score'".
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(2, 2, name="bell")
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    ds = save_dataset(tmp_path / "ds", [qc])
+    workload = wl.Workload.from_dataset(ds).set_target("fake:generic:3")
+    strategies = [StrategySpec(optimization_level=0), StrategySpec()]
+
+    balanced = workload.adjust(
+        objective={"depth": 1.0},
+        strategies=strategies,
+        pareto=np.bool_(False),
+        cache_root=tmp_path / "cache",
+    )
+    assert balanced.objective.weights == {"depth": 1.0}
+    reference = workload.adjust(
+        objective=Objective({"depth": 1.0}),
+        strategies=strategies,
+        cache_root=tmp_path / "cache",
+    )
+    assert balanced.selections["bell"].spec == reference.selections["bell"].spec
+
+    with pytest.raises(ValueError, match="objective must be an Objective"):
+        workload.adjust(objective="depth", strategies=strategies)
+
+
+def test_run_matrix_takes_strategy_mappings_and_any_iterable_of_specs(
+    tmp_path, monkeypatch
+):
+    """Strategies arrive as adjust takes them; repeats keep their rows."""
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_ensemble",
+        as_ensemble(lambda qc, backend, spec, profile: (qc, {"depth": 1.0})),
+    )
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        (spec for spec in ["b"]),
+        [{"optimization_level": 2}, StrategySpec(optimization_level=2)],
+        tmp_path / "m.json",
+    )
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["metadata"]["backends"] == ["b"]
+    assert [row["strategy"]["optimization_level"] for row in payload["results"]] == [
+        2,
+        2,
+    ]
+
+    for bad, message in [
+        ({"strategies": [{"optimisation_level": 2}]}, "Invalid strategy entry 0"),
+        ({"strategies": StrategySpec()}, "not a single strategy"),
+        ({"backend_specs": [object()]}, "backend spec strings"),
+        ({"execute": "no"}, "execute must be a boolean"),
+    ]:
+        arguments = {
+            "dataset_dir": tmp_path / "ds",
+            "backend_specs": ["b"],
+            "strategies": [StrategySpec()],
+            "out_json": tmp_path / "bad.json",
+            **bad,
+        }
+        with pytest.raises(ValueError, match=message):
+            matrix_mod.run_matrix(**arguments)
+
+
+def test_no_feasible_candidate_error_says_why():
+    """Every candidate failing the same way must say how it failed."""
+    evals = [
+        (
+            StrategySpec(optimization_level=1),
+            {
+                "strategy_failed": True,
+                "strategy_failure_reason": "execution_failed",
+                "exec_error": "No counts for experiment",
+            },
+        ),
+        (
+            StrategySpec(optimization_level=2),
+            {
+                "strategy_failed": True,
+                "strategy_failure_reason": "execution_failed",
+                "exec_error": "No counts for experiment",
+            },
+        ),
+    ]
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"No feasible candidate.*execution_failed \(No counts for experiment\)",
+    ):
+        wl._choose(evals, pareto=False, objective=default_objective())
+
+
+def test_zne_folds_and_runs_every_twirl_instance(tmp_path, monkeypatch):
+    """Each twirl instance is folded, run on its shot share, and untwirled."""
+    from tests.system_stubs import _Circ
+
+    first, second = _Circ(), _Circ()
+    monkeypatch.setattr(
+        wl,
+        "_compile_cached",
+        lambda *a, **k: (
+            [first, second],
+            {
+                "measurement_flip_map": {0: 1},
+                "measurement_flip_maps": [{0: 1}, {}],
+                "twirl_instances": 2,
+            },
+        ),
+    )
+    folds: list = []
+
+    def _fold(circuit, backend, factor):
+
+        folds.append((circuit, factor))
+        return circuit
+
+    runs: list = []
+
+    def _run(backend, circuit, shots, seed_simulator):
+
+        runs.append((circuit, shots, seed_simulator))
+        return {"0": shots}
+
+    captured: list = []
+
+    def _extrapolate(factors, counts_pf, degree):
+
+        captured.append((list(factors), [dict(c) for c in counts_pf]))
+        return {"0": 1.0}
+
+    monkeypatch.setattr(ensemble, "fold_global_for_backend", _fold)
+    monkeypatch.setattr(ensemble, "run_counts", _run)
+    monkeypatch.setattr(ensemble, "zne_extrapolate_counts", _extrapolate)
+
+    metrics = wl._evaluate_candidate(
+        _Circ(),
+        types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+        StrategySpec(zne=True, zne_factors=(1.0, 3.0)),
+        objective=Objective({"depth": 1.0}),
+        execute=False,
+        shots=11,
+        seed=5,
+        profile=False,
+        cache_root=tmp_path,
+    )
+
+    assert metrics is not None and "zne_error" not in metrics
+    # Factor 1.0 is the unfolded circuit, whose runs are the primary ones:
+    # it is neither folded nor run again.
+    assert folds == [(first, 3.0), (second, 3.0)]
+    # The unfolded run of both instances, then both instances folded, each on
+    # its own share (6 + 5 = 11) and seed.
+    assert [(shots, seed) for _, shots, seed in runs] == [(6, 5), (5, 6)] * 2
+    # Instance 0 was flipped: its "0" counts come back as "1".
+    assert captured == [([1.0, 3.0], [{"1": 6, "0": 5}, {"1": 6, "0": 5}])]
+    assert metrics["zne_parity_expval"] == 1.0
+    assert metrics["raw_parity_expval"] == pytest.approx((5 - 6) / 11)
+
+
+def test_baseline_is_executed_when_execution_is_requested(tmp_path, monkeypatch):
+    """With execute=True the baseline carries the same execution metrics.
+
+    A compile-only baseline cannot be compared with executed candidates on
+    execution-derived objective terms, which is what the regression guard
+    and the diagnostics need.
+    """
+    from tests.system_stubs import _Circ
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    ds = wl.CircuitDataset(tmp_path, [rec])
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(
+        wl,
+        "_compile_cached",
+        lambda *a, **k: ([_Circ()], {"depth": 1, "measurement_flip_map": {}}),
+    )
+    monkeypatch.setattr(ensemble, "run_counts", lambda *a, **k: {"00": 3, "11": 1})
+    objective = Objective({"depth": 1.0, "raw_top_prob": -1.0})
+
+    for execute in (True, False):
+        balanced = (
+            wl.Workload.from_dataset(ds)
+            .set_target("b")
+            .adjust(
+                strategies=[StrategySpec(optimization_level=2)],
+                objective=objective,
+                execute=execute,
+            )
+        )
+        baseline = balanced.baseline_metrics["c0"]
+        if execute:
+            assert baseline["raw_top_prob"] == 0.75
+            assert baseline["objective_score"] == pytest.approx(1.0 - 0.75)
+            diagnostics = balanced.selection_diagnostics()["c0"]
+            assert "raw_top_prob" in diagnostics["comparable_objective_terms"]
+        else:
+            assert "raw_top_prob" not in baseline
+
+
+def test_a_candidate_equal_to_the_baseline_is_not_executed_twice(tmp_path, monkeypatch):
+    """Regression: the default pool's opt1+sabre candidate re-ran the baseline.
+
+    Same spec, inputs and seeds give the same result, so the second set of
+    executions (jobs, on hardware) bought nothing.
+    """
+    from tests.system_stubs import _Circ
+
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    ds = wl.CircuitDataset(tmp_path, [rec])
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    monkeypatch.setattr(
+        wl,
+        "_compile_cached",
+        lambda *a, **k: ([_Circ()], {"depth": 1, "measurement_flip_map": {}}),
+    )
+    runs: list = []
+
+    def _run(*args, **kwargs):
+        runs.append(args)
+        return {"00": 3, "11": 1}
+
+    monkeypatch.setattr(ensemble, "run_counts", _run)
+    baseline_spec = StrategySpec(optimization_level=1, routing_method="sabre")
+
+    balanced = (
+        wl.Workload.from_dataset(ds)
+        .set_target("b")
+        .adjust(
+            strategies=[baseline_spec, StrategySpec(optimization_level=2)],
+            objective=Objective({"depth": 1.0}),
+            execute=True,
+        )
+    )
+
+    # The baseline once, the other candidate once.
+    assert len(runs) == 2
+    history = balanced.evaluation_history["c0"]
+    assert history[0].spec == baseline_spec
+    assert history[0].metrics == balanced.baseline_metrics["c0"]
+    # An independent copy: nothing done to one can leak into the other.
+    assert history[0].metrics is not balanced.baseline_metrics["c0"]
+
+
+def test_selection_diagnostics_compare_only_shared_objective_terms(tmp_path):
+    """A term only one side reports is neither an improvement nor a regression."""
+    record = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    balanced = wl.BalancedWorkload(
+        dataset=wl.CircuitDataset(tmp_path, [record]),
+        backend_spec="b",
+        selections={
+            "c0": Strategy(
+                spec=StrategySpec(mthree=True),
+                metrics={"depth": 6.0, "mitigated_top_prob": 0.9},
+            )
+        },
+        baseline_metrics={"c0": {"depth": 5.0}},
+        objective=Objective({"depth": 1.0, "mitigated_top_prob": -10.0}),
+    )
+
+    diagnostics = balanced.selection_diagnostics()["c0"]
+
+    # The full scores differ by -8, but only depth is comparable: +1.
+    assert diagnostics["baseline_objective_score"] == 5.0
+    assert diagnostics["selected_objective_score"] == pytest.approx(-3.0)
+    assert diagnostics["comparable_objective_terms"] == ["depth"]
+    assert diagnostics["objective_delta"] == 1.0
+    assert diagnostics["objective_improved"] is False
+
+
+def test_cutting_candidate_runs_its_subexperiments_end_to_end(tmp_path):
+    """Regression: cutting candidates never evaluated.
+
+    A measured circuit was rejected by the cut finder, and the cut circuit it
+    returned for unmeasured ones -- QPD placeholders -- cannot be compiled.
+    The candidate now compiles every subexperiment and, when executed,
+    reconstructs the Z-parity of the measured qubits.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import SparsePauliOp, Statevector
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(6, 6, name="chain6")
+    qc.ry(0.7, 0)
+    for qubit in range(5):
+        qc.cx(qubit, qubit + 1)
+    qc.measure(range(6), range(6))
+    exact = (
+        Statevector(qc.remove_final_measurements(inplace=False))
+        .expectation_value(SparsePauliOp("Z" * 6))
+        .real
+    )
+    dataset = save_dataset(tmp_path / "ds", [qc])
+    cut_spec = StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=4)
+
+    balanced = (
+        wl.Workload.from_dataset(dataset)
+        .set_target("aer:simulator")
+        .adjust(
+            strategies=[cut_spec],
+            execute=True,
+            shots=20_000,
+            cache_root=tmp_path / "cache",
+        )
+    )
+
+    metrics = balanced.evaluation_history["chain6"][0].metrics
+    assert "strategy_failed" not in metrics
+    assert metrics["cut_count"] >= 1
+    assert metrics["sampling_overhead"] == 9.0 ** metrics["cut_count"]
+    assert max(metrics["subcircuit_widths"]) <= 4
+    assert metrics["num_subexperiments"] > 0
+    assert metrics["cut_parity_expval"] == pytest.approx(exact, abs=0.05)
+
+    # The matrix runner evaluates cutting the same way.
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["aer:simulator"],
+        [cut_spec],
+        tmp_path / "matrix.json",
+        execute=True,
+        shots=20_000,
+    )
+    row = json.loads(out.read_text(encoding="utf-8"))["results"][0]
+    assert row["metrics"]["cut_count"] == metrics["cut_count"]
+    assert row["metrics"]["cut_parity_expval"] == pytest.approx(exact, abs=0.05)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["idle_measured_qubit", "disconnected_parts", "idle_qubit_only_widens"],
+)
+def test_cutting_respects_the_width_limit_with_idle_or_separate_qubits(case):
+    """Regression: two circuit shapes broke the width limit or crashed.
+
+    qiskit-addon-cutting labels a qubit no gate touches ``None`` and then
+    fails looking that partition up, so any cut circuit with an idle measured
+    qubit raised ``KeyError: None``.  And a circuit wider than the limit whose
+    connected parts each fit needed no cut, so it was reported as fitting and
+    run whole, wider than ``max_subcircuit_qubits``.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import SparsePauliOp, Statevector
+    from qiskit_aer import AerSimulator
+
+    from qbalance.cutting.addon_cutting import (
+        prepare_cutting_experiment,
+        run_cutting_experiment,
+    )
+    from qbalance.transpile.pipeline import compile_ensemble
+
+    if case == "idle_measured_qubit":
+        qc = QuantumCircuit(5, 5)
+        qc.ry(0.9, 0)
+        for qubit in range(3):
+            qc.cx(qubit, qubit + 1)
+        expected_cuts = 1
+    elif case == "disconnected_parts":
+        qc = QuantumCircuit(4, 4)
+        qc.ry(0.9, 0)
+        qc.cx(0, 1)
+        qc.ry(0.3, 2)
+        qc.cx(2, 3)
+        expected_cuts = 0
+    else:
+        qc = QuantumCircuit(3, 3)
+        qc.ry(0.9, 0)
+        qc.cx(0, 1)
+        expected_cuts = 0
+    qc.measure(range(qc.num_qubits), range(qc.num_qubits))
+    exact = (
+        Statevector(qc.remove_final_measurements(inplace=False))
+        .expectation_value(SparsePauliOp("Z" * qc.num_qubits))
+        .real
+    )
+
+    experiment = prepare_cutting_experiment(qc, 2)
+
+    assert experiment is not None
+    assert experiment.metadata["cut_count"] == expected_cuts
+    assert max(experiment.metadata["subcircuit_widths"]) <= 2
+    assert experiment.measured_qubits == list(range(qc.num_qubits))
+    if expected_cuts == 0:
+        assert experiment.metadata["sampling_overhead"] == 1.0
+    simulator = AerSimulator()
+    compiled = {
+        label: [compile_ensemble(sub, simulator, StrategySpec())[0][0] for sub in subs]
+        for label, subs in experiment.subexperiments.items()
+    }
+    value = run_cutting_experiment(
+        experiment, compiled, simulator, shots=40_000, seed=3
+    )
+    assert value == pytest.approx(exact, abs=0.03)
+
+
+def test_cutting_leaves_narrow_or_gateless_circuits_uncut():
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+
+    from qbalance.cutting.addon_cutting import prepare_cutting_experiment
+
+    narrow = QuantumCircuit(2, 2)
+    narrow.h(0)
+    narrow.cx(0, 1)
+    narrow.measure([0, 1], [0, 1])
+    gateless = QuantumCircuit(4, 4)
+    gateless.measure(range(4), range(4))
+
+    assert prepare_cutting_experiment(narrow, 2) is None
+    assert prepare_cutting_experiment(gateless, 2) is None
+
+
+def test_matrix_rejects_a_directory_as_output_before_running(tmp_path, monkeypatch):
+    """Regression: an --out directory failed only after every trial ran."""
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+
+    def _unexpected(*a, **k):
+        raise AssertionError("no trial may run before the output is checked")
+
+    monkeypatch.setattr(matrix_mod, "resolve_backend", _unexpected)
+    with pytest.raises(ValueError, match="is a directory"):
+        matrix_mod.run_matrix(
+            tmp_path / "ds", ["b"], [StrategySpec()], out_json=tmp_path
+        )
+
+
+def test_matrix_records_a_cutting_error_instead_of_crashing(tmp_path, monkeypatch):
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "prepare_cutting_experiment",
+        lambda circuit, width: (_ for _ in ()).throw(ValueError("mid-circuit")),
+    )
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["b"],
+        [StrategySpec(cutting=True, max_subcircuit_qubits=2)],
+        tmp_path / "m.json",
+    )
+
+    row = json.loads(out.read_text(encoding="utf-8"))["results"][0]
+    assert row["metrics"] == {"cutting_error": "mid-circuit"}
+
+
+def test_matrix_records_which_cut_failed_to_compile(tmp_path, monkeypatch):
+    """A cut whose subexperiments cannot compile keeps the cut's description.
+
+    ``adjust`` records the same keys for the same failure, so a matrix row and
+    an audit-history entry describe it identically.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.cutting.addon_cutting import CuttingExperiment
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    experiment = CuttingExperiment(
+        subexperiments={0: [_Circ()]},
+        coefficients=[(1.0, None)],
+        subobservables={0: None},
+        measured_qubits=[0],
+        metadata={"cut_count": 1, "sampling_overhead": 9.0},
+    )
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod, "prepare_cutting_experiment", lambda circuit, width: experiment
+    )
+
+    def _fail(*a, **k):
+        raise RuntimeError("subcircuit is wider than the device")
+
+    monkeypatch.setattr(matrix_mod, "compile_ensemble", _fail)
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["b"],
+        [StrategySpec(cutting=True, max_subcircuit_qubits=2)],
+        tmp_path / "m.json",
+        execute=True,
+    )
+
+    row = json.loads(out.read_text(encoding="utf-8"))["results"][0]
+    assert row["metrics"] == {
+        "compile_error": "subcircuit is wider than the device",
+        "cut_count": 1,
+        "sampling_overhead": 9.0,
+    }
+
+
+def test_matrix_runs_every_twirl_instance(tmp_path, monkeypatch):
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    first, second = object(), object()
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_ensemble",
+        lambda qc, backend, spec, profile: (
+            [first, second],
+            {"measurement_flip_maps": [{0: 1}, {}], "twirl_instances": 2},
+        ),
+    )
+    runs: list = []
+
+    def _run(backend, circuit, shots, seed_simulator):
+
+        runs.append((circuit, shots, seed_simulator))
+        return {"0": shots}
+
+    monkeypatch.setattr(ensemble, "run_counts", _run)
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["b"],
+        [StrategySpec(measurement_twirling=True, num_twirls=2)],
+        tmp_path / "m.json",
+        execute=True,
+        shots=9,
+        seed=2,
+    )
+
+    assert runs == [(first, 5, 2), (second, 4, 3)]
+    row = json.loads(out.read_text(encoding="utf-8"))["results"][0]
+    assert row["metrics"]["counts"] == {"1": 5, "0": 4}
+    assert row["metrics"]["shots"] == 9
+
+
+def test_matrix_applies_mthree_to_raw_instance_counts(tmp_path, monkeypatch):
+    """A matrix trial must honour ``mthree=True`` the way ``adjust`` does.
+
+    M3 corrects the physical readout, so it needs each instance's counts as
+    measured together with that instance's flip map, not the pooled,
+    already-untwirled counts.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    compiled = QuantumCircuit(3, 1)
+    compiled.measure(2, 0)
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: "bk")
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_ensemble",
+        lambda qc, backend, spec, profile: (
+            [compiled, compiled],
+            {"measurement_flip_maps": [{0: 1}, {}], "twirl_instances": 2},
+        ),
+    )
+    monkeypatch.setattr(
+        ensemble,
+        "run_counts",
+        lambda backend, circuit, shots, seed_simulator: {"0": shots},
+    )
+    seen: dict = {}
+
+    def _mitigate(backend, raw_counts, flip_maps, measured_qubits, seed, clbits):
+
+        seen.update(
+            backend=backend,
+            raw_counts=raw_counts,
+            flip_maps=flip_maps,
+            measured_qubits=measured_qubits,
+            seed=seed,
+            clbits=clbits,
+        )
+        return {"0": 0.5, "1": 0.5}
+
+    monkeypatch.setattr(ensemble, "mitigate_twirled_counts", _mitigate)
+    strategy = StrategySpec(measurement_twirling=True, num_twirls=2, mthree=True)
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["b"],
+        [strategy],
+        tmp_path / "m.json",
+        execute=True,
+        shots=9,
+        seed=4,
+    )
+
+    metrics = json.loads(out.read_text(encoding="utf-8"))["results"][0]["metrics"]
+    assert seen == {
+        "backend": "bk",
+        "raw_counts": [{"0": 5}, {"0": 4}],
+        "flip_maps": [{0: 1}, {}],
+        "measured_qubits": [2],
+        "seed": 4,
+        "clbits": [0],
+    }
+    assert metrics["mthree_probs"] == {"0": 0.5, "1": 0.5}
+    assert metrics["counts"] == {"1": 5, "0": 4}
+
+    def _unavailable(*args, **kwargs):
+
+        raise RuntimeError("mthree is not installed")
+
+    monkeypatch.setattr(ensemble, "mitigate_twirled_counts", _unavailable)
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["b"],
+        [strategy],
+        tmp_path / "m.json",
+        execute=True,
+        shots=9,
+    )
+
+    metrics = json.loads(out.read_text(encoding="utf-8"))["results"][0]["metrics"]
+    assert metrics["mthree_error"] == "mthree is not installed"
+    assert "mthree_probs" not in metrics
+    # A mitigation failure leaves the unmitigated result intact.
+    assert metrics["counts"] == {"1": 5, "0": 4}
+    assert "exec_error" not in metrics
+
+
+def test_matrix_reports_a_zne_failure_as_zne_error(tmp_path, monkeypatch):
+    """A failed extrapolation is not a failed execution, matching ``adjust``."""
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    monkeypatch.setattr(matrix_mod, "resolve_backend", lambda b: object())
+    monkeypatch.setattr(
+        matrix_mod,
+        "compile_ensemble",
+        lambda qc, backend, spec, profile: ([qc], {"measurement_flip_map": {}}),
+    )
+    monkeypatch.setattr(
+        ensemble,
+        "run_counts",
+        lambda backend, circuit, shots, seed_simulator: {"0": shots},
+    )
+
+    def _cannot_fold(*args, **kwargs):
+
+        raise ValueError("cannot fold a mid-circuit measurement")
+
+    monkeypatch.setattr(ensemble, "fold_global_for_backend", _cannot_fold)
+
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["b"],
+        [StrategySpec(zne=True)],
+        tmp_path / "m.json",
+        execute=True,
+        shots=8,
+    )
+
+    metrics = json.loads(out.read_text(encoding="utf-8"))["results"][0]["metrics"]
+    assert metrics["zne_error"] == "cannot fold a mid-circuit measurement"
+    assert "zne_probs" not in metrics
+    assert "exec_error" not in metrics
+    assert metrics["counts"] == {"0": 8}
+
+
+def test_bandit_observes_scores_relative_to_the_circuit_baseline():
+    """One surrogate serves every circuit, so it must not see raw scales.
+
+    Raw scores scale with circuit size; pooled, a large circuit's scores
+    would be credited to whichever strategies happened to run on it.
+    """
+    # The same 20% improvement on circuits of very different size.
+    assert wl._bandit_target(8.0, 10.0) == pytest.approx(-0.2)
+    assert wl._bandit_target(80.0, 100.0) == pytest.approx(-0.2)
+    # Negative baselines (custom objectives) keep the direction of change.
+    assert wl._bandit_target(-12.0, -10.0) == pytest.approx(-0.2)
+    assert wl._bandit_target(3.0, 0.0) == 3.0
+    for score, baseline in ((float("inf"), 1.0), (1.0, float("inf")), ("x", 1.0)):
+        assert wl._bandit_target(score, baseline) is None
+
+
+def _budget_workload(tmp_path, monkeypatch, sizes):
+    """Three circuits whose depth falls with the optimization level."""
+    from tests.system_stubs import _Circ
+
+    records = [
+        wl.CircuitRecord(name=f"c{i}", artifact=f"c{i}.qpy", format="qpy")
+        for i in range(len(sizes))
+    ]
+    circuits = [_Circ() for _ in records]
+    size_of = {id(circuit): size for circuit, size in zip(circuits, sizes)}
+    dataset = wl.CircuitDataset(tmp_path, records)
+    monkeypatch.setattr(dataset, "load_circuits", lambda: circuits)
+    monkeypatch.setattr(
+        wl,
+        "resolve_backend",
+        lambda b: types.SimpleNamespace(name=lambda: "bk", num_qubits=2),
+    )
+    calls: list = []
+
+    def _compile(circuit, backend, spec, profile, cache_root, backend_key=None):
+
+        calls.append(spec)
+        size = size_of[id(circuit)]
+        return [circuit], {"depth": size * (4 - spec.optimization_level) / 4 + 1}
+
+    monkeypatch.setattr(wl, "_compile_cached", _compile)
+    candidates = [
+        StrategySpec(optimization_level=level, seed_transpiler=seed)
+        for level in (0, 1, 2, 3)
+        for seed in (0, 1, 2)
+    ]
+    return wl.Workload.from_dataset(dataset).set_target("b"), candidates, calls
+
+
+def test_max_evaluations_caps_candidate_evaluations_per_circuit(tmp_path, monkeypatch):
+    work, candidates, _ = _budget_workload(tmp_path, monkeypatch, [10, 20, 30])
+
+    for search in ("grid", "bandit"):
+        balanced = work.adjust(
+            strategies=candidates,
+            objective=Objective({"depth": 1.0}),
+            search=search,
+            warmup=2,
+            max_evaluations=4,
+        )
+        assert all(len(h) == 4 for h in balanced.evaluation_history.values())
+        if search == "grid":
+            assert [s.spec for s in balanced.evaluation_history["c0"]] == candidates[:4]
+
+    unbudgeted = work.adjust(strategies=candidates, search="bandit", warmup=2)
+    assert all(len(h) == 12 for h in unbudgeted.evaluation_history.values())
+
+    for bad in (0, -1, 1.5, True):
+        with pytest.raises(ValueError, match="max_evaluations"):
+            work.adjust(strategies=candidates, max_evaluations=bad)
+
+
+def test_bandit_spends_a_budget_on_the_best_candidates(tmp_path, monkeypatch):
+    """Regression: bandit search evaluated every candidate, so it never mattered.
+
+    With a budget of 5 of 12 candidates, grid search only reaches the first
+    five (optimization levels 0 and 1); the surrogate must steer the rest of
+    the budget to optimization level 3 on every circuit, whatever the seed.
+    """
+    work, candidates, _ = _budget_workload(tmp_path, monkeypatch, [10, 20, 30])
+
+    for seed in range(5):
+        for search, expected in (("grid", 1), ("bandit", 3)):
+            balanced = work.adjust(
+                strategies=candidates,
+                objective=Objective({"depth": 1.0}),
+                search=search,
+                warmup=2,
+                max_evaluations=5,
+                seed=seed,
+            )
+            levels = {s.spec.optimization_level for s in balanced.selections.values()}
+            assert levels == {expected}, (search, seed, levels)
+
+
+def test_pareto_selection_weighs_the_cut_sampling_overhead():
+    """Regression: the Pareto axes ignored sampling_overhead.
+
+    A cut candidate with shallower subexperiments then dominated the uncut
+    candidate, removing it from the front, so pareto=True chose the cut even
+    though its 9x shot cost makes it the worse strategy under the objective.
+    """
+    objective = default_objective()
+    uncut = {
+        "depth": 10,
+        "two_qubit_ops": 4,
+        "estimated_error": 0.05,
+        "compile_time_s": 0.0,
+        "sampling_overhead": 1.0,
+    }
+    cut = {
+        "depth": 8,
+        "two_qubit_ops": 3,
+        "estimated_error": 0.04,
+        "compile_time_s": 0.0,
+        "sampling_overhead": 9.0,
+    }
+    for metrics in (uncut, cut):
+        metrics["objective_score"] = objective.score(metrics)
+    evals = [
+        (StrategySpec(optimization_level=1), uncut),
+        (StrategySpec(cutting=True, max_subcircuit_qubits=4), cut),
+    ]
+    assert cut["objective_score"] > uncut["objective_score"]
+
+    for pareto in (False, True):
+        chosen, _ = wl._choose(evals, pareto=pareto, objective=objective)
+        assert chosen.cutting is False, pareto
+
+
+def test_distribution_diagnostics_skip_missing_metrics_instead_of_zeroing(tmp_path):
+    """A circuit missing a metric must not enter the distances as ``0.0``.
+
+    Every selected circuit has the same depth as its baseline, so the two
+    samples are identical; an invented zero for the circuit whose baseline
+    lacks ``depth`` would make them differ.
+    """
+    dataset = wl.CircuitDataset(
+        tmp_path,
+        [wl.CircuitRecord(f"c{i}", f"c{i}.qpy", "qpy") for i in range(3)],
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={
+            "c0": Strategy(spec=StrategySpec(), metrics={"depth": 5}),
+            "c1": Strategy(spec=StrategySpec(), metrics={"depth": 5}),
+            "c2": Strategy(spec=StrategySpec(), metrics={"depth": 5}),
+        },
+        baseline_metrics={"c0": {"depth": 5}, "c1": {"depth": 5}, "c2": {}},
+    )
+
+    assert wl._finite_samples(
+        [{"depth": 5}, {}, {"depth": float("nan")}, {"depth": "7"}], "depth"
+    ) == [5.0, 7.0]
+    assert balanced.covars()["depth"] == {"emd": 0.0, "cvm": 0.0, "ks": 0.0}
+    assert "dist[depth]: EMD=0  CVM=0  KS=0" in balanced.summary()
+
+
+def _bell_workload(tmp_path):
+    from qiskit import QuantumCircuit
+
+    from qbalance import save_dataset
+
+    bell = QuantumCircuit(2, 2, name="bell")
+    bell.h(0)
+    bell.cx(0, 1)
+    bell.measure([0, 1], [0, 1])
+    dataset = save_dataset(tmp_path / "ds_objective_terms", [bell])
+    return wl.Workload.from_dataset(dataset).set_target("fake:generic:3")
+
+
+def test_adjust_warns_about_objective_terms_no_metric_reports(tmp_path, caplog):
+    """Regression: a misspelled objective term was dropped without a trace.
+
+    ``Objective.score`` skips a term whose metric is absent, so
+    ``two_qubit_op`` (for ``two_qubit_ops``) silently took no part in the
+    selection -- and an objective made only of such terms scored every
+    candidate 0 and selected the first one.
+    """
+    workload = _bell_workload(tmp_path)
+
+    with caplog.at_level("WARNING", logger="qbalance.workflow.workload"):
+        balanced = workload.adjust(
+            objective=Objective({"depth": 1.0, "two_qubit_op": 2.0}),
+            strategies=[StrategySpec(optimization_level=1)],
+            cache_root=tmp_path / "cache",
+        )
+
+    assert "'two_qubit_op'" in caplog.text
+    assert "'depth'" not in caplog.text
+    assert balanced.selections["bell"].spec == StrategySpec(optimization_level=1)
+
+
+def test_adjust_does_not_warn_when_every_objective_term_is_reported(tmp_path, caplog):
+    workload = _bell_workload(tmp_path)
+
+    with caplog.at_level("WARNING", logger="qbalance.workflow.workload"):
+        workload.adjust(
+            strategies=[StrategySpec(optimization_level=1)],
+            cache_root=tmp_path / "cache",
+        )
+
+    assert "Objective term" not in caplog.text

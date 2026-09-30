@@ -21,17 +21,7 @@ _BUILTIN_DATASETS = frozenset({"tiny"})
 
 
 def _make_tiny() -> List[Any]:
-    """Internal helper that make tiny.
-
-    Args:
-        None.
-
-    Returns:
-        List[Any] with the computed result.
-
-    Raises:
-        None.
-    """
+    """Return the circuits of the ``tiny`` dataset: ``bell``, ``ghz3`` and ``qft4``."""
     import numpy as np
     from qiskit import QuantumCircuit
 
@@ -62,16 +52,20 @@ def _make_tiny() -> List[Any]:
 
 
 def get_builtin_dataset_dir(name: str) -> Path:
-    """Return builtin dataset dir for the provided inputs.
+    """Return the directory of a built-in dataset, writing it on first use.
+
+    The dataset lives under the platform's user data directory
+    (``platformdirs.user_data_dir("qbalance")/datasets/NAME``) and is
+    reused once its index exists.
 
     Args:
-        name: Name/identifier for a circuit, dataset, or lookup record.
+        name: Built-in dataset name; ``"tiny"`` is the only one.
 
     Returns:
-        Path with the computed result.
+        The dataset directory.
 
     Raises:
-        KeyError: Raised when input validation fails or a dependent operation cannot be completed.
+        KeyError: If ``name`` is not a built-in dataset.
     """
     # Validate before the name reaches the filesystem.  It is joined straight
     # into a path, so "/abs" would discard the data directory entirely and

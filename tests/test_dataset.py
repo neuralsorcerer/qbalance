@@ -23,6 +23,7 @@ from qbalance.dataset import (
     _build_unique_name,
     _is_safe_artifact_path,
     _normalize_metadata_entry,
+    _sanitize_artifact_stem,
     load_data,
     load_dataset,
     save_dataset,
@@ -203,9 +204,9 @@ def test_save_dataset_restores_existing_dataset_when_commit_fails(
     old_artifact = dataset_dir / original.records[0].artifact
     old_payload = old_artifact.read_bytes()
 
-    import qbalance.dataset as dataset_mod
+    import qbalance.utils as utils_mod
 
-    real_replace = dataset_mod.os.replace
+    real_replace = utils_mod.os.replace
 
     def failing_commit(src, dst):
         # Fail the commit itself, and only it.  Counting calls is not enough:
@@ -217,7 +218,7 @@ def test_save_dataset_restores_existing_dataset_when_commit_fails(
             raise OSError("commit failed")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(dataset_mod.os, "replace", failing_commit)
+    monkeypatch.setattr(utils_mod.os, "replace", failing_commit)
 
     with pytest.raises(OSError, match="commit failed"):
         save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
@@ -355,6 +356,9 @@ def test_save_dataset_raises_optional_dependency_error_when_qiskit_missing(
 ):
 
     monkeypatch.setitem(sys.modules, "qiskit", types.ModuleType("qiskit"))
+    # An earlier import leaves the real submodule behind, where
+    # ``from qiskit import qpy`` would still find it.
+    monkeypatch.delitem(sys.modules, "qiskit.qpy", raising=False)
 
     with pytest.raises(OptionalDependencyError, match="qiskit"):
         save_dataset(tmp_path / "dataset", [_DummyCircuit("a")], overwrite=True)
@@ -892,7 +896,7 @@ def test_save_dataset_reports_a_commit_failure_when_there_was_no_previous_datase
     """
     from qiskit import QuantumCircuit
 
-    import qbalance.dataset as dataset_module
+    import qbalance.utils as utils_mod
 
     qc = QuantumCircuit(1, 1, name="only")
     qc.h(0)
@@ -901,7 +905,7 @@ def test_save_dataset_reports_a_commit_failure_when_there_was_no_previous_datase
     target = tmp_path / "fresh"
     assert not target.exists()
 
-    real_replace = dataset_module.os.replace
+    real_replace = utils_mod.os.replace
 
     def failing_replace(src, dst):
         # Fail only the commit itself. A restore would come from the .backup
@@ -912,12 +916,28 @@ def test_save_dataset_reports_a_commit_failure_when_there_was_no_previous_datase
             raise OSError("commit failed")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(dataset_module.os, "replace", failing_replace)
+    monkeypatch.setattr(utils_mod.os, "replace", failing_replace)
     with pytest.raises(OSError, match="commit failed"):
         save_dataset(target, [qc], overwrite=True)
 
     assert not target.exists()
     assert [p.name for p in tmp_path.iterdir()] == []
+
+
+def test_save_dataset_treats_a_dangling_link_as_an_existing_path(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+):
+    """A dangling link reports exists() == False, yet a save would replace it."""
+    _install_fake_qiskit(monkeypatch)
+    link = tmp_path / "dataset"
+    try:
+        link.symlink_to(tmp_path / "missing", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are not available here")
+
+    with pytest.raises(FileExistsError):
+        save_dataset(link, [_DummyCircuit("a")])
+    assert link.is_symlink()
 
 
 def test_save_dataset_overwrite_removes_its_backup_directory(
@@ -1014,7 +1034,7 @@ def test_save_dataset_cleanup_does_not_mask_the_original_failure(
             return
         raise OSError("rmtree refused")
 
-    monkeypatch.setattr("qbalance.dataset.shutil.rmtree", _rmtree)
+    monkeypatch.setattr("qbalance.utils.shutil.rmtree", _rmtree)
 
     with pytest.raises(ValueError, match="qpy dump failed"):
         save_dataset(tmp_path / "dataset", [_DummyCircuit("a")])
@@ -1089,7 +1109,7 @@ def test_save_dataset_survives_a_failure_removing_its_backup(
     dataset_dir = tmp_path / "dataset"
     save_dataset(dataset_dir, [_DummyCircuit("old")])
 
-    import qbalance.dataset as dataset_mod
+    import qbalance.utils as utils_mod
 
     def _rmtree(path, ignore_errors=False):
 
@@ -1097,9 +1117,68 @@ def test_save_dataset_survives_a_failure_removing_its_backup(
             return
         raise OSError("rmtree refused")
 
-    monkeypatch.setattr(dataset_mod.shutil, "rmtree", _rmtree)
+    monkeypatch.setattr(utils_mod.shutil, "rmtree", _rmtree)
 
     result = save_dataset(dataset_dir, [_DummyCircuit("new")], overwrite=True)
 
     assert result.records[0].name == "new"
     assert load_dataset(dataset_dir).records[0].name == "new"
+
+
+def test_artifact_names_are_unique_on_case_insensitive_filesystems(tmp_path):
+    """Regression: "Bell" and "bell" were saved as Bell.qpy and bell.qpy.
+
+    macOS and Windows filesystems treat those as one file, so the second
+    circuit overwrote the first while both records still pointed at it.
+    """
+    from qiskit import QuantumCircuit
+
+    upper = QuantumCircuit(1, 1, name="Bell")
+    upper.x(0)
+    upper.measure(0, 0)
+    lower = QuantumCircuit(1, 1, name="bell")
+    lower.measure(0, 0)
+
+    dataset = save_dataset(tmp_path / "ds", [upper, lower])
+
+    artifacts = [record.artifact for record in dataset.records]
+    assert len({artifact.casefold() for artifact in artifacts}) == 2
+    loaded = load_dataset(tmp_path / "ds").load_circuits()
+    assert [circuit.count_ops().get("x", 0) for circuit in loaded] == [1, 0]
+    assert _build_unique_artifact("dup", {"dup.qpy"}) == "dup_1.qpy"
+    assert _build_unique_artifact("DUP", {"dup.qpy"}) == "DUP_1.qpy"
+
+
+@pytest.mark.parametrize("name", ["con", "NUL", "com1", "Lpt9", "aux.backup"])
+def test_artifact_stems_avoid_windows_device_names(name):
+    """Windows opens a device, not a file, for "con.qpy" and friends."""
+    stem = _sanitize_artifact_stem(name, fallback="circuit_0")
+
+    assert stem.split(".", 1)[0].upper() not in {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        *(f"COM{i}" for i in range(1, 10)),
+        *(f"LPT{i}" for i in range(1, 10)),
+    }
+    assert _sanitize_artifact_stem("console", fallback="c") == "console"
+
+
+def test_load_circuits_names_the_record_when_the_loader_raises_valueerror(
+    tmp_path, monkeypatch
+):
+    """A ValueError from the deserializer still gets the record context."""
+    from qiskit import QuantumCircuit, qpy
+
+    qc = QuantumCircuit(1, 1, name="only")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+
+    def _broken(handle):
+
+        raise ValueError("bad header")
+
+    monkeypatch.setattr(qpy, "load", _broken)
+    with pytest.raises(ValueError, match=r"index 0 \('only'\).*bad header"):
+        load_dataset(tmp_path / "ds").load_circuits()

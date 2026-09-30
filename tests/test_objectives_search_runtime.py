@@ -160,6 +160,34 @@ def test_adjust_cli_loads_custom_objective(monkeypatch, tmp_path):
 
     assert captured["adjust"]["objective"].weights == {"depth": 3.0}
     assert captured["save"] == (tmp_path / "out", False)
+    # A direct call leaves Typer's option objects as defaults: no budget, and
+    # no warmup, so adjust() keeps its own default.
+    assert captured["adjust"]["max_evaluations"] is None
+    assert "warmup" not in captured["adjust"]
+
+    from typer.testing import CliRunner
+
+    result = CliRunner().invoke(
+        cli.app,
+        [
+            "adjust",
+            str(tmp_path / "dataset"),
+            "-b",
+            "fake:generic:5",
+            "-o",
+            str(tmp_path / "out2"),
+            "--search",
+            "bandit",
+            "--max-evaluations",
+            "6",
+            "--warmup",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["adjust"]["max_evaluations"] == 6
+    assert captured["adjust"]["search"] == "bandit"
+    assert captured["adjust"]["warmup"] == 2
 
 
 def test_bandit_searcher_validates_hyperparameters():
@@ -592,3 +620,109 @@ def test_strategy_spec_is_immutable():
         spec.optimization_level = 3
 
     assert spec.optimization_level == 1
+
+
+def test_default_objective_charges_the_sampling_overhead():
+    """Cutting multiplies the shots needed; uncut circuits report 1.0."""
+    objective = default_objective()
+
+    assert objective.weights["sampling_overhead"] == 1.0
+    uncut = {"depth": 10, "two_qubit_ops": 4, "sampling_overhead": 1.0}
+    modest_cut = {"depth": 8, "two_qubit_ops": 3, "sampling_overhead": 9.0}
+    deep_cut = {"depth": 2, "two_qubit_ops": 0, "sampling_overhead": 9.0}
+    # A modest depth saving does not pay for a 9x shot cost ...
+    assert objective.score(modest_cut) > objective.score(uncut)
+    # ... while a large one still can.
+    assert objective.score(deep_cut) < objective.score(uncut)
+
+
+def test_featurize_distinguishes_measurement_twirl_ensemble_sizes():
+    """num_twirls sets the flip-pattern count for measurement twirling too."""
+    from qbalance.search.bandit import _featurize
+
+    one = _featurize(StrategySpec(measurement_twirling=True, num_twirls=1))
+    eight = _featurize(StrategySpec(measurement_twirling=True, num_twirls=8))
+
+    assert not (one == eight).all()
+    # Without any twirling the count is irrelevant and must not leak in.
+    assert (_featurize(StrategySpec(num_twirls=8)) == _featurize(StrategySpec())).all()
+
+
+def test_bandit_noise_variance_can_track_the_observed_scores():
+    """``sigma2=None`` sizes the noise to the data instead of assuming 1.0."""
+    searcher = BanditSearcher(sigma2=None)
+    assert searcher._noise_variance() == 1.0  # nothing observed yet
+
+    scores = [0.10, -0.05, 0.02, -0.20]
+    for level, score in enumerate(scores):
+        searcher.observe(StrategySpec(optimization_level=level), score)
+
+    assert searcher._noise_variance() == pytest.approx(np.var(scores, ddof=1))
+    assert BanditSearcher(sigma2=2.0)._noise_variance() == 2.0
+
+    # Identical scores still leave a strictly positive variance.
+    flat = BanditSearcher(sigma2=None)
+    for level in range(3):
+        flat.observe(StrategySpec(optimization_level=level), 0.5)
+    assert flat._noise_variance() > 0.0
+
+
+def test_default_twirl_candidates_average_over_several_instances():
+    """A single measurement-twirl instance is one fixed flip pattern.
+
+    That relabels which outcomes suffer the larger readout error instead of
+    symmetrizing it, so no default candidate may twirl with one instance.
+    """
+    pool = default_candidate_strategies(max_candidates=1000)
+    twirled = [
+        spec for spec in pool if spec.measurement_twirling or spec.pauli_twirling
+    ]
+    assert {(spec.mthree, spec.zne) for spec in twirled} >= {
+        (False, False),
+        (True, False),
+        (False, True),
+    }
+    assert all(spec.num_twirls > 1 for spec in twirled)
+
+
+def test_default_cutting_candidate_places_subexperiments_on_good_qubits():
+    """Regression: the cut candidate compiled onto qubits 0.. regardless of error.
+
+    At optimization level 1 Qiskit keeps a small circuit on its trivial layout
+    whenever that fits the coupling map.  On an IBM Torino snapshot, whose
+    qubit 0 has a 17% readout error, every subexperiment of a cut 6-qubit
+    chain landed there: estimated error 0.36 and a reconstructed parity of
+    0.33 (ideal 1.0).  With the noise-aware layout it is 0.08 and 0.80.
+    """
+    fake = pytest.importorskip("qiskit_ibm_runtime.fake_provider")
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+
+    from qbalance.cutting.addon_cutting import (
+        combine_subexperiment_metrics,
+        prepare_cutting_experiment,
+    )
+    from qbalance.transpile.pipeline import NOISE_AWARE_LAYOUT, compile_ensemble
+
+    (cut,) = [s for s in default_candidate_strategies(max_candidates=100) if s.cutting]
+    assert cut.layout_method == NOISE_AWARE_LAYOUT
+
+    backend = fake.FakeTorino()
+    chain = QuantumCircuit(6, 6)
+    chain.ry(0.7, 0)
+    for qubit in range(5):
+        chain.cx(qubit, qubit + 1)
+    chain.measure(range(6), range(6))
+    experiment = prepare_cutting_experiment(chain, 3)
+
+    def estimated_error(spec):
+        metrics = [
+            compile_ensemble(sub, backend, spec)[1]
+            for subs in experiment.subexperiments.values()
+            for sub in subs
+        ]
+        return combine_subexperiment_metrics(metrics, experiment)["estimated_error"]
+
+    trivial = StrategySpec(optimization_level=1, cutting=True, max_subcircuit_qubits=3)
+    placed = cut.model_copy(update={"max_subcircuit_qubits": 3})
+    assert estimated_error(placed) < 0.5 * estimated_error(trivial)

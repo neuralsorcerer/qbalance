@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -16,18 +16,12 @@ from qbalance.strategies import StrategySpec
 
 
 def _featurize(spec: StrategySpec) -> np.ndarray:
-    # One-hot-ish hand features
+    """Return the surrogate's feature vector of ``spec``.
 
-    """Internal helper that featurize.
-
-    Args:
-        spec: Strategy/backend specification controlling compilation behavior.
-
-    Returns:
-        np.ndarray with the computed result.
-
-    Raises:
-        None.
+    A constant, the optimization level, indicators for SABRE routing, SABRE
+    layout, the noise-aware layout, Pauli twirling, dynamical decoupling,
+    measurement twirling, M3, ZNE and cutting, and ``num_twirls`` when the
+    strategy twirls (0 otherwise).
     """
     return np.asarray(
         [
@@ -37,7 +31,12 @@ def _featurize(spec: StrategySpec) -> np.ndarray:
             1.0 if spec.layout_method == "sabre" else 0.0,
             1.0 if spec.layout_method == "qbalance_noise_aware" else 0.0,
             1.0 if spec.pauli_twirling else 0.0,
-            float(spec.num_twirls) if spec.pauli_twirling else 0.0,
+            # num_twirls is the ensemble size for Pauli and measurement twirling.
+            (
+                float(spec.num_twirls)
+                if spec.pauli_twirling or spec.measurement_twirling
+                else 0.0
+            ),
             1.0 if spec.dynamical_decoupling else 0.0,
             1.0 if spec.measurement_twirling else 0.0,
             1.0 if spec.mthree else 0.0,
@@ -48,49 +47,58 @@ def _featurize(spec: StrategySpec) -> np.ndarray:
     )
 
 
+# Observation-noise variance assumed before two scores have been observed.
+_PRIOR_NOISE_VARIANCE = 1.0
+_MIN_NOISE_VARIANCE = 1e-6
+
+
 @dataclass
 class BanditSearcher:
-    """Thompson-sampling style search over candidate strategies.
+    """Thompson-sampling search over candidate strategies.
 
-    We keep a Bayesian linear regression surrogate over feature vectors and sample coefficients.
+    A Bayesian linear regression of a candidate's score on its features
+    (see :func:`_featurize`), with prior ``w ~ N(0, I / alpha)`` and
+    observation noise of variance ``sigma2``; each proposal samples ``w``
+    from the posterior and picks the candidate it scores lowest.
+
+    Args:
+        alpha: Prior precision of the feature weights.
+        sigma2: Observation-noise variance.  ``None`` matches it to the sample
+            variance of the scores observed so far, which keeps exploration
+            calibrated whatever their scale; a fixed value is only right for
+            scores on a known scale.
     """
 
     alpha: float = 1.0
-    sigma2: float = 1.0
+    sigma2: Optional[float] = 1.0
 
     def __post_init__(self) -> None:
-        """Validate and normalize dataclass state immediately after initialization.
-
-        Args:
-            None.
-
-        Returns:
-            None. This method updates state or performs side effects only.
+        """Validate the hyperparameters and start with no observations.
 
         Raises:
-            ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+            ValueError: If ``alpha`` is not finite and positive, or ``sigma2``
+                is neither ``None`` nor finite and positive.
         """
         if not math.isfinite(self.alpha) or self.alpha <= 0.0:
             raise ValueError("alpha must be a finite positive value")
-        if not math.isfinite(self.sigma2) or self.sigma2 <= 0.0:
-            raise ValueError("sigma2 must be a finite positive value")
+        if self.sigma2 is not None and (
+            not math.isfinite(self.sigma2) or self.sigma2 <= 0.0
+        ):
+            raise ValueError("sigma2 must be a finite positive value or None")
 
         self._feature_dim = len(_featurize(StrategySpec()))
         self._X: List[np.ndarray] = []
         self._y: List[float] = []
 
     def observe(self, spec: StrategySpec, score: float) -> None:
-        """Observe used by the qbalance workflow.
+        """Record the score of an evaluated strategy (lower is better).
 
         Args:
-            spec: Strategy/backend specification controlling compilation behavior.
-            score: Score value consumed by this routine.
-
-        Returns:
-            None. This method updates state or performs side effects only.
+            spec: The evaluated strategy.
+            score: Its score.
 
         Raises:
-            ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+            ValueError: If ``score`` is not finite.
         """
         score_value = float(score)
         if not math.isfinite(score_value):
@@ -100,16 +108,11 @@ class BanditSearcher:
         self._y.append(score_value)
 
     def _posterior(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Internal helper that posterior.
+        """Return the posterior mean and precision matrix of the weights.
 
-        Args:
-            None.
-
-        Returns:
-            Tuple[np.ndarray, np.ndarray] with the computed result.
-
-        Raises:
-            None.
+        The precision is ``alpha * I + X.T @ X / sigma2`` and the mean solves
+        ``precision @ mean = X.T @ y / sigma2``; with no observations they are
+        the prior's, zero and ``alpha * I``.
         """
         if not self._X:
             mean = np.zeros(self._feature_dim)
@@ -118,26 +121,35 @@ class BanditSearcher:
 
         X = np.vstack(self._X)
         y = np.asarray(self._y)
+        sigma2 = self._noise_variance()
         # Ridge posterior precision (inverse covariance).
-        precision = self.alpha * np.eye(X.shape[1]) + (X.T @ X) / self.sigma2
-        rhs = (X.T @ y) / self.sigma2
+        precision = self.alpha * np.eye(X.shape[1]) + (X.T @ X) / sigma2
+        rhs = (X.T @ y) / sigma2
         mean = np.linalg.solve(precision, rhs)
         return mean, precision
+
+    def _noise_variance(self) -> float:
+        """Return the observation-noise variance the posterior assumes."""
+        if self.sigma2 is not None:
+            return float(self.sigma2)
+        if len(self._y) < 2:
+            return _PRIOR_NOISE_VARIANCE
+        return max(float(np.var(self._y, ddof=1)), _MIN_NOISE_VARIANCE)
 
     def propose(
         self, candidates: Sequence[StrategySpec], rng: np.random.Generator
     ) -> StrategySpec:
-        """Propose used by the qbalance workflow.
+        """Return the candidate a posterior sample of the weights scores lowest.
 
         Args:
-            candidates: Candidate strategies considered during selection.
-            rng: NumPy random generator used for stochastic selection.
+            candidates: Strategies to choose from.
+            rng: Generator the weights are sampled with.
 
         Returns:
-            StrategySpec with the computed result.
+            One of ``candidates``; ties go to the first.
 
         Raises:
-            ValueError: Raised when input validation fails or a dependent operation cannot be completed.
+            ValueError: If ``candidates`` is empty.
         """
         if not candidates:
             raise ValueError("candidates must contain at least one strategy")

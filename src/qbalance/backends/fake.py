@@ -113,21 +113,26 @@ def _resolve_ibm(spec: str, parts: list[str]) -> Any:
 
 
 def resolve(spec: str) -> Any:
-    """Resolve a backend/plugin implementation from user-provided configuration.
+    """Build a fake backend from a ``fake:`` backend spec.
 
-    Supported forms are ``fake:generic:N`` and ``fake:generic:N:SEED`` for
-    deterministic :class:`GenericBackendV2` instances, and ``fake:ibm:NAME``
-    for IBM fake-device snapshots.
+    ``fake:generic:N`` and ``fake:generic:N:SEED`` give a
+    :class:`GenericBackendV2` with ``N >= 2`` qubits whose calibration data
+    is drawn from ``SEED`` (0 by default), so the same spec always yields
+    the same backend.  ``fake:ibm:NAME`` gives an IBM fake-device snapshot
+    from qiskit-ibm-runtime; ``NAME`` may be the class name
+    (``FakeTorino``) or the device name (``torino``).
 
     Args:
-        spec: Strategy/backend specification controlling compilation behavior.
+        spec: The backend spec.
 
     Returns:
-        Any with the computed result.
+        The backend instance.
 
     Raises:
-        QBalanceError: Raised when input validation fails or a dependent operation cannot be completed.
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        QBalanceError: If the spec is malformed, names an unknown mode or
+            device, or the backend cannot be built.
+        OptionalDependencyError: If ``fake:ibm`` is requested without
+            qiskit-ibm-runtime installed.
     """
     parts = [part.strip() for part in spec.split(":")]
     if len(parts) < 3 or any(part == "" for part in parts[:3]):

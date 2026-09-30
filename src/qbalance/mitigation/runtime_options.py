@@ -16,20 +16,23 @@ def build_runtime_estimator_options(
     enable_zne: Optional[bool] = None,
     layer_noise_model: Any = None,
 ) -> Dict[str, Any]:
-    """Build runtime estimator options from the provided configuration parameters.
+    """Return an IBM Runtime ``EstimatorV2`` options mapping.
+
+    Options left as ``None`` are omitted.  This is a standalone helper:
+    qbalance's own compile and execute path does not call it.
 
     Args:
-        resilience_level (default: 1): Resilience level value consumed by this routine.
-        enable_gate_twirling (default: None): Enable gate twirling value consumed by this routine.
-        enable_measurement_mitigation (default: None): Enable measurement mitigation value consumed by this routine.
-        enable_zne (default: None): Enable zne value consumed by this routine.
-        layer_noise_model (default: None): Layer noise model value consumed by this routine.
+        resilience_level (default: 1): ``resilience_level``, cast to int.
+        enable_gate_twirling (default: None): ``twirling.enable_gates``.
+        enable_measurement_mitigation (default: None):
+            ``resilience.measure_mitigation``.
+        enable_zne (default: None): ``resilience.zne_mitigation``.
+        layer_noise_model (default: None): ``resilience.layer_noise_model``,
+            passed through unchanged.
 
     Returns:
-        Dict[str, Any] with the computed result.
-
-    Raises:
-        None.
+        The nested options dict, for example ``{"resilience_level": 2,
+        "twirling": {"enable_gates": True}}``.
     """
     opts: Dict[str, Any] = {"resilience_level": int(resilience_level)}
     if enable_gate_twirling is not None:

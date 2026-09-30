@@ -94,7 +94,8 @@ Create `strategies.json`:
       "optimization_level": 2,
       "layout_method": "qbalance_noise_aware",
       "routing_method": "sabre",
-      "measurement_twirling": true
+      "measurement_twirling": true,
+      "num_twirls": 8
     }
   ]
 }
@@ -115,4 +116,4 @@ python -m qbalance matrix ./circuits \
   --strategies ./strategies.json
 ```
 
-When explicit strategies are supplied to `adjust`, `max_candidates` is ignored because the JSON file is the candidate set. Use `seed`/`--seed` to make randomized candidate ordering and execution helpers reproducible, and `cache_root`/`--cache-root` to choose where compiled-circuit cache artifacts are stored. Add `--no-regression` (or `allow_regression=False` in Python) when production runs should fall back to the baseline compile instead of accepting a best candidate with a worse objective score; equal objective scores and baselines with no finite objective score are left unchanged.
+When explicit strategies are supplied to `adjust`, `max_candidates` is ignored because the JSON file is the candidate set. Use `seed`/`--seed` to make randomized candidate ordering and execution helpers reproducible (the default objective also weights wall-clock `compile_time_s`, which decides between candidates that compile identically; drop that term, as in the [README](https://github.com/neuralsorcerer/qbalance#2b-reproducibility-of-objective_score), when selections must repeat exactly across cold-cache runs), and `cache_root`/`--cache-root` to choose where compiled-circuit cache artifacts are stored. Add `--no-regression` (or `allow_regression=False` in Python) when production runs must never select a candidate with a worse objective score than the baseline: a regressing top candidate is replaced by the best one that does not regress, or by the baseline strategy when every candidate regresses; equal objective scores and baselines with no finite objective score are left unchanged.

@@ -11,16 +11,12 @@ from typing import Dict, List
 
 
 def list_plugins() -> Dict[str, List[str]]:
-    """List plugins used by the qbalance workflow.
+    """Return the names registered in each qbalance entry-point group, sorted.
 
-    Args:
-        None.
-
-    Returns:
-        Dict[str, List[str]] with the computed result.
-
-    Raises:
-        None.
+    The groups are ``qbalance.backends`` (resolved by
+    :func:`qbalance.backends.resolve_backend`), ``qbalance.objectives`` and
+    ``qbalance.reports``; the last two are listed only, nothing resolves
+    them.
     """
     eps = entry_points()
     groups = ["qbalance.backends", "qbalance.objectives", "qbalance.reports"]

@@ -16,17 +16,24 @@ log = get_logger(__name__)
 
 
 def resolve(spec: str) -> Any:
-    """Resolve a backend/plugin implementation from user-provided configuration.
+    """Build an Aer simulator from an ``aer:`` backend spec.
+
+    ``aer:simulator`` is an ideal ``AerSimulator``, and
+    ``aer:from_backend:SPEC`` one carrying the noise model and coupling map
+    of the backend ``SPEC`` resolves to (``aer:from_backend:fake:ibm:fez``,
+    say).
 
     Args:
-        spec: Strategy/backend specification controlling compilation behavior.
+        spec: The backend spec, ``aer:MODE[:...]``.
 
     Returns:
-        Any with the computed result.
+        The ``AerSimulator``.
 
     Raises:
-        QBalanceError: Raised when input validation fails or a dependent operation cannot be completed.
-        OptionalDependencyError: Raised when input validation fails or a dependent operation cannot be completed.
+        QBalanceError: If the spec is malformed, names an unknown mode, or
+            the nested spec cannot be resolved.
+        OptionalDependencyError: If qiskit-aer (or a package the nested
+            backend needs) is not installed.
     """
     # Strip each part so the same tolerant spelling the fake plugin accepts
     # ("aer : simulator") resolves here too.
