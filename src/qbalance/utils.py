@@ -497,8 +497,10 @@ def measured_qubits_by_clbit(circuit: Any) -> list[int]:
         Physical qubit index per measured classical bit.
 
     Raises:
-        None.
+        ValueError: If a control-flow block of ``circuit`` measures (see
+            :func:`_reject_conditional_measurements`).
     """
+    _reject_conditional_measurements(circuit)
     mapping = _measurement_map(circuit)
     if not mapping:
         return list(range(int(getattr(circuit, "num_qubits", 0) or 0)))
@@ -517,9 +519,58 @@ def measured_clbits(circuit: Any) -> Optional[list[int]]:
         The measured classical bit indices, or ``None`` when no per-bit
         mapping can be recovered (matching the fallback of
         :func:`measured_qubits_by_clbit`).
+
+    Raises:
+        ValueError: If a control-flow block of ``circuit`` measures (see
+            :func:`_reject_conditional_measurements`).
     """
+    _reject_conditional_measurements(circuit)
     mapping = _measurement_map(circuit)
     return sorted(mapping) if mapping else None
+
+
+def _block_measures(data: Any) -> bool:
+    """Whether ``data`` holds a measurement, inside nested blocks too."""
+    for entry in data:
+        operation = instruction_parts(entry)[0]
+        if getattr(operation, "name", "") == "measure":
+            return True
+        for block in getattr(operation, "blocks", None) or ():
+            if _block_measures(getattr(block, "data", None) or ()):
+                return True
+    return False
+
+
+def _reject_conditional_measurements(circuit: Any) -> None:
+    """Refuse a circuit whose control-flow blocks measure.
+
+    A measurement inside an ``if_else``, loop or ``switch`` block writes its
+    classical bit only on the shots that take that branch; on the others the
+    bit keeps whatever it held, so it is not a readout of any one qubit.  The
+    per-bit map only sees top-level measurements, and mitigating with it
+    projected such a bit out and restored it as ``0``: a circuit whose counts
+    were ``00`` and ``11`` came back as ``00`` and ``01``.  No faithful map
+    exists, so readout mitigation must not be attempted.
+
+    Raises:
+        ValueError: If a control-flow block of ``circuit`` measures.
+    """
+    try:
+        conditional = any(
+            _block_measures(getattr(block, "data", None) or ())
+            for entry in list(getattr(circuit, "data", None) or [])
+            for block in getattr(instruction_parts(entry)[0], "blocks", None) or ()
+        )
+    except ValueError:
+        # Not a readable circuit: there is no measurement map to protect.
+        return
+    if conditional:
+        raise ValueError(
+            "Measurement mitigation needs every measurement at the top level of "
+            "the circuit: a measurement inside a control-flow block writes its "
+            "classical bit only on the shots that take that branch, so no qubit "
+            "is read into it on the others."
+        )
 
 
 def _measurement_map(circuit: Any) -> Dict[int, int]:

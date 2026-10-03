@@ -986,3 +986,66 @@ def test_zne_runs_on_compiled_circuits_with_a_reset_preamble():
     assert run.zne_error is None
     assert run.zne_realized_factors == [1.0, 3.0, 5.0]
     assert run.zne_probs
+
+
+def test_measurement_maps_refuse_measurements_inside_control_flow():
+    """Regression: M3 silently forced conditionally written bits to ``0``.
+
+    The per-bit map only sees top-level measurements, so a bit written by a
+    measurement inside an ``if_else`` block looked unmeasured: mitigation
+    projected it out and restored it as ``0``, turning counts ``00``/``11``
+    into ``00``/``01``.  Such a bit is no readout of any one qubit on the
+    shots that skip the branch, so the maps refuse the circuit instead.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.utils import measured_clbits, measured_qubits_by_clbit
+
+    dynamic = QuantumCircuit(2, 2)
+    dynamic.h(0)
+    dynamic.measure(0, 0)
+    with dynamic.if_test((dynamic.clbits[0], 1)):
+        dynamic.measure(1, 1)
+    for helper in (measured_qubits_by_clbit, measured_clbits):
+        with pytest.raises(ValueError, match="control-flow block"):
+            helper(dynamic)
+
+    # Control flow that does not measure keeps a faithful map.
+    feedforward = QuantumCircuit(2, 2)
+    feedforward.h(0)
+    feedforward.measure(0, 0)
+    with feedforward.if_test((feedforward.clbits[0], 1)):
+        feedforward.x(1)
+    feedforward.measure(1, 1)
+    assert measured_qubits_by_clbit(feedforward) == [0, 1]
+    assert measured_clbits(feedforward) == [0, 1]
+
+
+def test_mthree_records_an_error_for_a_circuit_measuring_in_control_flow():
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+
+    from qbalance.execution.ensemble import run_ensemble
+
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.x(1)
+    qc.measure(0, 0)
+    with qc.if_test((qc.clbits[0], 1)):
+        qc.measure(1, 1)
+
+    run = run_ensemble(
+        AerSimulator(),
+        [qc],
+        {"measurement_flip_map": {}},
+        shots=400,
+        seed=1,
+        mthree=True,
+    )
+
+    assert set(run.counts) == {"00", "11"}
+    assert run.mthree_probs is None
+    assert "control-flow block" in run.mthree_error
