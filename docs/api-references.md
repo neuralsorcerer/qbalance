@@ -397,7 +397,7 @@ The fluent entry point:
 | `shots` | `1024` | Shots per execution, a positive integer. |
 | `profile` | `False` | Record pass-level transpiler profiles (`pass_profile`). |
 | `cache_root` | `None` | Compile-cache directory (`str` or `Path`); `None` uses the platform cache (see [compile cache](#compile-cache-qbalancecache)). |
-| `seed` | `0` | Non-negative integer seeding the candidate shuffle, the bandit, the simulator (instance $i$ of a twirled ensemble runs with seed $\mathrm{seed} + i$), and the M3 calibration simulator. |
+| `seed` | `0` | Non-negative integer seeding the candidate shuffle, the bandit, the simulator (instance $i$ of a twirled ensemble runs with seed $\mathrm{seed} + i$), and M3's calibration on simulators. |
 | `strategies` | `None` | Explicit candidates, any iterable of `StrategySpec` objects or mappings (validated and de-duplicated); `max_candidates` is then ignored, and grid search keeps their order. |
 | `allow_regression` | `True` | With `False`, never select a candidate that scores worse than the baseline (see below). |
 | `max_evaluations` | `None` | Evaluate at most this many candidates per circuit; `None` evaluates all of them. |
@@ -1012,7 +1012,7 @@ True
 
 `qbalance.mitigation.mitigate_twirled_counts(backend, raw_counts, flip_maps, measured_qubits, calibration_shots=10000, seed=None, clbits=None) -> dict[str, float]`
 
-M3 for a measurement-twirled ensemble: calibrates once, corrects each instance's raw counts (the calibration describes the physical readout, which only matches counts as measured), untwirls each with its own flip map, combines the instances weighted by their shots, and projects the result onto the nearest probability distribution. `seed` seeds the calibration simulator created for `GenericBackendV2`, which makes the result reproducible there. `raw_counts` and `flip_maps` must have the same length and hold at least one shot.
+M3 for a measurement-twirled ensemble: calibrates once, corrects each instance's raw counts (the calibration describes the physical readout, which only matches counts as measured), untwirls each with its own flip map, combines the instances weighted by their shots, and projects the result onto the nearest probability distribution. `seed` seeds the calibration on a local simulator -- the `AerSimulator` created for `GenericBackendV2`, or the backend itself for Aer and `fake:ibm` snapshots, whose calibration jobs all run with `seed_simulator=seed` while the backend object is left unmodified -- which makes the result reproducible there; hardware calibrates as it runs. `raw_counts` and `flip_maps` must have the same length and hold at least one shot.
 
 ```pycon
 >>> from qbalance.mitigation import mitigate_twirled_counts
@@ -1503,7 +1503,7 @@ ValueError: execute must be a boolean
 
 ## Logging (`qbalance.logging`)
 
-`qbalance.logging.get_logger(name="qbalance") -> logging.Logger` returns a standard logger. The first call installs one stream handler on the `qbalance` package logger (level `INFO`, format `time | level | name | message`, propagation off), but only when neither that logger nor the root logger has a handler, so an application that configures logging keeps full control. `LOGGER_NAME` is `"qbalance"`.
+`qbalance.logging.get_logger(name="qbalance") -> logging.Logger` returns a standard logger. The first call installs one stream handler on the `qbalance` package logger (format `time | level | name | message`), but only when neither that logger nor the root logger has a handler. Records always propagate, and the handler prints only those emitted while the root logger has no handler, so an application that configures logging keeps full control whether it does so before or after importing qbalance, and no record is printed twice. The package logger's level is left unset, so it follows the root logger's (`WARNING` by default). `LOGGER_NAME` is `"qbalance"`.
 
 ```pycon
 >>> from qbalance.logging import LOGGER_NAME, get_logger

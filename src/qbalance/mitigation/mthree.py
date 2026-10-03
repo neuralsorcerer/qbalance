@@ -10,8 +10,63 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
+from qbalance.utils import backend_display_name
 
 log = get_logger(__name__)
+
+
+class _SeededSimulator:
+    """A simulator backend whose every job runs with one ``seed_simulator``.
+
+    mthree submits its calibration circuits through ``backend.run`` and offers
+    no way to seed them, so on a simulator the calibration -- and with it the
+    mitigated result -- changed from one run to the next.  Everything mthree
+    reads besides ``run`` (``configuration()``, ``name``, ``version``,
+    ``properties()``) is forwarded to the wrapped backend, which is never
+    modified: its own options stay as the caller set them.
+    """
+
+    def __init__(self, backend: Any, seed: int):
+        self._backend = backend
+        self._seed = int(seed)
+
+    def __getattr__(self, name: str) -> Any:
+        # Read the wrapped backend from __dict__: before __init__ has set it
+        # (copy and pickle create instances that way), ``self._backend``
+        # would re-enter this method forever.
+        try:
+            backend = self.__dict__["_backend"]
+        except KeyError:
+            raise AttributeError(name) from None
+        return getattr(backend, name)
+
+    def run(self, run_input: Any, **options: Any) -> Any:
+        """Run ``run_input`` on the wrapped backend with the fixed seed."""
+        options.setdefault("seed_simulator", self._seed)
+        return self._backend.run(run_input, **options)
+
+
+def _is_local_simulator(backend: Any) -> bool:
+    """Whether mthree would treat ``backend`` as a simulator.
+
+    That is mthree's own test: the configuration says so (Aer), or the name
+    marks a device snapshot (qiskit-ibm-runtime's ``fake_*`` backends report
+    the device's configuration but run on Aer).
+    """
+    try:
+        if getattr(backend.configuration(), "simulator", False):
+            return True
+    except Exception:
+        return False
+    return "fake" in backend_display_name(backend)
+
+
+def _accepts_seed(backend: Any) -> bool:
+    """Whether ``backend.run`` takes a ``seed_simulator`` keyword."""
+    from qbalance.execution.runner import _prepare_run_kwargs
+
+    run = getattr(backend, "run", None)
+    return callable(run) and bool(_prepare_run_kwargs(run, {"seed_simulator": 0}))
 
 
 def _calibration_system(backend: Any, seed: Optional[int] = None) -> Any:
@@ -22,13 +77,18 @@ def _calibration_system(backend: Any, seed: Optional[int] = None) -> Any:
     failed on those backends every time.  ``GenericBackendV2`` executes on an
     Aer simulator carrying ``NoiseModel.from_backend(self)``, which is exactly
     what ``AerSimulator.from_backend`` builds, so calibrating on the latter
-    measures the same readout channel.  Every other backend is returned
-    unchanged: a hardware backend's calibration must come from the device.
-    The simulator created here is private, so it can take ``seed`` without
-    side effects, which makes the calibration -- and the mitigated result --
-    reproducible.
+    measures the same readout channel.  The simulator created here is
+    private, so it can take ``seed`` without side effects.
+
+    Any other local simulator (``aer:`` specs, ``fake:ibm`` snapshots) is
+    calibrated on itself, with every calibration job run under ``seed`` (see
+    :class:`_SeededSimulator`).  Either way a given ``seed`` makes the
+    calibration -- and the mitigated result -- reproducible.  A hardware
+    backend is returned unchanged: its calibration must come from the device.
     """
     if callable(getattr(backend, "configuration", None)):
+        if seed is not None and _is_local_simulator(backend) and _accepts_seed(backend):
+            return _SeededSimulator(backend, seed)
         return backend
     try:
         from qiskit.providers.fake_provider import GenericBackendV2
@@ -205,9 +265,10 @@ def mitigate_twirled_counts(
         measured_qubits: Physical qubit feeding each classical bit, ordered by
             classical bit index (shared by all instances).
         calibration_shots (default: 10000): Shot budget for M3's calibration.
-        seed (default: None): Seed for the calibration simulator qbalance
-            creates for ``GenericBackendV2``; other backends calibrate as they
-            run.
+        seed (default: None): Simulator seed of the calibration on a local
+            simulator -- the one qbalance creates for ``GenericBackendV2``, or
+            the backend itself (Aer, ``fake:ibm`` snapshots) -- which makes
+            the result reproducible there.  Hardware calibrates as it runs.
         clbits (default: None): Classical bit each entry of ``measured_qubits``
             writes; needed when the counts carry classical bits no measurement
             writes.  ``None`` means every bit of the keys is measured, in order.

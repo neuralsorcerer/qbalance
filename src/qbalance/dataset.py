@@ -132,7 +132,10 @@ class CircuitDataset:
                     f"{rec.format} artifact {rec.artifact!r}: {e}"
                 ) from e
             if not loaded:
-                raise ValueError(f"Empty QPY file: {path}")
+                raise ValueError(
+                    f"Empty QPY file: record at index {index} ({rec.name!r}) has "
+                    f"no circuit in {rec.artifact!r}"
+                )
             circuits.append(loaded[0])
         return circuits
 

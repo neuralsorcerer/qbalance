@@ -6,17 +6,18 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import secrets
 import shutil
-import tempfile
 import threading
 import time
 from contextlib import contextmanager, suppress
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, cast
+from typing import Any, Dict, Iterator, Optional, Tuple, cast
 
 import numpy as np
 from platformdirs import user_cache_dir
@@ -30,6 +31,76 @@ _ATOMIC_WRITE_LOCKS = tuple(threading.Lock() for _ in range(64))
 def _atomic_write_lock(path: Path) -> threading.Lock:
     normalized_path = os.path.normcase(os.path.abspath(path))
     return _ATOMIC_WRITE_LOCKS[hash(normalized_path) % len(_ATOMIC_WRITE_LOCKS)]
+
+
+# Temporary entries are staged under random names beside their destination and
+# renamed into place.  tempfile.mkstemp and mkdtemp would pick the names too,
+# but they create owner-only entries (0600 and 0700) meant to stay private; the
+# rename keeps that mode, so every dataset, workload, report and cache entry
+# came out unreadable to anyone else whatever the user's umask.  Creating them
+# with the ordinary 0o666 and 0o777 lets the kernel apply the umask, exactly as
+# a plain open() or mkdir() of the destination would.
+_TEMPORARY_NAME_ATTEMPTS = 100
+_TEMPORARY_FILE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    # Without O_BINARY, Windows writes through the descriptor in text mode.
+    | getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _temporary_sibling(directory: Path, prefix: str, suffix: str) -> Path:
+    """Return a random absolute path in ``directory``.
+
+    Absolute like tempfile's, so a caller changing the working directory while
+    it writes the staged entry still commits the right one.
+    """
+    name = f"{prefix}{secrets.token_hex(8)}{suffix}"
+    return Path(os.path.abspath(directory)) / name
+
+
+def _create_temporary_file(
+    directory: Path, prefix: str, suffix: str
+) -> Tuple[int, Path]:
+    """Create a new file in ``directory`` with umask-governed permissions.
+
+    Returns:
+        The open, write-only descriptor and the file's path.
+
+    Raises:
+        FileExistsError: If no unused name was found.
+        OSError: If the file cannot be created.
+    """
+    for _ in range(_TEMPORARY_NAME_ATTEMPTS):
+        candidate = _temporary_sibling(directory, prefix, suffix)
+        try:
+            return os.open(candidate, _TEMPORARY_FILE_FLAGS, 0o666), candidate
+        except FileExistsError:
+            continue
+    raise FileExistsError(
+        errno.EEXIST, "No unused temporary file name found", str(directory)
+    )
+
+
+def _create_temporary_directory(directory: Path, prefix: str) -> Path:
+    """Create a new directory in ``directory`` with umask-governed permissions.
+
+    Raises:
+        FileExistsError: If no unused name was found.
+        OSError: If the directory cannot be created.
+    """
+    for _ in range(_TEMPORARY_NAME_ATTEMPTS):
+        candidate = _temporary_sibling(directory, prefix, "")
+        try:
+            os.mkdir(candidate, 0o777)
+        except FileExistsError:
+            continue
+        return candidate
+    raise FileExistsError(
+        errno.EEXIST, "No unused temporary directory name found", str(directory)
+    )
 
 
 def backend_display_name(backend: Any) -> str:
@@ -133,7 +204,8 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     The payload goes to a temporary file in the destination directory and is
     then renamed into place, which is atomic on every supported platform.  A run
     interrupted mid-write therefore leaves either the previous file or none at
-    all, never a truncated one for the next run to choke on.
+    all, never a truncated one for the next run to choke on.  The file gets the
+    permissions the umask gives any newly created file.
 
     Args:
         path: Destination file path.
@@ -147,10 +219,9 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     with _atomic_write_lock(path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle, tmp_name = tempfile.mkstemp(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        handle, tmp_path = _create_temporary_file(
+            path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
-        tmp_path = Path(tmp_name)
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(data)
@@ -180,7 +251,8 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     whatever is at ``target`` is moved aside, the staging directory renamed
     into its place, and the old entry deleted; should that rename fail, the
     old entry is put back.  Callers decide beforehand whether ``target`` may
-    be replaced at all.
+    be replaced at all.  The new directory gets the permissions the umask
+    gives any newly created directory.
 
     Args:
         target: Directory to create or replace.
@@ -193,7 +265,7 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     """
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    staging = _create_temporary_directory(target.parent, prefix=f".{target.name}.tmp-")
     committed = False
     try:
         yield staging

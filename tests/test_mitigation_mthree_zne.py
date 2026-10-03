@@ -825,3 +825,86 @@ def test_mthree_on_a_generic_backend_is_reproducible_for_a_seed():
         )
 
     assert mitigate() == mitigate()
+
+
+class _RecordingSimulator:
+    """A backend stub with mthree's view of a simulator, recording run options."""
+
+    name = "recording_simulator"
+    version = 2
+
+    def __init__(self, simulator=True, name=None):
+        self._simulator = simulator
+        if name is not None:
+            self.name = name
+        self.options_seen = []
+
+    def configuration(self):
+        return types.SimpleNamespace(simulator=self._simulator)
+
+    def run(self, run_input, **options):
+        self.options_seen.append(options)
+        return run_input
+
+
+def test_mthree_seeds_the_calibration_of_every_local_simulator():
+    """Regression: only ``fake:generic`` calibrations were seeded.
+
+    mthree runs its calibration circuits through ``backend.run`` without a
+    seed, so on an Aer simulator or a ``fake:ibm`` snapshot the mitigated
+    result changed from one identical run to the next.  Those are calibrated
+    on themselves with every job seeded; the backend object itself is never
+    modified, and hardware is passed through untouched.
+    """
+    simulator = _RecordingSimulator()
+    system = mthree_mod._calibration_system(simulator, seed=11)
+    assert system is not simulator
+    # mthree reads these off the system it is given.
+    assert system.name == "recording_simulator"
+    assert system.version == 2
+    assert system.configuration().simulator is True
+    system.run(["circuit"], shots=10)
+    assert simulator.options_seen == [{"shots": 10, "seed_simulator": 11}]
+
+    # Device snapshots report the device's configuration but run on Aer.
+    snapshot = _RecordingSimulator(simulator=False, name="fake_manila")
+    mthree_mod._calibration_system(snapshot, seed=3).run(["circuit"])
+    assert snapshot.options_seen == [{"seed_simulator": 3}]
+
+    # Unseeded calls, hardware, and runs without a seed keyword pass through.
+    assert mthree_mod._calibration_system(simulator) is simulator
+    hardware = _RecordingSimulator(simulator=False, name="ibm_device")
+    assert mthree_mod._calibration_system(hardware, seed=3) is hardware
+    no_seed = types.SimpleNamespace(
+        configuration=lambda: types.SimpleNamespace(simulator=True),
+        run=lambda run_input, shots=None: run_input,
+    )
+    assert mthree_mod._calibration_system(no_seed, seed=3) is no_seed
+
+
+@pytest.mark.parametrize("spec", ["aer:from_backend:fake:generic:3", "fake:ibm:manila"])
+def test_mthree_is_reproducible_for_a_seed_on_any_simulator(spec):
+    """The same seed gives the same mitigated distribution on every simulator."""
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    if spec.startswith("fake:ibm"):
+        pytest.importorskip("qiskit_ibm_runtime")
+    from qiskit import QuantumCircuit, transpile
+
+    from qbalance.backends import resolve_backend
+
+    backend = resolve_backend(spec)
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    compiled = transpile(qc, backend, optimization_level=0, initial_layout=[0, 1])
+    counts = backend.run(compiled, shots=2000, seed_simulator=1).result().get_counts()
+
+    def mitigate():
+
+        return mthree_mod.mitigate_twirled_counts(
+            backend, [counts], [{}], [0, 1], calibration_shots=2000, seed=5
+        )
+
+    assert mitigate() == mitigate()

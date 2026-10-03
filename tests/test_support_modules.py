@@ -780,18 +780,64 @@ def test_package_logger_defers_to_a_host_that_configured_logging():
         assert package_logger.handlers == []
         assert package_logger.propagate is True
 
-        # No host logging: qbalance installs exactly one handler and stops
-        # propagating, so a later basicConfig cannot make records double.
+        # No host logging: qbalance installs exactly one handler.
         package_logger.handlers.clear()
         package_logger.propagate = True
         logging.root.handlers[:] = []
         get_logger("qbalance.probe_bare")
         assert len(package_logger.handlers) == 1
-        assert package_logger.propagate is False
+        assert package_logger.propagate is True
 
         # Idempotent: a second call must not stack another handler.
         get_logger("qbalance.probe_again")
         assert len(package_logger.handlers) == 1
+    finally:
+        package_logger.handlers[:] = saved_handlers
+        package_logger.propagate = saved_propagate
+        package_logger.setLevel(saved_level)
+        logging.root.handlers[:] = saved_root
+
+
+def test_logging_configured_after_import_receives_every_record_once():
+    """Regression: a handler installed at import kept records from the host.
+
+    Applications import their libraries before calling ``basicConfig``.  The
+    default handler was installed at that import with propagation switched
+    off, so every qbalance record went to stderr instead of the handlers the
+    application configured next.  The default handler must print records only
+    while the host has no logging, and the host's handlers get each record
+    exactly once afterwards.
+    """
+    import io
+    import logging
+
+    from qbalance.logging import LOGGER_NAME, get_logger
+
+    package_logger = logging.getLogger(LOGGER_NAME)
+    saved_handlers = list(package_logger.handlers)
+    saved_propagate = package_logger.propagate
+    saved_level = package_logger.level
+    saved_root = list(logging.root.handlers)
+    try:
+        package_logger.handlers.clear()
+        package_logger.propagate = True
+        package_logger.setLevel(logging.NOTSET)
+        logging.root.handlers[:] = []
+        logger = get_logger("qbalance.probe_order")
+        (fallback,) = package_logger.handlers
+        fallback_stream = io.StringIO()
+        fallback.setStream(fallback_stream)
+
+        # Nothing configured yet: qbalance's own handler prints the record.
+        logger.warning("before host logging")
+        assert fallback_stream.getvalue().count("before host logging") == 1
+
+        # The application configures logging after importing qbalance.
+        host_stream = io.StringIO()
+        logging.root.addHandler(logging.StreamHandler(host_stream))
+        logger.warning("after host logging")
+        assert host_stream.getvalue().count("after host logging") == 1
+        assert "after host logging" not in fallback_stream.getvalue()
     finally:
         package_logger.handlers[:] = saved_handlers
         package_logger.propagate = saved_propagate
@@ -940,3 +986,29 @@ def test_validate_flag_accepts_booleans_only():
     for value in ("no", 0, 1, None, 1.0):
         with pytest.raises(ValueError, match="execute must be a boolean"):
             utils_module.validate_flag("execute", value)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_atomic_writes_and_replaced_directories_follow_the_umask(tmp_path):
+    """Regression: every file and directory qbalance wrote was owner-only.
+
+    The temporary entries came from mkstemp and mkdtemp, which create them
+    0600 and 0700, and renaming them into place kept that mode, so a saved
+    dataset, workload or report was unreadable to anyone else whatever the
+    umask.  They must get the mode a plain open() or mkdir() would.
+    """
+    import stat
+
+    previous = os.umask(0o027)
+    try:
+        atomic_write_bytes(tmp_path / "payload.json", b"{}")
+        with utils_module.replacing_directory(tmp_path / "out") as staging:
+            (staging / "inner.txt").write_text("x", encoding="utf-8")
+    finally:
+        os.umask(previous)
+
+    file_mode = stat.S_IMODE((tmp_path / "payload.json").stat().st_mode)
+    dir_mode = stat.S_IMODE((tmp_path / "out").stat().st_mode)
+    assert file_mode == 0o640
+    assert dir_mode == 0o750
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["out", "payload.json"]
