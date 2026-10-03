@@ -1702,3 +1702,37 @@ def _measured(circuit):
     measured = circuit.copy()
     measured.measure_all()
     return measured
+
+
+def test_noise_aware_layout_weighs_the_interactions_blocks_execute():
+    """Regression: a control-flow instruction counted as one all-pairs gate.
+
+    A loop of ten two-qubit gates weighed like one, and an ``if_else`` on
+    three qubits tied all three together although its blocks coupled two.
+    Interactions now follow what the blocks run, as the metrics do: a loop's
+    body per iteration, and every pair a branch uses at its heaviest.
+    """
+    from qiskit import QuantumCircuit
+
+    from qbalance.transpile.noise_aware_layout import _logical_interactions
+
+    qc = QuantumCircuit(3, 1)
+    with qc.for_loop(range(10)):
+        qc.cx(0, 1)
+    qc.cx(1, 2)
+    with qc.if_test((qc.clbits[0], 1)) as else_:
+        qc.cx(2, 0)
+    with else_:
+        qc.cx(2, 0)
+        qc.cx(0, 2)
+        qc.x(1)
+    degree, weights = _logical_interactions(qc, 3)
+    assert weights == {(0, 1): 10.0, (1, 2): 1.0, (0, 2): 2.0}
+    assert degree.tolist() == [12.0, 11.0, 3.0]
+
+    # Gates on three or more qubits still tie every pair of their qubits.
+    toffoli = QuantumCircuit(3)
+    toffoli.ccx(0, 1, 2)
+    degree, weights = _logical_interactions(toffoli, 3)
+    assert weights == {(0, 1): 1.0, (0, 2): 1.0, (1, 2): 1.0}
+    assert degree.tolist() == [2.0, 2.0, 2.0]

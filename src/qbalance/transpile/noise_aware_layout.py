@@ -447,6 +447,67 @@ def _usable_adjacency(
     return usable if any(usable) else adjacency
 
 
+def _repeated_weights(
+    weights: Dict[Tuple[int, int], float], times: int
+) -> Dict[Tuple[int, int], float]:
+    """Pair weights of a block run ``times`` times."""
+    return {pair: weight * times for pair, weight in weights.items() if times}
+
+
+def _heaviest_weights(
+    branches: Iterable[Dict[Tuple[int, int], float]],
+) -> Dict[Tuple[int, int], float]:
+    """Per pair, the heaviest of several branches' weights.
+
+    Whichever branch runs, its interactions must be accommodated, so every
+    pair any branch uses keeps the largest weight a branch gives it.
+    """
+    combined: Dict[Tuple[int, int], float] = {}
+    for weights in branches:
+        for pair, weight in weights.items():
+            combined[pair] = max(combined.get(pair, 0.0), weight)
+    return combined
+
+
+def _pair_weights(
+    circuit: Any, logical: Callable[[Any], int]
+) -> Dict[Tuple[int, int], float]:
+    """Interaction count per pair of logical qubits (``a < b``) in ``circuit``.
+
+    ``logical`` maps a qubit of ``circuit`` to its logical index; a
+    control-flow block's qubits are its instruction's, in order.
+    """
+    weights: Dict[Tuple[int, int], float] = {}
+    for entry in circuit.data:
+        inst, qargs, _ = instruction_parts(entry)
+        if getattr(inst, "name", "").lower() in _DIRECTIVE_NAMES:
+            continue
+        outer = [logical(qubit) for qubit in qargs]
+
+        def block_weights(
+            block: Any, outer: List[int] = outer
+        ) -> Dict[Tuple[int, int], float]:
+            return _pair_weights(block, lambda qubit: outer[bit_index(block, qubit)])
+
+        nested = control_flow_cost(
+            inst,
+            block_weights,
+            repeat=_repeated_weights,
+            worst=_heaviest_weights,
+        )
+        if nested is not None:
+            for pair, weight in nested.items():
+                weights[pair] = weights.get(pair, 0.0) + weight
+            continue
+        if len(qargs) < 2:
+            continue
+        qubits = sorted(set(outer))
+        for position, a in enumerate(qubits):
+            for b in qubits[position + 1 :]:
+                weights[(a, b)] = weights.get((a, b), 0.0) + 1.0
+    return weights
+
+
 def _logical_interactions(
     circuit: Any, n: int
 ) -> Tuple[np.ndarray, Dict[Tuple[int, int], float]]:
@@ -457,20 +518,20 @@ def _logical_interactions(
     is still whole here.  It decomposes into two-qubit gates among its qubits,
     so every pair of its qubits interacts; counting only literal two-qubit
     gates made such circuits look interaction-free and scattered them.
+
+    A control-flow instruction contributes the interactions of the gates its
+    blocks run, as the compile metrics count them (see
+    :func:`~qbalance.utils.control_flow_cost`): a loop's body once per
+    iteration, and for branches every pair any of them uses, at its heaviest.
+    Counting the instruction as one gate on all its qubits made a loop of ten
+    two-qubit gates weigh like one and tied qubits its body never couples.
+    A qubit's degree is the total weight of its pairs.
     """
+    weights = _pair_weights(circuit, lambda qubit: bit_index(circuit, qubit))
     deg = np.zeros(n, dtype=float)
-    weights: Dict[Tuple[int, int], float] = {}
-    for entry in circuit.data:
-        inst, qargs, _ = instruction_parts(entry)
-        if getattr(inst, "name", "").lower() in _DIRECTIVE_NAMES:
-            continue
-        if len(qargs) < 2:
-            continue
-        qubits = sorted({bit_index(circuit, qubit) for qubit in qargs})
-        for position, a in enumerate(qubits):
-            deg[a] += len(qubits) - 1
-            for b in qubits[position + 1 :]:
-                weights[(a, b)] = weights.get((a, b), 0.0) + 1.0
+    for (a, b), weight in weights.items():
+        deg[a] += weight
+        deg[b] += weight
     return deg, weights
 
 
