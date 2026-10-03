@@ -185,3 +185,48 @@ def test_run_counts_executes_a_circuit_that_measures_inside_a_loop():
 
     counts = runner.run_counts(aer.AerSimulator(), qc, shots=50, seed_simulator=1)
     assert counts == {"1": 50}
+
+
+def test_zne_repeats_of_a_fold_are_independent_samples(monkeypatch):
+    """Regression: a repeated fold reran the identical circuit and seeds.
+
+    Folding realizes (1, 2, 3) as (1, 3, 3), and the second factor-3 point is
+    billed (and fitted) as a second sample of that noise level, as it is on
+    hardware.  On a simulator it reran the same circuits with the same seeds,
+    so it only copied the first sample.  The first run of every fold keeps the
+    seeds ``seed + i``; each repeat shifts them past those already used.
+    """
+    from qbalance.execution import ensemble
+
+    seeds = []
+
+    def fake_run_counts(backend, circuit, shots, seed_simulator):
+        seeds.append((getattr(circuit, "fold", 1), seed_simulator))
+        return {"0": shots}
+
+    def fake_fold(circuit, backend, factor):
+        return types.SimpleNamespace(fold=ensemble.realized_fold_factor(factor))
+
+    monkeypatch.setattr(ensemble, "run_counts", fake_run_counts)
+    monkeypatch.setattr(ensemble, "fold_global_for_backend", fake_fold)
+    monkeypatch.setattr(
+        ensemble, "zne_extrapolate_counts", lambda factors, counts, degree: {"0": 1.0}
+    )
+
+    instances = [_Circ(), _Circ()]
+    metrics = {"measurement_flip_maps": [{}, {}]}
+    run = ensemble.run_ensemble(
+        object(), instances, metrics, shots=8, seed=10, zne_factors=(1.0, 2.0, 3.0)
+    )
+
+    assert run.zne_error is None
+    assert run.zne_realized_factors == [1.0, 3.0, 3.0]
+    # Unfolded runs, the first factor-3 runs, then the repeat on fresh seeds.
+    assert seeds == [(1, 10), (1, 11), (3, 10), (3, 11), (3, 12), (3, 13)]
+
+    # Distinct folds still share the instance seeds, as documented.
+    seeds.clear()
+    ensemble.run_ensemble(
+        object(), instances, metrics, shots=8, seed=10, zne_factors=(1.0, 3.0, 5.0)
+    )
+    assert seeds == [(1, 10), (1, 11), (3, 10), (3, 11), (5, 10), (5, 11)]
