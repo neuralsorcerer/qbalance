@@ -195,6 +195,37 @@ def _restrict_to_active_qubits(unitary: Any) -> Tuple[Any, List[int]]:
     return compact, active
 
 
+def _canonical_subexperiment(subexperiment: Any, name: str) -> Any:
+    """Return ``subexperiment`` under fixed circuit and quantum-register names.
+
+    qiskit-addon-cutting names the circuits and quantum registers it builds
+    from Qiskit's global counters (``circuit-48`` with register ``q2`` in one
+    run, ``circuit-68`` with ``q0`` in the next).  QPY records both names, so
+    an identical subexperiment never matched its compile-cache entry: every
+    rerun recompiled all of them and, with the compile time in the objective,
+    re-ranked cut candidates on fresh timings.  Renaming makes identical
+    subexperiments identical circuits.  The classical registers, which the
+    reconstruction reads results by, are kept as they are.
+    """
+    from qiskit import QuantumCircuit, QuantumRegister
+
+    cregs = list(subexperiment.cregs)
+    if sum(register.size for register in cregs) != subexperiment.num_clbits:
+        # Classical bits outside any register: keep the circuit as built.
+        return subexperiment
+    canonical = QuantumCircuit(
+        QuantumRegister(subexperiment.num_qubits, "q"), *cregs, name=name
+    )
+    canonical.compose(
+        subexperiment,
+        qubits=list(range(subexperiment.num_qubits)),
+        clbits=list(range(subexperiment.num_clbits)),
+        inplace=True,
+    )
+    canonical.metadata = dict(subexperiment.metadata or {})
+    return canonical
+
+
 def prepare_cutting_experiment(
     circuit: Any,
     max_subcircuit_qubits: int,
@@ -287,8 +318,15 @@ def prepare_cutting_experiment(
         ],
         "num_subexperiments": int(sum(len(v) for v in subexperiments.values())),
     }
+    base_name = str(getattr(circuit, "name", None) or "circuit")
     return CuttingExperiment(
-        subexperiments={lab: list(subexperiments[lab]) for lab in labels},
+        subexperiments={
+            lab: [
+                _canonical_subexperiment(sub, f"{base_name}_cut_{lab}")
+                for sub in subexperiments[lab]
+            ]
+            for lab in labels
+        },
         coefficients=list(coefficients),
         subobservables=dict(problem.subobservables),
         measured_qubits=sorted(measured_set),

@@ -4232,3 +4232,59 @@ def test_adjust_does_not_warn_when_every_objective_term_is_reported(tmp_path, ca
         )
 
     assert "Objective term" not in caplog.text
+
+
+def test_cut_subexperiments_are_identical_circuits_across_runs(tmp_path):
+    """Regression: no cut subexperiment ever hit the compile cache.
+
+    qiskit-addon-cutting names its circuits and quantum registers from Qiskit's
+    global counters, and QPY records both names, so the same cut produced new
+    fingerprints on every run.  A warm-cache rerun recompiled every
+    subexperiment and re-ranked the cut candidate on fresh compile times.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.cache import fingerprint_circuit
+
+    qc = QuantumCircuit(5, 4, name="chain")
+    qc.h(0)
+    for qubit in range(4):
+        qc.cx(qubit, qubit + 1)
+    qc.measure([0, 2, 3, 4], [3, 0, 1, 2])
+
+    first = addon_cutting.prepare_cutting_experiment(qc, 4)
+    second = addon_cutting.prepare_cutting_experiment(qc, 4)
+    assert first is not None and second is not None
+    for label, circuits in first.subexperiments.items():
+        assert [fingerprint_circuit(c) for c in circuits] == [
+            fingerprint_circuit(c) for c in second.subexperiments[label]
+        ]
+        for circuit in circuits:
+            assert circuit.name == f"chain_cut_{label}"
+            # The reconstruction reads results by these register names.
+            assert {register.name for register in circuit.cregs} == {
+                "observable_measurements",
+                "qpd_measurements",
+            }
+
+    # A rerun on a warm cache replays the recorded metrics exactly.
+    backend = GenericBackendV2(num_qubits=5, seed=0)
+    spec = StrategySpec(cutting=True, max_subcircuit_qubits=4)
+
+    def evaluate():
+        return wl._evaluate_candidate(
+            qc,
+            backend,
+            spec,
+            objective=default_objective(),
+            execute=False,
+            shots=100,
+            seed=0,
+            profile=False,
+            cache_root=tmp_path / "cache",
+            backend_key="key",
+        )
+
+    assert evaluate() == evaluate()
