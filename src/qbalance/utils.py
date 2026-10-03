@@ -544,13 +544,14 @@ def _block_measures(data: Any) -> bool:
 def _reject_conditional_measurements(circuit: Any) -> None:
     """Refuse a circuit whose control-flow blocks measure.
 
-    A measurement inside an ``if_else``, loop or ``switch`` block writes its
-    classical bit only on the shots that take that branch; on the others the
-    bit keeps whatever it held, so it is not a readout of any one qubit.  The
-    per-bit map only sees top-level measurements, and mitigating with it
-    projected such a bit out and restored it as ``0``: a circuit whose counts
-    were ``00`` and ``11`` came back as ``00`` and ``01``.  No faithful map
-    exists, so readout mitigation must not be attempted.
+    The per-bit map only sees top-level measurements.  A measurement inside a
+    control-flow block (``if_else``, ``switch``, a loop, ``box``) acts on the
+    block's own bits, may run on only some shots or several times per shot,
+    and on the shots an ``if_else`` branch skips leaves its classical bit
+    holding whatever it held -- no readout of any one qubit.  Mitigating with
+    the top-level map projected such a bit out and restored it as ``0``: a
+    circuit whose counts were ``00`` and ``11`` came back as ``00`` and
+    ``01``.  Readout mitigation must not be attempted on such a circuit.
 
     Raises:
         ValueError: If a control-flow block of ``circuit`` measures.
@@ -567,9 +568,9 @@ def _reject_conditional_measurements(circuit: Any) -> None:
     if conditional:
         raise ValueError(
             "Measurement mitigation needs every measurement at the top level of "
-            "the circuit: a measurement inside a control-flow block writes its "
-            "classical bit only on the shots that take that branch, so no qubit "
-            "is read into it on the others."
+            "the circuit: a measurement inside a control-flow block may run on "
+            "only some shots, or several times, so its classical bit cannot be "
+            "attributed to the readout of one qubit."
         )
 
 

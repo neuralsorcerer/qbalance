@@ -1432,7 +1432,7 @@ True
 
 ## Utilities (`qbalance.utils`)
 
-- `measured_qubits_by_clbit(circuit) -> list[int]`: the qubit last measured into each measured classical bit, ordered by classical bit (`range(num_qubits)` when no measurement can be read). A circuit that measures inside a control-flow block raises `ValueError`: such a bit is written only on the shots that take the branch, so it is no readout of any one qubit and readout mitigation cannot be applied.
+- `measured_qubits_by_clbit(circuit) -> list[int]`: the qubit last measured into each measured classical bit, ordered by classical bit (`range(num_qubits)` when no measurement can be read). A circuit that measures inside a control-flow block (`if_else`, `switch`, a loop, `box`) raises `ValueError`: such a measurement may run on only some shots, or several times, so its classical bit is no readout of any one qubit and readout mitigation cannot be applied.
 - `measured_clbits(circuit) -> list[int] | None`: those classical bits, increasing (`None` when no measurement can be read); raises `ValueError` like `measured_qubits_by_clbit`.
 - `operation_depth(circuit) -> int` and `operation_size(circuit) -> int`: depth and size counting operations only. `barrier`, `delay`, and other directives add nothing, although they still synchronize the wires they span, so the idle delays dynamical decoupling inserts are not billed as depth.
 - `is_terminal_measurement(data, index) -> bool`: whether nothing after `data[index]` other than `barrier` or `delay` acts on the measured qubit or its classical bit; `data` holds `(operation, qubits, clbits)` triples. `SCHEDULING_DIRECTIVES` is `frozenset({"barrier", "delay"})`.
