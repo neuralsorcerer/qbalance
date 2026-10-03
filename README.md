@@ -307,7 +307,7 @@ Interpretation:
 - two-qubit operation count has moderate penalty (weight 2),
 - compile time contributes but with a small coefficient (0.1),
 - `sampling_overhead` is 1 for a circuit that runs once (a constant that never reorders those candidates) and charges ZNE and cut candidates for their extra shots (see below),
-- `depth` counts operation layers; scheduling directives (`barrier`, `delay`) add none, so the idle delays dynamical decoupling inserts are not billed.
+- `depth` counts operation layers; scheduling directives (`barrier`, `delay`) add none, so the idle delays dynamical decoupling inserts are not billed. `depth`, `two_qubit_ops` and `estimated_error` count what one shot executes, so a control-flow loop is billed for every iteration of its body and a branch for its costliest arm.
 
 ### 2) Finite-safe scoring behavior
 

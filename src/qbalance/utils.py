@@ -17,7 +17,17 @@ import time
 from contextlib import contextmanager, suppress
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    Tuple,
+    TypeVar,
+    cast,
+)
 
 import numpy as np
 from platformdirs import user_cache_dir
@@ -416,12 +426,131 @@ def is_terminal_measurement(
     return True
 
 
-def _counts_as_operation(instruction: Any) -> bool:
-    """Whether ``instruction`` adds to depth and size (it is not a directive)."""
-    operation = getattr(instruction, "operation", None)
+def _is_operation(operation: Any) -> bool:
+    """Whether ``operation`` adds to depth and size (it is not a directive)."""
     if getattr(operation, "_directive", False):
         return False
     return getattr(operation, "name", "") not in SCHEDULING_DIRECTIVES
+
+
+def _counts_as_operation(instruction: Any) -> bool:
+    """Whether ``instruction`` adds to depth and size (it is not a directive)."""
+    return _is_operation(getattr(instruction, "operation", None))
+
+
+_T = TypeVar("_T")
+
+
+def control_flow_cost(
+    operation: Any,
+    block_cost: Callable[[Any], _T],
+    *,
+    repeat: Callable[[_T, int], _T],
+    worst: Callable[[Iterable[_T]], _T],
+) -> Optional[_T]:
+    """Return what one execution of a control-flow ``operation`` costs.
+
+    A control-flow instruction stands for the instructions its blocks run, so
+    metrics price it by them: a ``for_loop`` runs its body once per index, an
+    ``if_else`` or ``switch_case`` its costliest branch (an ``if`` without
+    ``else`` may run nothing, so its body is the worst case), and a
+    ``while_loop`` or ``box`` its body once -- a while loop's iteration count
+    is only known at run time, so it is priced by its first pass.
+
+    Args:
+        operation: The instruction's operation.
+        block_cost: Prices one block (a circuit).
+        repeat: Combines one body's cost over a number of iterations.
+        worst: Picks the costliest of several branches.
+
+    Returns:
+        The cost, or ``None`` when ``operation`` has no blocks.
+    """
+    blocks = getattr(operation, "blocks", None)
+    if not blocks:
+        return None
+    costs = [block_cost(block) for block in blocks]
+    if getattr(operation, "name", "") == "for_loop":
+        return repeat(costs[0], len(operation.params[0]))
+    return worst(costs)
+
+
+def _repeated_count(count: int, times: int) -> int:
+    """A count over ``times`` iterations."""
+    return count * times
+
+
+def _largest_count(counts: Iterable[int]) -> int:
+    """The largest of several branch counts."""
+    return max(counts)
+
+
+def _has_control_flow(circuit: Any) -> bool:
+    """Whether some instruction of ``circuit`` has blocks (control flow)."""
+    return any(
+        getattr(instruction_parts(entry)[0], "blocks", None)
+        for entry in getattr(circuit, "data", None) or ()
+    )
+
+
+def executed_operation_count(
+    circuit: Any, counts: Callable[[Any, tuple[Any, ...]], bool]
+) -> int:
+    """Count the operations one shot of ``circuit`` executes that ``counts``.
+
+    ``counts(operation, qubits)`` decides for an ordinary instruction; a
+    control-flow instruction is not counted itself but contributes the count
+    of its blocks (see :func:`control_flow_cost`).
+    """
+    total = 0
+    for entry in getattr(circuit, "data", None) or ():
+        operation, qargs, _ = instruction_parts(entry)
+        nested = control_flow_cost(
+            operation,
+            lambda block: executed_operation_count(block, counts),
+            repeat=_repeated_count,
+            worst=_largest_count,
+        )
+        if nested is not None:
+            total += nested
+        elif counts(operation, qargs):
+            total += 1
+    return total
+
+
+def two_qubit_operation_count(circuit: Any) -> int:
+    """Count the two-qubit operations one shot of ``circuit`` executes.
+
+    Directives spanning two qubits (a barrier) are not operations, and a
+    control-flow instruction on two qubits is no two-qubit gate: it counts
+    the two-qubit operations of its blocks instead.
+    """
+    return executed_operation_count(
+        circuit,
+        lambda operation, qargs: len(qargs) == 2 and _is_operation(operation),
+    )
+
+
+def _executed_depth(circuit: Any) -> int:
+    """Depth of ``circuit`` with every control-flow block priced in layers."""
+    levels: Dict[Tuple[str, int], int] = {}
+    for entry in getattr(circuit, "data", None) or ():
+        operation, qargs, cargs = instruction_parts(entry)
+        weight = control_flow_cost(
+            operation,
+            _executed_depth,
+            repeat=_repeated_count,
+            worst=_largest_count,
+        )
+        if weight is None:
+            weight = 1 if _is_operation(operation) else 0
+        wires = [("q", bit_index(circuit, bit)) for bit in qargs] + [
+            ("c", bit_index(circuit, bit)) for bit in cargs
+        ]
+        level = max((levels.get(wire, 0) for wire in wires), default=0) + weight
+        for wire in wires:
+            levels[wire] = level
+    return max(levels.values(), default=0)
 
 
 def operation_depth(circuit: Any) -> int:
@@ -432,12 +561,27 @@ def operation_depth(circuit: Any) -> int:
     delays) would then be several layers deeper than the same circuit left
     unscheduled, although it runs for exactly as long.  Directives still
     synchronize the wires they touch, as Qiskit's own barrier handling does.
+
+    Qiskit also counts a control-flow instruction as one layer, whatever its
+    blocks run; here it takes the layers its blocks run instead (see
+    :func:`control_flow_cost`), so a loop of ten gates is no shallower than
+    the ten gates.
     """
+    if _has_control_flow(circuit):
+        return _executed_depth(circuit)
     return int(circuit.depth(filter_function=_counts_as_operation))
 
 
 def operation_size(circuit: Any) -> int:
-    """Return the number of operations in ``circuit``, excluding directives."""
+    """Return the number of operations one shot of ``circuit`` executes.
+
+    Directives are excluded, and a control-flow instruction counts the
+    operations its blocks run (see :func:`control_flow_cost`).
+    """
+    if _has_control_flow(circuit):
+        return executed_operation_count(
+            circuit, lambda operation, qargs: _is_operation(operation)
+        )
     return int(circuit.size(filter_function=_counts_as_operation))
 
 

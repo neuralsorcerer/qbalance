@@ -1611,3 +1611,94 @@ def test_noise_aware_layout_of_a_circuit_without_qubits_is_empty():
 
     assert layout is not None
     assert len(layout.get_virtual_bits()) == 0
+
+
+def test_metrics_count_what_control_flow_blocks_execute():
+    """Regression: a control-flow instruction was billed as one instruction.
+
+    A ``for_loop`` running ten two-qubit gates reported one two-qubit
+    operation, depth 2 and a tenth of the gates' error, so for dynamic
+    circuits the objective could not see anything compilation did inside a
+    block, and a two-qubit ``for_loop`` even counted as a two-qubit gate.
+    Metrics now count what one shot executes: a loop's body per iteration,
+    the costliest branch, and a ``while_loop`` or ``box`` body once.
+    """
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.transpile import estimate_circuit_error
+    from qbalance.utils import (
+        operation_depth,
+        operation_size,
+        two_qubit_operation_count,
+    )
+
+    qc = QuantumCircuit(2, 2)
+    with qc.for_loop(range(3)):
+        qc.cx(0, 1)
+    with qc.if_test((qc.clbits[0], 1)) as else_:
+        qc.x(0)
+    with else_:
+        qc.cx(0, 1)
+        qc.cx(1, 0)
+    with qc.while_loop((qc.clbits[1], 0)):
+        qc.h(0)
+    with qc.switch(qc.clbits[0]) as case:
+        with case(0):
+            qc.x(1)
+        with case(case.DEFAULT):
+            qc.cx(0, 1)
+            qc.cx(0, 1)
+            qc.cx(0, 1)
+    with qc.box():
+        qc.cx(1, 0)
+    # 3 (loop) + 2 (else) + 0 (while) + 3 (default case) + 1 (box).
+    assert two_qubit_operation_count(qc) == 9
+    assert operation_size(qc) == 10
+    # Layers along the wires: 3, then 2, 1, 3 and 1 more.
+    assert operation_depth(qc) == 10
+
+    backend = GenericBackendV2(num_qubits=5, seed=0, control_flow=True)
+    # A coupler away from qubit 0, given in descending order, so the block's
+    # qubits 0 and 1 must map to the instruction's qubits in order.
+    a, b = max(backend.coupling_map.get_edges(), key=lambda edge: (edge[0], -edge[1]))
+    loop = QuantumCircuit(5)
+    with loop.for_loop(range(3)):
+        loop.cx(a, b)
+        loop.sx(a)
+    unrolled = QuantumCircuit(5)
+    for _ in range(3):
+        unrolled.cx(a, b)
+        unrolled.sx(a)
+    assert estimate_circuit_error(backend, loop) == pytest.approx(
+        estimate_circuit_error(backend, unrolled), rel=1e-12
+    )
+    branch = QuantumCircuit(5, 1)
+    with branch.if_test((branch.clbits[0], 1)) as else_:
+        branch.sx(b)
+    with else_:
+        branch.cx(a, b)
+        branch.cx(a, b)
+    riskier = QuantumCircuit(5)
+    riskier.cx(a, b)
+    riskier.cx(a, b)
+    assert estimate_circuit_error(backend, branch) == pytest.approx(
+        estimate_circuit_error(backend, riskier), rel=1e-12
+    )
+
+    # Compile metrics see through the loop as well.
+    loop_metrics = pipeline.compile_one(
+        _measured(loop), backend, StrategySpec(optimization_level=0)
+    )[1]
+    unrolled_metrics = pipeline.compile_one(
+        _measured(unrolled), backend, StrategySpec(optimization_level=0)
+    )[1]
+    assert loop_metrics["two_qubit_ops"] == unrolled_metrics["two_qubit_ops"] == 3
+    assert loop_metrics["size"] == unrolled_metrics["size"]
+
+
+def _measured(circuit):
+    """``circuit`` with every qubit measured."""
+    measured = circuit.copy()
+    measured.measure_all()
+    return measured

@@ -702,7 +702,7 @@ Compiles `circuit` once with Qiskit's preset pass manager, which honors `optimiz
 
 The metrics describe the whole ensemble:
 
-- `depth`, `size`, `width`, `two_qubit_ops`, `estimated_error`: the maxima over the instances. `depth` and `size` count operations only (see [utilities](#utilities-qbalanceutils)); `two_qubit_ops` counts instructions on exactly two qubits other than `barrier` and `delay`; `estimated_error` is [`estimate_circuit_error`](#estimate_circuit_error).
+- `depth`, `size`, `width`, `two_qubit_ops`, `estimated_error`: the maxima over the instances. `depth` and `size` count operations only (see [utilities](#utilities-qbalanceutils)); `two_qubit_ops` counts instructions on exactly two qubits other than `barrier` and `delay`; `estimated_error` is [`estimate_circuit_error`](#estimate_circuit_error). Each counts what one shot executes: a control-flow instruction contributes what its blocks run, a `for_loop`'s body once per index, the costliest branch of an `if_else` or `switch_case`, and a `while_loop`'s or `box`'s body once (a while loop's iteration count is known only at run time).
 - `compile_time_s`: the wall-clock seconds the transpilation took.
 - `twirl_instances`; `measurement_flip_maps`, one classical-bit flip map per instance, and `measurement_flip_map`, the first of them.
 - `dd_applied` (every instance was padded) and, when it was, `dd_sequence_applied`.
@@ -768,7 +768,7 @@ $$
 \varepsilon = 1 - \prod_i \left(1 - e_i\right),
 $$
 
-over the circuit's instructions $i$, with $e_i$ the backend's calibrated error for that instruction on those qubits, clipped to $[0, 1]$. Two-qubit gates are looked up in both qubit orders, measurements use the `measure` error (or a legacy `readout_error` property), and one-qubit gates the target's error. An instruction without calibration data counts as $e_i = 10^{-3}$ (one-qubit gates), $10^{-2}$ (two-qubit gates), or $2 \times 10^{-2}$ (measurements), and a gate on three or more qubits always counts $10^{-3}$, so on a backend that reports no errors (the plain Aer simulator) $\varepsilon$ is a gate-count proxy rather than a physical estimate. `barrier` and `delay` are not billed, and idle decoherence is not modelled, so the benefit of dynamical decoupling shows only in executed metrics. A circuit the estimate cannot read gives 1.0.
+over the circuit's instructions $i$, with $e_i$ the backend's calibrated error for that instruction on those qubits, clipped to $[0, 1]$. Two-qubit gates are looked up in both qubit orders, measurements use the `measure` error (or a legacy `readout_error` property), and one-qubit gates the target's error. A control-flow instruction is priced by the instructions its blocks run on its qubits: a `for_loop`'s body once per index, the riskier branch of an `if_else` or `switch_case`, and a `while_loop`'s or `box`'s body once. An instruction without calibration data counts as $e_i = 10^{-3}$ (one-qubit gates), $10^{-2}$ (two-qubit gates), or $2 \times 10^{-2}$ (measurements), and a gate on three or more qubits always counts $10^{-3}$, so on a backend that reports no errors (the plain Aer simulator) $\varepsilon$ is a gate-count proxy rather than a physical estimate. `barrier` and `delay` are not billed, and idle decoherence is not modelled, so the benefit of dynamical decoupling shows only in executed metrics. A circuit the estimate cannot read gives 1.0.
 
 ```pycon
 >>> import math
@@ -920,7 +920,7 @@ A pass manager that unrolls gates on three or more qubits, translates to the bac
 
 `qbalance.metrics.extract_circuit_metrics(circuit) -> dict[str, float]`
 
-Structural metrics of any circuit, with the definitions of the compile metrics: `depth` and `size` over operations (directives excluded), `width` (qubits), `two_qubit_ops` (instructions on exactly two qubits other than `barrier` and `delay`), `measures`, and `t_count` (`t` and `tdg` gates).
+Structural metrics of any circuit, with the definitions of the compile metrics: `depth` and `size` over operations (directives excluded), `width` (qubits), `two_qubit_ops` (instructions on exactly two qubits other than `barrier` and `delay`), `measures`, and `t_count` (`t` and `tdg` gates). The counts are of what one shot executes, control-flow blocks included as for the compile metrics.
 
 ```pycon
 >>> from qbalance.metrics import extract_circuit_metrics
@@ -1434,7 +1434,9 @@ True
 
 - `measured_qubits_by_clbit(circuit) -> list[int]`: the qubit last measured into each measured classical bit, ordered by classical bit (`range(num_qubits)` when no measurement can be read). A circuit that measures inside a control-flow block (`if_else`, `switch`, a loop, `box`) raises `ValueError`: such a measurement may run on only some shots, or several times, so its classical bit is no readout of any one qubit and readout mitigation cannot be applied.
 - `measured_clbits(circuit) -> list[int] | None`: those classical bits, increasing (`None` when no measurement can be read); raises `ValueError` like `measured_qubits_by_clbit`.
-- `operation_depth(circuit) -> int` and `operation_size(circuit) -> int`: depth and size counting operations only. `barrier`, `delay`, and other directives add nothing, although they still synchronize the wires they span, so the idle delays dynamical decoupling inserts are not billed as depth.
+- `operation_depth(circuit) -> int` and `operation_size(circuit) -> int`: depth and size counting operations only. `barrier`, `delay`, and other directives add nothing, although they still synchronize the wires they span, so the idle delays dynamical decoupling inserts are not billed as depth. Where Qiskit counts a control-flow instruction as one operation, these count what its blocks run (see `control_flow_cost`), so a loop of ten gates is no shallower or smaller than the ten gates; a circuit without control flow gets Qiskit's own `depth` and `size`.
+- `control_flow_cost(operation, block_cost, *, repeat, worst)`: what one execution of a control-flow instruction costs, from `block_cost` of each block: `repeat(body, n)` for a `for_loop` over `n` indices, `worst` of the branches for an `if_else` or `switch_case` (an `if` without `else` is its body), and the body once for a `while_loop` or `box`; `None` for an instruction without blocks.
+- `executed_operation_count(circuit, counts) -> int` and `two_qubit_operation_count(circuit) -> int`: the operations one shot executes for which `counts(operation, qubits)` holds, a control-flow instruction contributing its blocks' count instead of itself; the second counts two-qubit operations other than directives.
 - `is_terminal_measurement(data, index) -> bool`: whether nothing after `data[index]` other than `barrier` or `delay` acts on the measured qubit or its classical bit; `data` holds `(operation, qubits, clbits)` triples. `SCHEDULING_DIRECTIVES` is `frozenset({"barrier", "delay"})`.
 - `instruction_parts(entry) -> (operation, qubits, clbits)`, `shares_bit(bits, other) -> bool`, and `bit_index(circuit, bit) -> int`: accessors that also accept tuple-style instructions and bit objects without `find_bit`.
 - `validate_integral(name, value, *, positive=False, non_negative=False) -> int`: validates an integer option, rejecting booleans, and returns it as an `int`; `validate_flag(name, value) -> bool` accepts only booleans (NumPy's included) and returns a `bool`.

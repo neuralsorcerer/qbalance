@@ -6,12 +6,17 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 import numpy as np
 
 from qbalance.logging import get_logger
-from qbalance.utils import SCHEDULING_DIRECTIVES, bit_index, instruction_parts
+from qbalance.utils import (
+    SCHEDULING_DIRECTIVES,
+    bit_index,
+    control_flow_cost,
+    instruction_parts,
+)
 
 log = get_logger(__name__)
 
@@ -178,12 +183,15 @@ def _coerce_error_rate(value: Any) -> Optional[float]:
 def estimate_circuit_error(backend: Any, circuit: Any) -> float:
     """Return the probability that at least one instruction of ``circuit`` fails.
 
-    That is ``1 - prod(1 - e_i)`` over the instructions, with ``e_i`` the
-    backend's calibrated error for the instruction on its qubits.  An
-    instruction without calibration data counts as 1e-3 (one qubit), 1e-2
-    (two qubits) or 2e-2 (a measurement), and one on three or more qubits
-    always as 1e-3.  Barriers and delays are not billed, and idle
-    decoherence is not modelled.
+    That is ``1 - prod(1 - e_i)`` over the instructions one shot executes,
+    with ``e_i`` the backend's calibrated error for the instruction on its
+    qubits.  An instruction without calibration data counts as 1e-3 (one
+    qubit), 1e-2 (two qubits) or 2e-2 (a measurement), and one on three or
+    more qubits always as 1e-3.  A control-flow instruction is priced by the
+    instructions its blocks run on the instruction's qubits: a ``for_loop``'s
+    body once per index, the costliest branch of an ``if_else`` or
+    ``switch_case``, and a ``while_loop``'s or ``box``'s body once.  Barriers
+    and delays are not billed, and idle decoherence is not modelled.
 
     Args:
         backend: Backend whose calibration data prices the instructions.
@@ -192,45 +200,83 @@ def estimate_circuit_error(backend: Any, circuit: Any) -> float:
     Returns:
         The estimate, in ``[0, 1]``; 1.0 when the circuit cannot be read.
     """
-    # 1 - Π(1-e_i) approximation
-    total_survival = 1.0
     try:
-        target = _backend_target(backend)
-        for entry in circuit.data:
-            inst, qargs, _ = instruction_parts(entry)
-            name = getattr(inst, "name", "").lower()
-            if name in _DIRECTIVE_NAMES:
-                # Barriers/delays are scheduling directives, not error channels;
-                # a two-qubit barrier must not be billed as a two-qubit gate.
-                continue
-            if len(qargs) == 2:
-                q0 = bit_index(circuit, qargs[0])
-                q1 = bit_index(circuit, qargs[1])
-                e = _safe_get_2q_error(backend, name, q0, q1)
-                if e is None:
-                    e = 0.01
-                total_survival *= 1.0 - e
-            elif name == "measure" and len(qargs) == 1:
-                q0 = bit_index(circuit, qargs[0])
-                e = _safe_get_qubit_readout_error(backend, q0)
-                if e is None:
-                    e = 0.02
-                total_survival *= 1.0 - e
-            elif len(qargs) == 1:
-                # 1q gate errors: prefer target calibration, else 0.001
-                q0 = bit_index(circuit, qargs[0])
-                e = _target_instruction_error(target, name, (q0,))
-                if e is None:
-                    e = 0.001
-                total_survival *= 1.0 - e
-            elif len(qargs) > 0:
-                # multi-qubit (>2) operations: conservative default
-                total_survival *= 1.0 - 0.001
+        total_survival = _survival(
+            backend,
+            _backend_target(backend),
+            circuit,
+            lambda qubit: bit_index(circuit, qubit),
+        )
     except Exception:
         return 1.0
     if not np.isfinite(total_survival):
         return 1.0
     return float(np.clip(1.0 - total_survival, 0.0, 1.0))
+
+
+def _repeated_survival(survival: float, times: int) -> float:
+    """Survival of a block run ``times`` times."""
+    return survival**times
+
+
+def _worst_survival(survivals: Iterable[float]) -> float:
+    """Survival of the riskiest of several branches."""
+    return min(survivals)
+
+
+def _survival(
+    backend: Any, target: Any, circuit: Any, physical: Callable[[Any], int]
+) -> float:
+    """Probability that no instruction of ``circuit`` fails (``1 - prod(1 - e_i)``).
+
+    ``physical`` maps a qubit of ``circuit`` to the backend qubit it runs on;
+    a control-flow block's qubits are its instruction's, in order.
+    """
+    # 1 - Π(1-e_i) approximation
+    total_survival = 1.0
+    for entry in circuit.data:
+        inst, qargs, _ = instruction_parts(entry)
+        name = getattr(inst, "name", "").lower()
+        if name in _DIRECTIVE_NAMES:
+            # Barriers/delays are scheduling directives, not error channels;
+            # a two-qubit barrier must not be billed as a two-qubit gate.
+            continue
+        outer = [physical(qubit) for qubit in qargs]
+
+        def block_survival(block: Any, outer: List[int] = outer) -> float:
+            return _survival(
+                backend, target, block, lambda qubit: outer[bit_index(block, qubit)]
+            )
+
+        nested = control_flow_cost(
+            inst,
+            block_survival,
+            repeat=_repeated_survival,
+            worst=_worst_survival,
+        )
+        if nested is not None:
+            total_survival *= nested
+        elif len(qargs) == 2:
+            q0, q1 = outer
+            e = _safe_get_2q_error(backend, name, q0, q1)
+            if e is None:
+                e = 0.01
+            total_survival *= 1.0 - e
+        elif name == "measure" and len(qargs) == 1:
+            e = _safe_get_qubit_readout_error(backend, outer[0])
+            if e is None:
+                e = 0.02
+            total_survival *= 1.0 - e
+        elif len(qargs) == 1:
+            # 1q gate errors: prefer target calibration, else 0.001
+            e = _target_instruction_error(target, name, (outer[0],))
+            if e is None:
+                e = 0.001
+            total_survival *= 1.0 - e
+        elif len(qargs) > 0:
+            # multi-qubit (>2) operations: conservative default
+            total_survival *= 1.0 - 0.001
+    return total_survival
 
 
 # Weight of each median-normalized coherence time in the physical-qubit score.

@@ -1428,7 +1428,7 @@ def _objective_score(metrics: Mapping[str, Any] | None, objective: Objective) ->
 
 # Bump whenever compile_ensemble's output for unchanged inputs changes, so
 # entries written by the previous pipeline are no longer served.
-_COMPILE_CACHE_VERSION = 7
+_COMPILE_CACHE_VERSION = 8
 
 
 def _calibration_fingerprint(backend: Any) -> str:
