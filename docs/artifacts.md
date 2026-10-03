@@ -124,7 +124,7 @@ Selection diagnostics are JSON-safe and finite-aware:
 
 Candidate rankings are derived from `evaluation_history` and are also JSON-safe:
 
-- entries are sorted by the same finite-safe selection score used for final strategy selection, then by `original_index` for deterministic ties;
+- entries are sorted by the same finite-safe selection score used for final strategy selection, with the selected candidate first among equal scores, then by `original_index` for deterministic ties;
 - `objective_score` is the diagnostic score recomputed from finite weighted objective terms;
 - `selection_score` mirrors selection semantics, including a valid stored `metrics["objective_score"]` when available, and becomes `null` for incomparable candidates;
 - `objective_terms` records the finite weighted terms used for the diagnostic score;

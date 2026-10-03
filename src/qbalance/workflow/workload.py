@@ -301,6 +301,10 @@ class BalancedWorkload:
                         if row["selection_score"] is None
                         else float(row["selection_score"])
                     ),
+                    # The selection is first among equal scores, as selection
+                    # broke the tie in its favor; evaluation order breaks the
+                    # rest.
+                    not row["selected"],
                     int(row["_tie_index"]),
                 )
             )
@@ -709,7 +713,8 @@ class Workload:
         Every circuit is compiled with the baseline strategy,
         ``StrategySpec(optimization_level=1, routing_method="sabre")``, and with
         each candidate, scored with the objective (lower is better), and the
-        best feasible candidate is selected.  A candidate whose cutting,
+        best feasible candidate is selected; among equal scores, the one that
+        comes first in the candidate order.  A candidate whose cutting,
         compilation, execution or requested mitigation fails stays in the
         evaluation history but cannot be selected.
 
@@ -809,6 +814,7 @@ class Workload:
         )
         if not candidates:
             raise ValueError("at least one candidate strategy is required")
+        candidate_position = {spec: index for index, spec in enumerate(candidates)}
         budget = (
             len(candidates)
             if max_evaluations is None
@@ -912,7 +918,14 @@ class Workload:
                 Strategy(spec=spec, metrics=dict(metrics)) for spec, metrics in evals
             ]
             try:
-                ranked = _rank_candidates(evals, pareto=pareto, objective=obj)
+                # Equal scores go to the earlier candidate, not to whichever
+                # the search happened to evaluate first: with every candidate
+                # evaluated, grid and bandit search then select alike.
+                ranked = _rank_candidates(
+                    sorted(evals, key=lambda item: candidate_position[item[0]]),
+                    pareto=pareto,
+                    objective=obj,
+                )
             except RuntimeError as exc:
                 raise QBalanceError(f"Circuit {rec.name!r}: {exc}") from exc
             chosen_spec, chosen_m = ranked[0]
@@ -1584,7 +1597,7 @@ def _rank_candidates(
     """Return the selection pool, best objective score first.
 
     The pool is every feasible candidate, or the Pareto front of them with
-    ``pareto=True``; ties keep evaluation order.
+    ``pareto=True``; ties keep the order of ``evals``.
 
     Raises:
         RuntimeError: If no candidate was evaluated, or none is feasible.

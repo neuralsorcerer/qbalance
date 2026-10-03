@@ -278,3 +278,41 @@ def test_adjust_guard_selects_the_non_regressing_candidate(monkeypatch, tmp_path
     rows = [row for row in balanced.candidate_rankings()["c0"] if row["selected"]]
     # The guard-picked candidate is marked on its own row, not duplicated.
     assert len(rows) == 1 and rows[0]["original_index"] == 1
+
+
+def test_equal_scores_select_the_earlier_candidate_in_every_search_mode(
+    monkeypatch, tmp_path
+):
+    """Regression: with every candidate evaluated, the mode changed the pick.
+
+    Equal scores went to whichever candidate the search evaluated first, so
+    bandit search (which shuffles) and grid search selected different
+    strategies for one circuit although both evaluated all of them -- and the
+    documentation says the mode changes only the order then.  Ties now go to
+    the earlier candidate, and the selection ranks first among equal scores.
+    """
+    rec = wl.CircuitRecord(name="c0", artifact="c0.qpy", format="qpy")
+    ds = wl.CircuitDataset(tmp_path, [rec])
+    monkeypatch.setattr(ds, "load_circuits", lambda: [_Circ()])
+    monkeypatch.setattr(wl, "resolve_backend", lambda spec: object())
+    monkeypatch.setattr(
+        wl,
+        "_evaluate_candidate",
+        lambda circuit, backend, spec, **kwargs: {"depth": 5.0, "objective_score": 5.0},
+    )
+    strategies = [StrategySpec(optimization_level=level) for level in (2, 0, 3)]
+    workload = wl.Workload(dataset=ds, backend_spec="stub")
+
+    for search in ("grid", "bandit"):
+        for seed in range(4):
+            balanced = workload.adjust(
+                objective={"depth": 1.0},
+                search=search,
+                strategies=strategies,
+                seed=seed,
+                warmup=1,
+            )
+            assert balanced.selections["c0"].spec == strategies[0]
+            rankings = balanced.candidate_rankings()["c0"]
+            assert rankings[0]["selected"] is True
+            assert rankings[0]["spec"] == strategies[0].model_dump()
