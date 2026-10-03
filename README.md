@@ -570,7 +570,7 @@ python -m qbalance plugins list
 - If no candidate of a circuit is feasible, `adjust()` raises `QBalanceError` (a `RuntimeError`) listing the failures.
 - `matrix` validates `shots` as a positive integer and `seed` as a non-negative integer.
 - `matrix` raises `ValueError` if dataset record count and loaded circuit count mismatch.
-- Existing output paths require explicit overwrite flags.
+- `dataset`, `adjust`, and `compile` refuse an existing `--out` without `--overwrite` (in Python, `save_dataset`, `BalancedWorkload.save`, and `to_download` without `overwrite=True`); `matrix` and `report` replace the files they write.
 - Optional dependency features require installed extras.
 - Cutting, compilation, execution, and mitigation failures are captured in metrics (`cutting_error`, `compile_error`, `exec_error`, `mthree_error`, `zne_error`) so runs can continue; in `adjust` such a candidate is kept in the history but is infeasible for selection.
 
