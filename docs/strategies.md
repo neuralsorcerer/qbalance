@@ -7,23 +7,23 @@ A strategy is represented by `qbalance.StrategySpec`. It is immutable and combin
 | Field | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `optimization_level` | `int` | `1` | Qiskit preset optimization level, `0..3`. |
-| `layout_method` | `str` | `None` | `None` | Qiskit layout method or `"qbalance_noise_aware"`. See the note below for how it places qubits. |
-| `routing_method` | `str` | `None` | `None` | Qiskit routing method, commonly `"sabre"`. |
-| `translation_method` | `str` | `None` | `None` | Qiskit translation method. |
-| `seed_transpiler` | `int` | `None` | `0` | Transpiler seed; must be non-negative. |
+| `layout_method` | `Optional[str]` | `None` | Qiskit layout method or `"qbalance_noise_aware"`. See the note below for how it places qubits. |
+| `routing_method` | `Optional[str]` | `None` | Qiskit routing method, commonly `"sabre"`. |
+| `translation_method` | `Optional[str]` | `None` | Qiskit translation method. |
+| `seed_transpiler` | `Optional[int]` | `0` | Transpiler seed; must be non-negative. |
 | `pauli_twirling` | `bool` | `False` | Twirls the two-qubit gates of the *compiled* circuit into `num_twirls` random, target-native instances (twirling before transpilation lets optimization re-synthesize the twirl away). Every instance is executed, on an equal share of the shots, because a twirl only suppresses noise averaged over its instances. |
 | `num_twirls` | `int` | `1` | Number of randomized instances for Pauli and/or measurement twirling; must be at least `1`. |
 | `dynamical_decoupling` | `bool` | `False` | Adds a DD pass manager after compilation when supported. |
 | `dd_sequence` | `str` | `"XY4"` | One of `"XY4"`, `"XX"`, or `"YY"` (case-insensitive, stored upper-case); any other name is rejected. When the target cannot run `y`, an `XY4` request is padded with `XX` instead. |
 | `measurement_twirling` | `bool` | `False` | Flips each terminal measurement at random and records the flips, per instance (`measurement_flip_maps`), so every instance's counts are untwirled with its own pattern. Readout error is symmetrized only on average over the instances: with `num_twirls=1` the single fixed pattern just relabels which outcomes suffer the larger error, so use several instances (the default candidates use 8). |
-| `seed_suppression` | `int` | `None` | `0` | Seed for suppression transforms; must be non-negative. Instance `i` of a measurement-twirled ensemble uses `seed_suppression + i`. |
+| `seed_suppression` | `Optional[int]` | `0` | Seed for suppression transforms; must be non-negative. Instance `i` of a measurement-twirled ensemble uses `seed_suppression + i`. |
 | `mthree` | `bool` | `False` | Enables M3 mitigation during execution workflows. |
 | `zne` | `bool` | `False` | Enables zero-noise extrapolation during execution workflows. |
 | `zne_factors` | `tuple[float, ...]` | `(1.0, 3.0, 5.0)` | Must be finite, sorted, include `1.0`, and be `>= 1.0` when `zne=True`. Global folding realizes odd integer factors, so each factor is rounded up to the next odd integer (`2.0` runs at `3`); extrapolation uses these realized factors, which are recorded as `zne_realized_factors`. The default asks for three distinct noise levels (the former default `(1, 2, 3)` ran at `(1, 3, 3)`). |
 | `zne_degree` | `int` | `1` | Must be non-negative generally and, when `zne=True`, at least `1` and smaller than the number of *distinct realized* fold factors. |
 | `cutting` | `bool` | `False` | Cuts circuits wider than `max_subcircuit_qubits` into subexperiments with `qiskit-addon-cutting`, compiles each, and (when executed) reconstructs the measured Z-parity. Cannot be combined with `pauli_twirling`, `measurement_twirling`, `mthree`, or `zne`. See the note below. |
-| `max_subcircuit_qubits` | `int` | `None` | `None` | Required when `cutting=True`; if provided, must be `>= 1`. |
-| `resilience_level` | `int` | `None` | `None` | Optional IBM Runtime-style level; valid values are `0`, `1`, or `2`. Carried through to artifacts as metadata; the local compile/execute path does not apply it. |
+| `max_subcircuit_qubits` | `Optional[int]` | `None` | Required when `cutting=True`; if provided, must be `>= 1`. |
+| `resilience_level` | `Optional[int]` | `None` | Optional IBM Runtime-style level; valid values are `0`, `1`, or `2`. Carried through to artifacts as metadata; the local compile/execute path does not apply it. |
 
 Boolean values are rejected for integer-like fields even though Python treats `bool` as a subclass of `int`.
 

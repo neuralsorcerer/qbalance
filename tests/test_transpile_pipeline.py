@@ -1266,6 +1266,9 @@ def test_zne_compiles_report_the_shots_extrapolation_costs():
     # Folding realizes (1, 3, 3) here; the repeated point costs shots too.
     assert zne_sampling_overhead((1.0, 2.0, 3.0)) == pytest.approx(7.125)
     assert zne_sampling_overhead((1.0,), 0) == pytest.approx(1.0)
+    # Factors realizing 1 share the one unfolded run, so a repeated 1.0 adds
+    # neither shots nor information: the estimate is exactly the (1, 3) fit.
+    assert zne_sampling_overhead((1.0, 1.0, 3.0)) == pytest.approx(5.0)
     with pytest.raises(ValueError, match="distinct"):
         zne_sampling_overhead((1.0, 2.0, 3.0), 2)
 

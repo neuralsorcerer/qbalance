@@ -1056,7 +1056,7 @@ $$
 \gamma_{\mathrm{ZNE}} = n \sum_{i=1}^{n} c_i^2
 $$
 
-times the shots: $4.375$ for the default linear fit at factors $(1, 3, 5)$, where $c = (\tfrac{13}{12}, \tfrac{1}{3}, -\tfrac{5}{12})$; $15.65625$ for a quadratic fit at the same factors; and $7.125$ for a linear fit at $(1, 2, 3)$, which realizes $(1, 3, 3)$. An invalid factor or degree, or fewer than $d + 1$ distinct realized factors, raises `ValueError`. Compile metrics record the value as `sampling_overhead`.
+times the shots: $4.375$ for the default linear fit at factors $(1, 3, 5)$, where $c = (\tfrac{13}{12}, \tfrac{1}{3}, -\tfrac{5}{12})$; $15.65625$ for a quadratic fit at the same factors; and $7.125$ for a linear fit at $(1, 2, 3)$, which realizes $(1, 3, 3)$. Factors that realize 1 all reuse that one unfolded execution, so they count as a single run whose coefficient is the sum of theirs: $(1, 1, 3)$ costs $5$, exactly what $(1, 3)$ does. An invalid factor or degree, or fewer than $d + 1$ distinct realized factors, raises `ValueError`. Compile metrics record the value as `sampling_overhead`.
 
 ```pycon
 >>> from qbalance.mitigation import zne_sampling_overhead

@@ -120,14 +120,20 @@ def realized_fold_factor(scale: float) -> int:
 def zne_sampling_overhead(factors: Sequence[float], degree: int = 1) -> float:
     """Return the factor by which ZNE multiplies the shots a precision needs.
 
-    Every factor runs on the full shot budget, and the extrapolated value is a
-    fixed linear combination ``sum(w_i * y_i)`` of the measured points (the
-    intercept of the least-squares polynomial fit), so its variance is
-    ``sum(w_i**2)`` times that of one point.  Matching the precision of a
+    Every folded factor runs on the full shot budget, and the extrapolated
+    value is a fixed linear combination ``sum(w_i * y_i)`` of the measured
+    points (the intercept of the least-squares polynomial fit), so its variance
+    is ``sum(w_i**2)`` times that of one point.  Matching the precision of a
     single unmitigated run therefore takes ``n * sum(w_i**2)`` times the shots
     for ``n`` factors: 4.375 for the default linear fit at factors
     ``(1, 3, 5)``, and about 15.7 for a quadratic one.  The fit uses the
     factors folding actually realizes (see :func:`realized_fold_factor`).
+
+    Every factor that realizes 1 reuses the one unfolded run, as
+    :func:`~qbalance.execution.ensemble.run_ensemble` executes it: those
+    points are a single measurement, which counts once among the runs and
+    carries the sum of their weights.  With a single such factor this is the
+    formula above.
 
     Args:
         factors: Requested noise scale factors, each ``>= 1.0``.
@@ -147,7 +153,12 @@ def zne_sampling_overhead(factors: Sequence[float], degree: int = 1) -> float:
         raise ValueError("not enough distinct realized factors for the degree")
     design = np.vander(realized, int(degree) + 1, increasing=True)
     intercept_weights = np.linalg.pinv(design)[0]
-    return float(realized.size * np.sum(intercept_weights**2))
+    unfolded = realized == 1.0
+    runs = int(np.any(unfolded)) + int(np.count_nonzero(~unfolded))
+    variance = float(np.sum(intercept_weights[unfolded])) ** 2 + float(
+        np.sum(intercept_weights[~unfolded] ** 2)
+    )
+    return float(runs * variance)
 
 
 def fold_global(circuit: Any, scale: float) -> Any:
