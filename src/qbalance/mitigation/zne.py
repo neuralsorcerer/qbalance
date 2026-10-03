@@ -240,13 +240,22 @@ def _rebase_to_backend(circuit: Any, backend: Any) -> Any:
     folding, the qubit layout, and the measurement clbit mapping intact -- all
     of which the ZNE extrapolation depends on to compare counts across factors.
 
+    A circuit narrower than the backend was not laid out on it -- an
+    unconstrained simulator such as ``AerSimulator()`` keeps a circuit's own
+    width -- and the preset pass manager would widen it to the whole backend
+    with ancillas.  Its gates are translated in place instead, which keeps
+    every qubit and classical bit, and so the count keys, where they are.
+
     Returns the circuit unchanged when the backend cannot be described to the
-    preset pass manager, or when the circuit is not sized for this backend
-    (re-transpiling would then relayout it and shift the count-key bit order).
+    preset pass manager, or when the translation fails.
     """
     try:
         from qiskit.providers import BackendV2
-        from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+        from qiskit.transpiler.preset_passmanagers import (
+            generate_preset_pass_manager,
+            generate_translation_passmanager,
+            generate_unroll_3q,
+        )
     except Exception:  # pragma: no cover - qiskit always provides these
         return circuit
 
@@ -254,17 +263,19 @@ def _rebase_to_backend(circuit: Any, backend: Any) -> Any:
         return circuit
 
     num_qubits = getattr(circuit, "num_qubits", None)
-    if not isinstance(num_qubits, int) or num_qubits != getattr(
-        backend, "num_qubits", None
-    ):
+    if not isinstance(num_qubits, int):
         return circuit
 
     try:
-        pass_manager = generate_preset_pass_manager(
-            optimization_level=0,
-            backend=backend,
-            initial_layout=list(range(num_qubits)),
-        )
+        if num_qubits == getattr(backend, "num_qubits", None):
+            pass_manager = generate_preset_pass_manager(
+                optimization_level=0,
+                backend=backend,
+                initial_layout=list(range(num_qubits)),
+            )
+        else:
+            pass_manager = generate_unroll_3q(target=backend.target)
+            pass_manager += generate_translation_passmanager(target=backend.target)
         return pass_manager.run(circuit)
     except Exception as e:
         log.warning("Could not rebase folded circuit to the backend basis: %s", e)

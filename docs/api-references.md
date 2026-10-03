@@ -1094,7 +1094,7 @@ True
 
 `qbalance.mitigation.fold_global_for_backend(circuit, backend, scale) -> QuantumCircuit`
 
-Folds a compiled circuit and translates it back into the backend's native basis (a level-0 preset pass manager with the identity layout), keeping the physical qubits, the measurement mapping, and the compiled circuit's `TranspileLayout`. A backend the preset pass manager cannot target, or a circuit not sized for the backend, gets the folded circuit untranslated.
+Folds a compiled circuit and translates it back into the backend's native basis (a level-0 preset pass manager with the identity layout), keeping the physical qubits, the measurement mapping, and the compiled circuit's `TranspileLayout`. A circuit narrower than the backend (an unconstrained simulator such as `AerSimulator()` keeps a circuit's own width) has its gates translated in place instead, so it is not widened onto the whole backend and no qubit or classical bit moves. A backend the preset pass manager cannot target, or a translation that fails, gets the folded circuit untranslated.
 
 ```pycon
 >>> from qbalance.mitigation import fold_global_for_backend

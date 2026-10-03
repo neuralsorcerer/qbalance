@@ -1049,3 +1049,48 @@ def test_mthree_records_an_error_for_a_circuit_measuring_in_control_flow():
     assert set(run.counts) == {"00", "11"}
     assert run.mthree_probs is None
     assert "control-flow block" in run.mthree_error
+
+
+def test_zne_folds_run_on_an_unconstrained_aer_simulator():
+    """Regression: folding added gates Aer cannot run, and nothing translated them.
+
+    ``AerSimulator()`` runs ``csx`` but not its inverse ``csxdg``, and an
+    unconstrained simulator keeps a circuit's own width, which the re-basing
+    used to skip ("not sized for this backend").  Every ZNE candidate with a
+    ``csx`` then failed with "unknown instruction: csxdg".
+    """
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import Statevector
+    from qiskit_aer import AerSimulator
+
+    from qbalance.execution.ensemble import run_ensemble
+
+    backend = AerSimulator()
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.csx(0, 1)
+    qc.measure([0, 1], [0, 1])
+
+    folded = zne.fold_global_for_backend(qc, backend, 3)
+    assert folded.num_qubits == 2
+    assert set(folded.count_ops()) <= set(backend.target.operation_names)
+
+    def probabilities(circuit):
+        unmeasured = circuit.remove_final_measurements(inplace=False)
+        return Statevector.from_instruction(unmeasured).probabilities_dict()
+
+    expected, actual = probabilities(qc), probabilities(folded)
+    for key in set(expected) | set(actual):
+        assert actual.get(key, 0.0) == pytest.approx(expected.get(key, 0.0), abs=1e-9)
+
+    run = run_ensemble(
+        backend,
+        [qc],
+        {"measurement_flip_map": {}},
+        shots=200,
+        seed=1,
+        zne_factors=(1.0, 3.0, 5.0),
+    )
+    assert run.zne_error is None
+    assert run.zne_realized_factors == [1.0, 3.0, 5.0]
