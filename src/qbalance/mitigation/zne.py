@@ -31,10 +31,13 @@ _NON_TERMINAL_MEASUREMENT_ERROR = (
 )
 
 
+_InstructionParts = tuple[Any, tuple[Any, ...], tuple[Any, ...]]
+
+
 def _split_terminal_suffix(
     circuit: Any,
-) -> tuple[Any, list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]]]:
-    """Return the invertible part of ``circuit`` plus its terminal measurements.
+) -> tuple[list[_InstructionParts], Any, list[_InstructionParts]]:
+    """Return ``circuit``'s leading resets, invertible part, and terminal measurements.
 
     Every measurement must be terminal (see
     :func:`~qbalance.utils.is_terminal_measurement`).
@@ -47,17 +50,35 @@ def _split_terminal_suffix(
     (nothing later shares its qubit or clbit), so moving all of them behind the
     folded unitary preserves the computation.  Directives listed after a
     qubit's terminal measurement stay behind it as well.
+
+    A reset on a qubit nothing has acted on yet (directives aside) re-prepares
+    the ``|0>`` the qubit starts in, and nothing listed before it shares that
+    qubit, so it moves ahead of the folded unitary and runs once -- the
+    state preparation counterpart of the terminal measurements.  Qiskit keeps
+    such resets at every optimization level, and the common
+    ``reset(range(n))`` preamble would otherwise make every circuit using it
+    unfoldable.  Any other reset stays in the unitary part, which then cannot
+    be inverted.
     """
     copy_empty_like = getattr(circuit, "copy_empty_like", None)
     if not callable(copy_empty_like):
-        return circuit, []
+        return [], circuit, []
 
     data = [instruction_parts(entry) for entry in list(getattr(circuit, "data", []))]
     unitary = copy_empty_like()
-    terminal: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]] = []
+    leading: list[_InstructionParts] = []
+    terminal: list[_InstructionParts] = []
     measured_qubits: list[Any] = []
+    touched_qubits: list[Any] = []
     for index, (inst, qargs, cargs) in enumerate(data):
         name = getattr(inst, "name", "")
+        if name == "reset" and not any(
+            shares_bit((qubit,), touched_qubits) for qubit in qargs
+        ):
+            leading.append((inst, qargs, cargs))
+            continue
+        if name not in _SUFFIX_TRANSPARENT_OPS:
+            touched_qubits.extend(qargs)
         if name == "measure":
             if not is_terminal_measurement(data, index):
                 raise ValueError(_NON_TERMINAL_MEASUREMENT_ERROR)
@@ -73,7 +94,7 @@ def _split_terminal_suffix(
             continue
         unitary.append(inst, qargs, cargs)
 
-    return unitary, terminal
+    return leading, unitary, terminal
 
 
 def _validated_scale(scale: Any) -> float:
@@ -165,22 +186,26 @@ def fold_global(circuit: Any, scale: float) -> Any:
     """Globally fold ``circuit`` to scale its noise by an odd integer factor.
 
     Args:
-        circuit: QuantumCircuit to fold.  Every measurement must be terminal.
+        circuit: QuantumCircuit to fold.  Every measurement must be terminal,
+            and every reset must act on a qubit before anything else does.
         scale: Requested noise scale factor, ``>= 1.0``; it is rounded up to the
             odd factor reported by :func:`realized_fold_factor`.
 
     Returns:
         ``circuit`` itself when the realized factor is 1, otherwise the folded
-        circuit ``U (U^dagger U)^r`` followed by the terminal measurements.
+        circuit ``U (U^dagger U)^r`` between the leading resets and the
+        terminal measurements.
 
     Raises:
         ValueError: If ``scale`` is invalid or a measurement is not terminal.
+        CircuitError: If the part to fold cannot be inverted (a reset after
+            other operations on its qubit, say).
     """
     k = realized_fold_factor(scale)
     if k == 1:
         return circuit
 
-    base, terminal_suffix = _split_terminal_suffix(circuit)
+    leading_resets, base, terminal_suffix = _split_terminal_suffix(circuit)
     qc = base.copy()
     inv = base.inverse()
     # construct: U (U^dag U)^{(k-1)/2}
@@ -188,6 +213,14 @@ def fold_global(circuit: Any, scale: float) -> Any:
     reps = (k - 1) // 2
     for _ in range(reps):
         out = out.compose(inv).compose(qc)
+
+    if leading_resets:
+        preparation = base.copy_empty_like()
+        # The folded circuit already carries the global phase.
+        preparation.global_phase = 0
+        for inst, qargs, cargs in leading_resets:
+            preparation.append(inst, qargs, cargs)
+        out = out.compose(preparation, front=True)
 
     for inst, qargs, cargs in terminal_suffix:
         out.append(inst, qargs, cargs)

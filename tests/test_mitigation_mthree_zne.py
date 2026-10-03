@@ -908,3 +908,81 @@ def test_mthree_is_reproducible_for_a_seed_on_any_simulator(spec):
         )
 
     assert mitigate() == mitigate()
+
+
+def test_fold_global_runs_leading_resets_once_ahead_of_the_folded_unitary():
+    """Regression: a reset preamble made every circuit using it unfoldable.
+
+    Qiskit keeps a circuit's initial resets at every optimization level, and
+    ``reset`` has no inverse, so ZNE failed outright on the common
+    ``reset(range(n))`` preamble.  A reset before anything else acts on its
+    qubit only re-prepares ``|0>``; it runs once, ahead of the folded unitary,
+    just as terminal measurements run once after it.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.circuit.exceptions import CircuitError
+    from qiskit.quantum_info import DensityMatrix
+
+    qc = QuantumCircuit(2, 2, global_phase=0.3)
+    qc.reset([0, 1])
+    qc.barrier()
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.ry(0.4, 1)
+    qc.measure([0, 1], [0, 1])
+
+    folded = zne.fold_global(qc, 3)
+
+    names = [instruction.operation.name for instruction in folded.data]
+    assert names[:2] == ["reset", "reset"]
+    assert names.count("reset") == 2
+    assert names[-2:] == ["measure", "measure"]
+    assert folded.count_ops()["cx"] == 3
+    assert folded.global_phase == pytest.approx(qc.global_phase)
+
+    def probabilities(circuit):
+        unmeasured = circuit.remove_final_measurements(inplace=False)
+        return DensityMatrix.from_instruction(unmeasured).probabilities_dict()
+
+    expected, actual = probabilities(qc), probabilities(folded)
+    for key in set(expected) | set(actual):
+        assert actual.get(key, 0.0) == pytest.approx(expected.get(key, 0.0), abs=1e-9)
+
+    # A reset after another operation on its qubit is part of the computation
+    # and still cannot be folded.
+    mid = QuantumCircuit(1, 1)
+    mid.h(0)
+    mid.reset(0)
+    mid.x(0)
+    mid.measure(0, 0)
+    with pytest.raises(CircuitError, match="reset"):
+        zne.fold_global(mid, 3)
+
+
+def test_zne_runs_on_compiled_circuits_with_a_reset_preamble():
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.execution.ensemble import run_ensemble
+    from qbalance.strategies import StrategySpec
+    from qbalance.transpile.pipeline import compile_ensemble
+
+    backend = GenericBackendV2(num_qubits=3, seed=0)
+    qc = QuantumCircuit(2, 2)
+    qc.reset([0, 1])
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    spec = StrategySpec(zne=True)
+    instances, metrics = compile_ensemble(qc, backend, spec)
+    assert instances[0].count_ops()["reset"] == 2
+
+    run = run_ensemble(
+        backend, instances, metrics, shots=500, seed=1, zne_factors=spec.zne_factors
+    )
+
+    assert run.zne_error is None
+    assert run.zne_realized_factors == [1.0, 3.0, 5.0]
+    assert run.zne_probs

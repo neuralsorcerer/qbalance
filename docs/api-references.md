@@ -1078,7 +1078,7 @@ $$
 U \left(U^\dagger U\right)^{(k-1)/2}
 $$
 
-and re-appends the measurements, returning `circuit` itself when $k = 1$. The split is made per qubit, so gates listed after another qubit's measurement are folded too. Every measurement must be terminal (nothing later touches its qubit or classical bit), or `ValueError` is raised. Folding appends `circuit.inverse()`, whose adjoint gates (for example `sxdg`) may lie outside a backend's basis; fold compiled circuits with `fold_global_for_backend`.
+and re-appends the measurements, returning `circuit` itself when $k = 1$. The split is made per qubit, so gates listed after another qubit's measurement are folded too. Every measurement must be terminal (nothing later touches its qubit or classical bit), or `ValueError` is raised. A reset that acts on its qubit before anything else does only re-prepares $|0\rangle$, so it runs once, ahead of the folded unitary (Qiskit keeps a `reset(range(n))` preamble at every optimization level); any other reset is part of the unitary and cannot be inverted, so folding raises `CircuitError`. Folding appends `circuit.inverse()`, whose adjoint gates (for example `sxdg`) may lie outside a backend's basis; fold compiled circuits with `fold_global_for_backend`.
 
 ```pycon
 >>> from qbalance.mitigation import fold_global
