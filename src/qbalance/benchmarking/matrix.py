@@ -22,7 +22,12 @@ from qbalance.execution.ensemble import run_ensemble
 from qbalance.logging import get_logger
 from qbalance.strategies import StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_ensemble
-from qbalance.utils import atomic_write_bytes, validate_flag, validate_integral
+from qbalance.utils import (
+    atomic_write_bytes,
+    strict_json_value,
+    validate_flag,
+    validate_integral,
+)
 
 log = get_logger(__name__)
 
@@ -164,7 +169,13 @@ def run_matrix(
     }
     # Read back by `qbalance report`, and written at the end of a run that
     # may have taken hours; a truncated file fails the next step outright.
-    atomic_write_bytes(out_json, json.dumps(payload, indent=2).encode("utf-8"))
+    # Non-finite numbers are written as null, keeping the file strict JSON.
+    atomic_write_bytes(
+        out_json,
+        json.dumps(strict_json_value(payload), indent=2, allow_nan=False).encode(
+            "utf-8"
+        ),
+    )
     return out_json
 
 

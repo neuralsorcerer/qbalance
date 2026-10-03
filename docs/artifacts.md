@@ -112,6 +112,8 @@ A minimal shape is:
 
 Both write their output under a temporary name beside the destination and move it into place only once it is complete, so a failed save or export leaves an existing one intact; `save_dataset` and `qbalance compile` do the same.
 
+`results.json`, the matrix JSON, and the `meta.json` of `qbalance compile` are strict JSON that any parser accepts: a non-finite number is written as `null`, never as a bare `NaN` or `Infinity`. The one such value a run normally produces is the `objective_score` of an infeasible candidate, which is $+\infty$ in memory; its `strategy_failed` flag still marks it, so a reloaded workload ranks and diagnoses exactly as the one that was saved.
+
 
 Selection diagnostics are JSON-safe and finite-aware:
 

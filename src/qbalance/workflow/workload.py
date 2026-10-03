@@ -47,6 +47,7 @@ from qbalance.utils import (
     dump_json,
     replacing_directory,
     stable_hash_str,
+    strict_json_value,
     validate_flag,
     validate_integral,
 )
@@ -412,8 +413,12 @@ class BalancedWorkload:
                 for name, strategies in self.evaluation_history.items()
             },
         }
+        # An infeasible candidate scores +inf in memory; written as null, so
+        # results.json stays strict JSON (strategy_failed still marks it).
         (out_dir / "results.json").write_bytes(
-            json.dumps(results, indent=2).encode("utf-8")
+            json.dumps(strict_json_value(results), indent=2, allow_nan=False).encode(
+                "utf-8"
+            )
         )
         (out_dir / "summary.txt").write_text(self.summary() + "\n", encoding="utf-8")
 

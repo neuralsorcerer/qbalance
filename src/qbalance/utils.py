@@ -294,6 +294,26 @@ def replacing_directory(target: Path) -> Iterator[Path]:
             shutil.rmtree(staging, ignore_errors=True)
 
 
+def strict_json_value(value: Any) -> Any:
+    """Return ``value`` with every non-finite float replaced by ``None``.
+
+    ``json.dumps`` writes NaN and infinity as the bare tokens ``NaN`` and
+    ``Infinity``, which are not JSON: strict parsers (JavaScript's
+    ``JSON.parse``, most other languages) reject the whole file, and ``jq``
+    silently turns ``Infinity`` into ``1.8e308``.  ``null`` is what
+    JavaScript's ``JSON.stringify`` writes for them.  Mappings, lists and
+    tuples are converted recursively (tuples become lists, as in JSON);
+    mapping keys are kept.
+    """
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: strict_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [strict_json_value(item) for item in value]
+    return value
+
+
 def dump_json(path: Path, obj: Dict[str, Any]) -> None:
     """Write ``obj`` to ``path`` as indented JSON with sorted keys, atomically.
 
