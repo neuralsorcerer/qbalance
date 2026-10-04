@@ -9,10 +9,10 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from qbalance.utils import (
-    SCHEDULING_DIRECTIVES,
-    instruction_parts,
+    executed_operation_count,
     operation_depth,
     operation_size,
+    two_qubit_operation_count,
 )
 
 
@@ -23,7 +23,9 @@ def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
     directives, not operations (see :func:`qbalance.utils.operation_depth`).
     ``width`` is the number of qubits, ``two_qubit_ops`` counts operations
     on exactly two qubits, ``measures`` the measurements, and ``t_count``
-    the ``t`` and ``tdg`` gates.
+    the ``t`` and ``tdg`` gates.  Every count is of what one shot executes: a
+    control-flow instruction contributes what its blocks run (see
+    :func:`qbalance.utils.control_flow_cost`).
 
     Args:
         circuit: The circuit, typically a compiled one.
@@ -32,25 +34,18 @@ def extract_circuit_metrics(circuit: Any) -> Dict[str, float]:
         ``depth``, ``size``, ``width``, ``two_qubit_ops``, ``measures`` and
         ``t_count``.
     """
-    instruction_data = [instruction_parts(entry) for entry in circuit.data]
-    twoq = sum(
-        1
-        for inst, qargs, _ in instruction_data
-        if len(qargs) == 2 and getattr(inst, "name", "") not in SCHEDULING_DIRECTIVES
+    meas = executed_operation_count(
+        circuit, lambda operation, qargs: getattr(operation, "name", "") == "measure"
     )
-    meas = sum(
-        1 for inst, _, _ in instruction_data if getattr(inst, "name", "") == "measure"
-    )
-    t = sum(
-        1
-        for inst, _, _ in instruction_data
-        if getattr(inst, "name", "") in ("t", "tdg")
+    t = executed_operation_count(
+        circuit,
+        lambda operation, qargs: getattr(operation, "name", "") in ("t", "tdg"),
     )
     return {
         "depth": float(operation_depth(circuit)),
         "size": float(operation_size(circuit)),
         "width": float(circuit.num_qubits),
-        "two_qubit_ops": float(twoq),
+        "two_qubit_ops": float(two_qubit_operation_count(circuit)),
         "measures": float(meas),
         "t_count": float(t),
     }

@@ -31,10 +31,13 @@ _NON_TERMINAL_MEASUREMENT_ERROR = (
 )
 
 
+_InstructionParts = tuple[Any, tuple[Any, ...], tuple[Any, ...]]
+
+
 def _split_terminal_suffix(
     circuit: Any,
-) -> tuple[Any, list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]]]:
-    """Return the invertible part of ``circuit`` plus its terminal measurements.
+) -> tuple[list[_InstructionParts], Any, list[_InstructionParts]]:
+    """Return ``circuit``'s leading resets, invertible part, and terminal measurements.
 
     Every measurement must be terminal (see
     :func:`~qbalance.utils.is_terminal_measurement`).
@@ -47,17 +50,35 @@ def _split_terminal_suffix(
     (nothing later shares its qubit or clbit), so moving all of them behind the
     folded unitary preserves the computation.  Directives listed after a
     qubit's terminal measurement stay behind it as well.
+
+    A reset on a qubit nothing has acted on yet (directives aside) re-prepares
+    the ``|0>`` the qubit starts in, and nothing listed before it shares that
+    qubit, so it moves ahead of the folded unitary and runs once -- the
+    state preparation counterpart of the terminal measurements.  Qiskit keeps
+    such resets at every optimization level, and the common
+    ``reset(range(n))`` preamble would otherwise make every circuit using it
+    unfoldable.  Any other reset stays in the unitary part, which then cannot
+    be inverted.
     """
     copy_empty_like = getattr(circuit, "copy_empty_like", None)
     if not callable(copy_empty_like):
-        return circuit, []
+        return [], circuit, []
 
     data = [instruction_parts(entry) for entry in list(getattr(circuit, "data", []))]
     unitary = copy_empty_like()
-    terminal: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]] = []
+    leading: list[_InstructionParts] = []
+    terminal: list[_InstructionParts] = []
     measured_qubits: list[Any] = []
+    touched_qubits: list[Any] = []
     for index, (inst, qargs, cargs) in enumerate(data):
         name = getattr(inst, "name", "")
+        if name == "reset" and not any(
+            shares_bit((qubit,), touched_qubits) for qubit in qargs
+        ):
+            leading.append((inst, qargs, cargs))
+            continue
+        if name not in _SUFFIX_TRANSPARENT_OPS:
+            touched_qubits.extend(qargs)
         if name == "measure":
             if not is_terminal_measurement(data, index):
                 raise ValueError(_NON_TERMINAL_MEASUREMENT_ERROR)
@@ -73,7 +94,7 @@ def _split_terminal_suffix(
             continue
         unitary.append(inst, qargs, cargs)
 
-    return unitary, terminal
+    return leading, unitary, terminal
 
 
 def _validated_scale(scale: Any) -> float:
@@ -120,14 +141,20 @@ def realized_fold_factor(scale: float) -> int:
 def zne_sampling_overhead(factors: Sequence[float], degree: int = 1) -> float:
     """Return the factor by which ZNE multiplies the shots a precision needs.
 
-    Every factor runs on the full shot budget, and the extrapolated value is a
-    fixed linear combination ``sum(w_i * y_i)`` of the measured points (the
-    intercept of the least-squares polynomial fit), so its variance is
-    ``sum(w_i**2)`` times that of one point.  Matching the precision of a
+    Every folded factor runs on the full shot budget, and the extrapolated
+    value is a fixed linear combination ``sum(w_i * y_i)`` of the measured
+    points (the intercept of the least-squares polynomial fit), so its variance
+    is ``sum(w_i**2)`` times that of one point.  Matching the precision of a
     single unmitigated run therefore takes ``n * sum(w_i**2)`` times the shots
     for ``n`` factors: 4.375 for the default linear fit at factors
     ``(1, 3, 5)``, and about 15.7 for a quadratic one.  The fit uses the
     factors folding actually realizes (see :func:`realized_fold_factor`).
+
+    Every factor that realizes 1 reuses the one unfolded run, as
+    :func:`~qbalance.execution.ensemble.run_ensemble` executes it: those
+    points are a single measurement, which counts once among the runs and
+    carries the sum of their weights.  With a single such factor this is the
+    formula above.
 
     Args:
         factors: Requested noise scale factors, each ``>= 1.0``.
@@ -147,29 +174,38 @@ def zne_sampling_overhead(factors: Sequence[float], degree: int = 1) -> float:
         raise ValueError("not enough distinct realized factors for the degree")
     design = np.vander(realized, int(degree) + 1, increasing=True)
     intercept_weights = np.linalg.pinv(design)[0]
-    return float(realized.size * np.sum(intercept_weights**2))
+    unfolded = realized == 1.0
+    runs = int(np.any(unfolded)) + int(np.count_nonzero(~unfolded))
+    variance = float(np.sum(intercept_weights[unfolded])) ** 2 + float(
+        np.sum(intercept_weights[~unfolded] ** 2)
+    )
+    return float(runs * variance)
 
 
 def fold_global(circuit: Any, scale: float) -> Any:
     """Globally fold ``circuit`` to scale its noise by an odd integer factor.
 
     Args:
-        circuit: QuantumCircuit to fold.  Every measurement must be terminal.
+        circuit: QuantumCircuit to fold.  Every measurement must be terminal,
+            and every reset must act on a qubit before anything else does.
         scale: Requested noise scale factor, ``>= 1.0``; it is rounded up to the
             odd factor reported by :func:`realized_fold_factor`.
 
     Returns:
         ``circuit`` itself when the realized factor is 1, otherwise the folded
-        circuit ``U (U^dagger U)^r`` followed by the terminal measurements.
+        circuit ``U (U^dagger U)^r`` between the leading resets and the
+        terminal measurements.
 
     Raises:
         ValueError: If ``scale`` is invalid or a measurement is not terminal.
+        CircuitError: If the part to fold cannot be inverted (a reset after
+            other operations on its qubit, say).
     """
     k = realized_fold_factor(scale)
     if k == 1:
         return circuit
 
-    base, terminal_suffix = _split_terminal_suffix(circuit)
+    leading_resets, base, terminal_suffix = _split_terminal_suffix(circuit)
     qc = base.copy()
     inv = base.inverse()
     # construct: U (U^dag U)^{(k-1)/2}
@@ -177,6 +213,14 @@ def fold_global(circuit: Any, scale: float) -> Any:
     reps = (k - 1) // 2
     for _ in range(reps):
         out = out.compose(inv).compose(qc)
+
+    if leading_resets:
+        preparation = base.copy_empty_like()
+        # The folded circuit already carries the global phase.
+        preparation.global_phase = 0
+        for inst, qargs, cargs in leading_resets:
+            preparation.append(inst, qargs, cargs)
+        out = out.compose(preparation, front=True)
 
     for inst, qargs, cargs in terminal_suffix:
         out.append(inst, qargs, cargs)
@@ -196,13 +240,22 @@ def _rebase_to_backend(circuit: Any, backend: Any) -> Any:
     folding, the qubit layout, and the measurement clbit mapping intact -- all
     of which the ZNE extrapolation depends on to compare counts across factors.
 
+    A circuit narrower than the backend was not laid out on it -- an
+    unconstrained simulator such as ``AerSimulator()`` keeps a circuit's own
+    width -- and the preset pass manager would widen it to the whole backend
+    with ancillas.  Its gates are translated in place instead, which keeps
+    every qubit and classical bit, and so the count keys, where they are.
+
     Returns the circuit unchanged when the backend cannot be described to the
-    preset pass manager, or when the circuit is not sized for this backend
-    (re-transpiling would then relayout it and shift the count-key bit order).
+    preset pass manager, or when the translation fails.
     """
     try:
         from qiskit.providers import BackendV2
-        from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+        from qiskit.transpiler.preset_passmanagers import (
+            generate_preset_pass_manager,
+            generate_translation_passmanager,
+            generate_unroll_3q,
+        )
     except Exception:  # pragma: no cover - qiskit always provides these
         return circuit
 
@@ -210,17 +263,19 @@ def _rebase_to_backend(circuit: Any, backend: Any) -> Any:
         return circuit
 
     num_qubits = getattr(circuit, "num_qubits", None)
-    if not isinstance(num_qubits, int) or num_qubits != getattr(
-        backend, "num_qubits", None
-    ):
+    if not isinstance(num_qubits, int):
         return circuit
 
     try:
-        pass_manager = generate_preset_pass_manager(
-            optimization_level=0,
-            backend=backend,
-            initial_layout=list(range(num_qubits)),
-        )
+        if num_qubits == getattr(backend, "num_qubits", None):
+            pass_manager = generate_preset_pass_manager(
+                optimization_level=0,
+                backend=backend,
+                initial_layout=list(range(num_qubits)),
+            )
+        else:
+            pass_manager = generate_unroll_3q(target=backend.target)
+            pass_manager += generate_translation_passmanager(target=backend.target)
         return pass_manager.run(circuit)
     except Exception as e:
         log.warning("Could not rebase folded circuit to the backend basis: %s", e)

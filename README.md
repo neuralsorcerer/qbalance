@@ -307,7 +307,7 @@ Interpretation:
 - two-qubit operation count has moderate penalty (weight 2),
 - compile time contributes but with a small coefficient (0.1),
 - `sampling_overhead` is 1 for a circuit that runs once (a constant that never reorders those candidates) and charges ZNE and cut candidates for their extra shots (see below),
-- `depth` counts operation layers; scheduling directives (`barrier`, `delay`) add none, so the idle delays dynamical decoupling inserts are not billed.
+- `depth` counts operation layers; scheduling directives (`barrier`, `delay`) add none, so the idle delays dynamical decoupling inserts are not billed. `depth`, `two_qubit_ops` and `estimated_error` count what one shot executes, so a control-flow loop is billed for every iteration of its body and a branch for its costliest arm.
 
 ### 2) Finite-safe scoring behavior
 
@@ -428,7 +428,7 @@ Additional performance-relevant behavior:
 - `results.json` selected strategy specs/metrics + baseline metrics + objective weights + per-circuit selection diagnostics + per-circuit candidate rankings + per-circuit candidate evaluation history,
 - `summary.txt` text summary.
 
-Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection and then original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates. If `--no-regression`/`allow_regression=False` falls back to a baseline that was not in the candidate history, the selected baseline is emitted as a synthetic ranking row with `original_index: null`.
+Saved adjustment results also include per-circuit `candidate_rankings` derived from the full evaluation history. Each leaderboard row records the original evaluation index, serialized strategy spec, diagnostic objective score, finite-safe selection score, objective-term contributions, selected-candidate marker, and rank. Ranking uses the same objective-score semantics as final strategy selection, puts the selected candidate first among equal scores (selection breaks a tie in favor of the candidate listed first), and then uses original evaluation order for deterministic ties; incomparable candidates use `null` selection scores and sort after comparable candidates. If `--no-regression`/`allow_regression=False` falls back to a baseline that was not in the candidate history, the selected baseline is emitted as a synthetic ranking row with `original_index: null`.
 
 ### `matrix` output JSON
 
@@ -570,7 +570,7 @@ python -m qbalance plugins list
 - If no candidate of a circuit is feasible, `adjust()` raises `QBalanceError` (a `RuntimeError`) listing the failures.
 - `matrix` validates `shots` as a positive integer and `seed` as a non-negative integer.
 - `matrix` raises `ValueError` if dataset record count and loaded circuit count mismatch.
-- Existing output paths require explicit overwrite flags.
+- `dataset`, `adjust`, and `compile` refuse an existing `--out` without `--overwrite` (in Python, `save_dataset`, `BalancedWorkload.save`, and `to_download` without `overwrite=True`); `matrix` and `report` replace the files they write.
 - Optional dependency features require installed extras.
 - Cutting, compilation, execution, and mitigation failures are captured in metrics (`cutting_error`, `compile_error`, `exec_error`, `mthree_error`, `zne_error`) so runs can continue; in `adjust` such a candidate is kept in the history but is infeasible for selection.
 

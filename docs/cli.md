@@ -79,7 +79,7 @@ python -m qbalance matrix ./circuits \
 Options:
 
 - `--backend, -b TEXT`: repeatable backend spec.
-- `--out, -o PATH`: output matrix JSON path.
+- `--out, -o PATH`: output matrix JSON path; an existing file is replaced (atomically, once every trial has run).
 - `--strategies PATH`: strategy JSON file. If omitted, the matrix runs five built-in strategies: optimization level 1 with SABRE routing, and at optimization level 2 with SABRE routing the noise-aware layout, Pauli twirling (8 instances), dynamical decoupling (`XY4`), and measurement twirling (8 instances).
 - `--execute`: execute compiled circuits and include counts/shot data.
 - `--shots INTEGER`: execution shots; must be a positive integer.
@@ -98,7 +98,7 @@ Each backend gets a table with one row per strategy: mean depth, two-qubit opera
 
 Options:
 
-- `--out, -o PATH`: report output directory.
+- `--out, -o PATH`: report output directory, created if missing; an existing `report.md` (and `report.html`) in it is replaced.
 - `--html`: also render HTML output. This requires the report extra dependencies.
 
 ## `plugins`

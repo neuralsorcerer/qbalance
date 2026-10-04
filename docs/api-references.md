@@ -384,7 +384,7 @@ The fluent entry point:
 - `set_target(backend_spec) -> Workload` returns a new workload targeting a backend spec (see [backends](#backends-qbalancebackends)).
 - `adjust(...) -> BalancedWorkload` selects one strategy per circuit.
 
-`adjust` compiles every circuit with the baseline strategy, `StrategySpec(optimization_level=1, routing_method="sabre")`, and with each candidate, scores every result with the objective, and selects the best feasible candidate per circuit. A candidate equal to the baseline strategy reuses the baseline's evaluation, which ran with the same inputs and seeds, rather than executing again. Its parameters:
+`adjust` compiles every circuit with the baseline strategy, `StrategySpec(optimization_level=1, routing_method="sabre")`, and with each candidate, scores every result with the objective, and selects the best feasible candidate per circuit; among equal scores, the one earliest in the candidate order (the order of `strategies`, or of the generated pool), so with every candidate evaluated grid and bandit search select alike. A candidate equal to the baseline strategy reuses the baseline's evaluation, which ran with the same inputs and seeds, rather than executing again. Its parameters:
 
 | Parameter | Default | Description |
 | --- | --- | --- |
@@ -397,7 +397,7 @@ The fluent entry point:
 | `shots` | `1024` | Shots per execution, a positive integer. |
 | `profile` | `False` | Record pass-level transpiler profiles (`pass_profile`). |
 | `cache_root` | `None` | Compile-cache directory (`str` or `Path`); `None` uses the platform cache (see [compile cache](#compile-cache-qbalancecache)). |
-| `seed` | `0` | Non-negative integer seeding the candidate shuffle, the bandit, the simulator (instance $i$ of a twirled ensemble runs with seed $\mathrm{seed} + i$), and the M3 calibration simulator. |
+| `seed` | `0` | Non-negative integer seeding the candidate shuffle, the bandit, the simulator (instance $i$ of a twirled ensemble runs with seed $\mathrm{seed} + i$), and M3's calibration on simulators. |
 | `strategies` | `None` | Explicit candidates, any iterable of `StrategySpec` objects or mappings (validated and de-duplicated); `max_candidates` is then ignored, and grid search keeps their order. |
 | `allow_regression` | `True` | With `False`, never select a candidate that scores worse than the baseline (see below). |
 | `max_evaluations` | `None` | Evaluate at most this many candidates per circuit; `None` evaluates all of them. |
@@ -510,7 +510,7 @@ Methods:
 
 - `summary() -> str`: the baseline against the selection: the backend, the number of circuits, the total and mean candidate evaluations, the means of `depth`, `two_qubit_ops`, `estimated_error`, and `compile_time_s` over their finite values (`nan` when there are none), the EMD, CvM, and KS distances between the baseline and selected distributions of `depth` and `two_qubit_ops` (see [diagnostics](#diagnostics-qbalancediagnostics)), and, when any circuit's delta is comparable, the mean objective delta with the number of circuits that strictly improved and that stayed unchanged.
 - `selection_diagnostics() -> dict`: per circuit, `baseline_objective_score` and `selected_objective_score` (sums of the finite weighted terms; `None` when there is none), `comparable_objective_terms` (the terms both sides report), `objective_delta` (the selected minus the baseline sum over the comparable terms; `None` when there is none), `objective_improved` (`objective_delta <= 0`, so a tie counts as no worse, as for the guard; `None` when not comparable), `objective_terms` (each side's weighted terms), `evaluated_candidates`, and `metric_deltas` for `depth`, `two_qubit_ops`, `estimated_error`, and `compile_time_s`, each with `baseline`, `selected`, `delta` (selected minus baseline), and `relative_delta` (delta over the baseline's absolute value; `None` when the baseline is 0). Missing or non-finite values become `None`.
-- `candidate_rankings() -> dict`: per circuit, the evaluated candidates sorted by the score selection uses, then by evaluation order. Each row holds `rank`, `original_index`, the serialized `spec`, `objective_score` (recomputed from the finite weighted terms), `selection_score` (the stored `objective_score` when valid; `None` for an infeasible or incomparable candidate, which sorts last), `objective_terms`, and `selected`. When the guard selected a baseline that was not among the candidates, it appears as one extra selected row with `original_index: None`, so exactly one row per circuit is selected.
+- `candidate_rankings() -> dict`: per circuit, the evaluated candidates sorted by the score selection uses (the selected candidate first among equal scores), then by evaluation order. Each row holds `rank`, `original_index`, the serialized `spec`, `objective_score` (recomputed from the finite weighted terms), `selection_score` (the stored `objective_score` when valid; `None` for an infeasible or incomparable candidate, which sorts last), `objective_terms`, and `selected`. When the guard selected a baseline that was not among the candidates, it appears as one extra selected row with `original_index: None`, so exactly one row per circuit is selected. The selection ranks first unless the regression guard or `pareto=True` chose it: the Pareto front is formed on `depth`, `two_qubit_ops`, `estimated_error`, and `sampling_overhead` alone, so a candidate off the front can still score better on the full objective.
 - `covars() -> dict`: the EMD, CvM, and KS distances between the baseline and selected distributions of `depth`, `two_qubit_ops`, and `estimated_error` over their finite values; `nan` when a side has none.
 - `save(out_dir, overwrite=False)`: writes `dataset/` (the workload's own records, with an index for exactly them), `results.json`, and `summary.txt` (see [artifacts](artifacts.md#balanced-workload-output)). An existing `out_dir` needs `overwrite=True`; a path that is a file, or a directory containing the workload's own dataset, is refused. The files are written to a sibling directory that then replaces `out_dir`, so a save that fails midway leaves an existing one intact.
 - `to_download(zip_path, overwrite=False) -> Path`: saves into a temporary directory and zips it; the archive is renamed into place only once complete, so a failed export leaves an existing one intact.
@@ -702,7 +702,7 @@ Compiles `circuit` once with Qiskit's preset pass manager, which honors `optimiz
 
 The metrics describe the whole ensemble:
 
-- `depth`, `size`, `width`, `two_qubit_ops`, `estimated_error`: the maxima over the instances. `depth` and `size` count operations only (see [utilities](#utilities-qbalanceutils)); `two_qubit_ops` counts instructions on exactly two qubits other than `barrier` and `delay`; `estimated_error` is [`estimate_circuit_error`](#estimate_circuit_error).
+- `depth`, `size`, `width`, `two_qubit_ops`, `estimated_error`: the maxima over the instances. `depth` and `size` count operations only (see [utilities](#utilities-qbalanceutils)); `two_qubit_ops` counts instructions on exactly two qubits other than `barrier` and `delay`; `estimated_error` is [`estimate_circuit_error`](#estimate_circuit_error). Each counts what one shot executes: a control-flow instruction contributes what its blocks run, a `for_loop`'s body once per index, the costliest branch of an `if_else` or `switch_case`, and a `while_loop`'s or `box`'s body once (a while loop's iteration count is known only at run time).
 - `compile_time_s`: the wall-clock seconds the transpilation took.
 - `twirl_instances`; `measurement_flip_maps`, one classical-bit flip map per instance, and `measurement_flip_map`, the first of them.
 - `dd_applied` (every instance was padded) and, when it was, `dd_sequence_applied`.
@@ -768,7 +768,7 @@ $$
 \varepsilon = 1 - \prod_i \left(1 - e_i\right),
 $$
 
-over the circuit's instructions $i$, with $e_i$ the backend's calibrated error for that instruction on those qubits, clipped to $[0, 1]$. Two-qubit gates are looked up in both qubit orders, measurements use the `measure` error (or a legacy `readout_error` property), and one-qubit gates the target's error. An instruction without calibration data counts as $e_i = 10^{-3}$ (one-qubit gates), $10^{-2}$ (two-qubit gates), or $2 \times 10^{-2}$ (measurements), and a gate on three or more qubits always counts $10^{-3}$, so on a backend that reports no errors (the plain Aer simulator) $\varepsilon$ is a gate-count proxy rather than a physical estimate. `barrier` and `delay` are not billed, and idle decoherence is not modelled, so the benefit of dynamical decoupling shows only in executed metrics. A circuit the estimate cannot read gives 1.0.
+over the circuit's instructions $i$, with $e_i$ the backend's calibrated error for that instruction on those qubits, clipped to $[0, 1]$. Two-qubit gates are looked up in both qubit orders, measurements use the `measure` error (or a legacy `readout_error` property), and one-qubit gates the target's error. A control-flow instruction is priced by the instructions its blocks run on its qubits: a `for_loop`'s body once per index, the riskier branch of an `if_else` or `switch_case`, and a `while_loop`'s or `box`'s body once. An instruction without calibration data counts as $e_i = 10^{-3}$ (one-qubit gates), $10^{-2}$ (two-qubit gates), or $2 \times 10^{-2}$ (measurements), and a gate on three or more qubits always counts $10^{-3}$, so on a backend that reports no errors (the plain Aer simulator) $\varepsilon$ is a gate-count proxy rather than a physical estimate. `barrier` and `delay` are not billed, and idle decoherence is not modelled, so the benefit of dynamical decoupling shows only in executed metrics. A circuit the estimate cannot read gives 1.0.
 
 ```pycon
 >>> import math
@@ -790,7 +790,7 @@ over the circuit's instructions $i$, with $e_i$ the backend's calibrated error f
 The layout behind `layout_method="qbalance_noise_aware"`.
 
 - Physical qubit $p$ gets the error score $r_p - 10^{-3}\left(T_{1,p}/\tilde T_1 + T_{2,p}/\tilde T_2\right)$: its readout error $r_p$, with coherence relative to the backend medians $\tilde T_1$ and $\tilde T_2$ as a tie-breaker (a missing value counts as the median).
-- Two logical qubits interact when a gate acts on both; a gate on three or more qubits (still whole before transpilation) makes every pair of its qubits interact.
+- Two logical qubits interact when a gate acts on both; a gate on three or more qubits (still whole before transpilation) makes every pair of its qubits interact. A control-flow instruction contributes the interactions its blocks run: a `for_loop`'s body once per index, and every pair any branch of an `if_else` or `switch_case` uses, with the heaviest weight a branch gives it.
 - On a backend with a coupling map, couplers calibrated with error 1.0 are treated as absent, and logical qubits are placed one at a time, the busiest first and then always the one most connected to those already placed. Each goes to the free physical qubit needing the fewest routing hops to its placed partners, so it lands next to them whenever a free neighbour exists, and among those to the one with the lowest cost in error units: its error score plus, per interaction, the pair's calibrated two-qubit gate error, or, for a pair $h$ hops apart, one typical (median) gate error, three more per extra hop (a SWAP), and the readout error routing adds by moving one of the pair onto a qubit of the path. The placement is grown from the 24 most promising start qubits, and the one with the lowest total cost wins.
 - Without a coupling map, the best-scoring qubits go to the busiest logical qubits.
 
@@ -920,7 +920,7 @@ A pass manager that unrolls gates on three or more qubits, translates to the bac
 
 `qbalance.metrics.extract_circuit_metrics(circuit) -> dict[str, float]`
 
-Structural metrics of any circuit, with the definitions of the compile metrics: `depth` and `size` over operations (directives excluded), `width` (qubits), `two_qubit_ops` (instructions on exactly two qubits other than `barrier` and `delay`), `measures`, and `t_count` (`t` and `tdg` gates).
+Structural metrics of any circuit, with the definitions of the compile metrics: `depth` and `size` over operations (directives excluded), `width` (qubits), `two_qubit_ops` (instructions on exactly two qubits other than `barrier` and `delay`), `measures`, and `t_count` (`t` and `tdg` gates). The counts are of what one shot executes, control-flow blocks included as for the compile metrics.
 
 ```pycon
 >>> from qbalance.metrics import extract_circuit_metrics
@@ -969,7 +969,7 @@ Bookkeeping for a twirled ensemble. `split_shots` divides `shots` as evenly as p
 
 `qbalance.execution.ensemble.run_ensemble(backend, instances, metrics, *, shots, seed, mthree=False, zne_factors=(), zne_degree=1) -> EnsembleRun`
 
-Runs a compiled ensemble the way `Workload.adjust` and `run_matrix` do. The shots are split across the instances with `split_shots`, instance $i$ runs with `seed_simulator=seed + i`, and each instance's counts are untwirled with its own flip map from `instance_flip_maps(metrics, len(instances))` before they are merged. With `mthree=True`, the raw counts go to `mitigate_twirled_counts` together with the calibration seed `seed`. With non-empty `zne_factors`, every instance is folded at each factor and rerun with the same share and seed; a factor that realizes 1 reuses the unfolded runs. The fit, by `zne_extrapolate_counts` of degree `zne_degree`, uses the realized factors. An error in the unmitigated runs is raised. A mitigation failure is recorded instead, and the counts are kept.
+Runs a compiled ensemble the way `Workload.adjust` and `run_matrix` do. The shots are split across the instances with `split_shots`, instance $i$ runs with `seed_simulator=seed + i`, and each instance's counts are untwirled with its own flip map from `instance_flip_maps(metrics, len(instances))` before they are merged. With `mthree=True`, the raw counts go to `mitigate_twirled_counts` together with the calibration seed `seed`; a circuit that measures inside a control-flow block cannot be readout-mitigated and records `mthree_error`. With non-empty `zne_factors`, every instance is folded at each factor and rerun with the same share and seed; a factor that realizes 1 reuses the unfolded runs, and a factor realizing the same fold as an earlier one (`(1, 2, 3)` folds 2 and 3 alike) is an independent second sample of that noise level, its $r$-th repeat running instance $i$ with seed $\mathrm{seed} + r \cdot n + i$ for $n$ instances, so a simulator does not just copy the first. The fit, by `zne_extrapolate_counts` of degree `zne_degree`, uses the realized factors. An error in the unmitigated runs is raised. A mitigation failure is recorded instead, and the counts are kept.
 
 `EnsembleRun` holds `counts` (merged, untwirled). It also holds `mthree_probs` or `mthree_error`, and `zne_probs` or `zne_error`, each `None` when not requested. `zne_realized_factors` is recorded once every folded run has succeeded.
 
@@ -1012,7 +1012,7 @@ True
 
 `qbalance.mitigation.mitigate_twirled_counts(backend, raw_counts, flip_maps, measured_qubits, calibration_shots=10000, seed=None, clbits=None) -> dict[str, float]`
 
-M3 for a measurement-twirled ensemble: calibrates once, corrects each instance's raw counts (the calibration describes the physical readout, which only matches counts as measured), untwirls each with its own flip map, combines the instances weighted by their shots, and projects the result onto the nearest probability distribution. `seed` seeds the calibration simulator created for `GenericBackendV2`, which makes the result reproducible there. `raw_counts` and `flip_maps` must have the same length and hold at least one shot.
+M3 for a measurement-twirled ensemble: calibrates once, corrects each instance's raw counts (the calibration describes the physical readout, which only matches counts as measured), untwirls each with its own flip map, combines the instances weighted by their shots, and projects the result onto the nearest probability distribution. `seed` seeds the calibration on a local simulator -- the `AerSimulator` created for `GenericBackendV2`, or the backend itself for Aer and `fake:ibm` snapshots, whose calibration jobs all run with `seed_simulator=seed` while the backend object is left unmodified -- which makes the result reproducible there; hardware calibrates as it runs. `raw_counts` and `flip_maps` must have the same length and hold at least one shot.
 
 ```pycon
 >>> from qbalance.mitigation import mitigate_twirled_counts
@@ -1056,7 +1056,7 @@ $$
 \gamma_{\mathrm{ZNE}} = n \sum_{i=1}^{n} c_i^2
 $$
 
-times the shots: $4.375$ for the default linear fit at factors $(1, 3, 5)$, where $c = (\tfrac{13}{12}, \tfrac{1}{3}, -\tfrac{5}{12})$; $15.65625$ for a quadratic fit at the same factors; and $7.125$ for a linear fit at $(1, 2, 3)$, which realizes $(1, 3, 3)$. An invalid factor or degree, or fewer than $d + 1$ distinct realized factors, raises `ValueError`. Compile metrics record the value as `sampling_overhead`.
+times the shots: $4.375$ for the default linear fit at factors $(1, 3, 5)$, where $c = (\tfrac{13}{12}, \tfrac{1}{3}, -\tfrac{5}{12})$; $15.65625$ for a quadratic fit at the same factors; and $7.125$ for a linear fit at $(1, 2, 3)$, which realizes $(1, 3, 3)$. Factors that realize 1 all reuse that one unfolded execution, so they count as a single run whose coefficient is the sum of theirs: $(1, 1, 3)$ costs $5$, exactly what $(1, 3)$ does. An invalid factor or degree, or fewer than $d + 1$ distinct realized factors, raises `ValueError`. Compile metrics record the value as `sampling_overhead`.
 
 ```pycon
 >>> from qbalance.mitigation import zne_sampling_overhead
@@ -1078,7 +1078,7 @@ $$
 U \left(U^\dagger U\right)^{(k-1)/2}
 $$
 
-and re-appends the measurements, returning `circuit` itself when $k = 1$. The split is made per qubit, so gates listed after another qubit's measurement are folded too. Every measurement must be terminal (nothing later touches its qubit or classical bit), or `ValueError` is raised. Folding appends `circuit.inverse()`, whose adjoint gates (for example `sxdg`) may lie outside a backend's basis; fold compiled circuits with `fold_global_for_backend`.
+and re-appends the measurements, returning `circuit` itself when $k = 1$. The split is made per qubit, so gates listed after another qubit's measurement are folded too. Every measurement must be terminal (nothing later touches its qubit or classical bit), or `ValueError` is raised. A reset that acts on its qubit before anything else does only re-prepares $|0\rangle$, so it runs once, ahead of the folded unitary (Qiskit keeps a `reset(range(n))` preamble at every optimization level); any other reset is part of the unitary and cannot be inverted, so folding raises `CircuitError`. Folding appends `circuit.inverse()`, whose adjoint gates (for example `sxdg`) may lie outside a backend's basis; fold compiled circuits with `fold_global_for_backend`.
 
 ```pycon
 >>> from qbalance.mitigation import fold_global
@@ -1094,7 +1094,7 @@ True
 
 `qbalance.mitigation.fold_global_for_backend(circuit, backend, scale) -> QuantumCircuit`
 
-Folds a compiled circuit and translates it back into the backend's native basis (a level-0 preset pass manager with the identity layout), keeping the physical qubits, the measurement mapping, and the compiled circuit's `TranspileLayout`. A backend the preset pass manager cannot target, or a circuit not sized for the backend, gets the folded circuit untranslated.
+Folds a compiled circuit and translates it back into the backend's native basis (a level-0 preset pass manager with the identity layout), keeping the physical qubits, the measurement mapping, and the compiled circuit's `TranspileLayout`. A circuit narrower than the backend (an unconstrained simulator such as `AerSimulator()` keeps a circuit's own width) has its gates translated in place instead, so it is not widened onto the whole backend and no qubit or classical bit moves. A backend the preset pass manager cannot target, or a translation that fails, gets the folded circuit untranslated.
 
 ```pycon
 >>> from qbalance.mitigation import fold_global_for_backend
@@ -1167,7 +1167,7 @@ Requires the `cutting` extra (`qiskit-addon-cutting`).
 
 `qbalance.cutting.prepare_cutting_experiment(circuit, max_subcircuit_qubits, max_backjumps=10000, max_gamma=1e6, max_subexperiments=1024) -> CuttingExperiment | None`
 
-Splits off the terminal measurements, which define the observable ($Z$ on every measured qubit), drops `barrier` and `delay`, unrolls gates on three or more qubits, and removes the qubits no gate acts on (a measured idle qubit reads $|0\rangle$ and contributes exactly $+1$ to the parity). It then cuts the rest with `find_cuts` and expands it into every quasi-probability term exactly (`num_samples=inf`, so results are reproducible). Returns `None` when the circuit is no wider than `max_subcircuit_qubits`, or no gate acts on any qubit; a wider circuit whose connected parts each fit is split into them without a cut. Raises `ValueError` for non-terminal measurements, classically controlled operations, or a cut needing more than `max_subexperiments` subexperiments.
+Splits off the terminal measurements, which define the observable ($Z$ on every measured qubit), drops `barrier` and `delay`, unrolls gates on three or more qubits, and removes the qubits no gate acts on (a measured idle qubit reads $|0\rangle$ and contributes exactly $+1$ to the parity). It then cuts the rest with `find_cuts` and expands it into every quasi-probability term exactly (`num_samples=inf`, so results are reproducible). Every subexperiment is named `<circuit>_cut_<label>` on a quantum register `q` (the classical registers the reconstruction reads are kept), so the same cut gives identical circuits in every run and reuses their compile-cache entries. Returns `None` when the circuit is no wider than `max_subcircuit_qubits`, or no gate acts on any qubit; a wider circuit whose connected parts each fit is split into them without a cut. Raises `ValueError` for non-terminal measurements, classically controlled operations, or a cut needing more than `max_subexperiments` subexperiments.
 
 ### `CuttingExperiment`
 
@@ -1432,16 +1432,18 @@ True
 
 ## Utilities (`qbalance.utils`)
 
-- `measured_qubits_by_clbit(circuit) -> list[int]`: the qubit last measured into each measured classical bit, ordered by classical bit (`range(num_qubits)` when no measurement can be read).
-- `measured_clbits(circuit) -> list[int] | None`: those classical bits, increasing (`None` when no measurement can be read).
-- `operation_depth(circuit) -> int` and `operation_size(circuit) -> int`: depth and size counting operations only. `barrier`, `delay`, and other directives add nothing, although they still synchronize the wires they span, so the idle delays dynamical decoupling inserts are not billed as depth.
+- `measured_qubits_by_clbit(circuit) -> list[int]`: the qubit last measured into each measured classical bit, ordered by classical bit (`range(num_qubits)` when no measurement can be read). A circuit that measures inside a control-flow block (`if_else`, `switch`, a loop, `box`) raises `ValueError`: such a measurement may run on only some shots, or several times, so its classical bit is no readout of any one qubit and readout mitigation cannot be applied.
+- `measured_clbits(circuit) -> list[int] | None`: those classical bits, increasing (`None` when no measurement can be read); raises `ValueError` like `measured_qubits_by_clbit`.
+- `operation_depth(circuit) -> int` and `operation_size(circuit) -> int`: depth and size counting operations only. `barrier`, `delay`, and other directives add nothing, although they still synchronize the wires they span, so the idle delays dynamical decoupling inserts are not billed as depth. Where Qiskit counts a control-flow instruction as one operation, these count what its blocks run (see `control_flow_cost`), so a loop of ten gates is no shallower or smaller than the ten gates; a circuit without control flow gets Qiskit's own `depth` and `size`.
+- `control_flow_cost(operation, block_cost, *, repeat, worst)`: what one execution of a control-flow instruction costs, from `block_cost` of each block: `repeat(body, n)` for a `for_loop` over `n` indices, `worst` of the branches for an `if_else` or `switch_case` (an `if` without `else` is its body), and the body once for a `while_loop` or `box`; `None` for an instruction without blocks.
+- `executed_operation_count(circuit, counts) -> int` and `two_qubit_operation_count(circuit) -> int`: the operations one shot executes for which `counts(operation, qubits)` holds, a control-flow instruction contributing its blocks' count instead of itself; the second counts two-qubit operations other than directives.
 - `is_terminal_measurement(data, index) -> bool`: whether nothing after `data[index]` other than `barrier` or `delay` acts on the measured qubit or its classical bit; `data` holds `(operation, qubits, clbits)` triples. `SCHEDULING_DIRECTIVES` is `frozenset({"barrier", "delay"})`.
 - `instruction_parts(entry) -> (operation, qubits, clbits)`, `shares_bit(bits, other) -> bool`, and `bit_index(circuit, bit) -> int`: accessors that also accept tuple-style instructions and bit objects without `find_bit`.
 - `validate_integral(name, value, *, positive=False, non_negative=False) -> int`: validates an integer option, rejecting booleans, and returns it as an `int`; `validate_flag(name, value) -> bool` accepts only booleans (NumPy's included) and returns a `bool`.
 - `backend_display_name(backend) -> str`: a backend's name, whether `name` is an attribute or a method, falling back to its class name.
 - `stable_hash_bytes(data) -> str` and `stable_hash_str(s) -> str`: SHA-256 hex digests, stable across processes (unlike `hash()`).
-- `atomic_write_bytes(path, data)`: writes through a temporary file in the same directory that is renamed into place, so readers never see a partial file; `dump_json(path, obj)` writes sorted, indented JSON that way, and `load_json(path)` reads JSON.
-- `replacing_directory(target)`: a context manager yielding an empty staging directory beside `target`. When the block completes, whatever is at `target` is moved aside, the staging directory renamed into its place, and the old entry deleted (it is restored should that rename fail); when the block raises, `target` is left untouched and the staging directory removed. `save_dataset`, `BalancedWorkload.save`, and `qbalance compile` write through it.
+- `atomic_write_bytes(path, data)`: writes through a temporary file in the same directory that is renamed into place, so readers never see a partial file, and the file gets the permissions the umask gives any new file; `dump_json(path, obj)` writes sorted, indented JSON that way, and `load_json(path)` reads JSON.
+- `replacing_directory(target)`: a context manager yielding an empty staging directory beside `target`. When the block completes, whatever is at `target` is moved aside, the staging directory renamed into its place, and the old entry deleted (it is restored should that rename fail); when the block raises, `target` is left untouched and the staging directory removed. The new directory gets the permissions the umask gives any new directory. `save_dataset`, `BalancedWorkload.save`, and `qbalance compile` write through it.
 - `default_cache_dir(app="qbalance") -> Path`: the platform user cache directory for `app`.
 
 ```pycon
@@ -1503,7 +1505,7 @@ ValueError: execute must be a boolean
 
 ## Logging (`qbalance.logging`)
 
-`qbalance.logging.get_logger(name="qbalance") -> logging.Logger` returns a standard logger. The first call installs one stream handler on the `qbalance` package logger (level `INFO`, format `time | level | name | message`, propagation off), but only when neither that logger nor the root logger has a handler, so an application that configures logging keeps full control. `LOGGER_NAME` is `"qbalance"`.
+`qbalance.logging.get_logger(name="qbalance") -> logging.Logger` returns a standard logger. The first call installs one stream handler on the `qbalance` package logger (format `time | level | name | message`), but only when neither that logger nor the root logger has a handler. Records always propagate, and the handler prints only those emitted while the root logger has no handler, so an application that configures logging keeps full control whether it does so before or after importing qbalance, and no record is printed twice. The package logger's level is left unset, so it follows the root logger's (`WARNING` by default). `LOGGER_NAME` is `"qbalance"`.
 
 ```pycon
 >>> from qbalance.logging import LOGGER_NAME, get_logger

@@ -129,8 +129,11 @@ def run_ensemble(
     M3 corrects each instance's counts as measured and untwirls afterwards,
     because its calibration describes the physical readout channel.  ZNE folds
     every instance at each factor and reruns it with the same share and seed;
-    a factor that realizes 1 reuses the unfolded runs.  The fit is against the
-    realized factors, not the requested ones they were rounded from.
+    a factor that realizes 1 reuses the unfolded runs.  A factor realizing the
+    same fold as an earlier one is an independent second sample of that noise
+    level, so its ``r``-th repeat runs instance ``i`` with seed
+    ``seed + r * len(instances) + i``.  The fit is against the realized
+    factors, not the requested ones they were rounded from.
 
     Args:
         backend: Backend to run on.
@@ -183,17 +186,31 @@ def run_ensemble(
     if zne_factors:
         try:
             counts_per_factor = []
+            # Earlier runs of each realized fold, keyed by its factor.
+            repeats: Dict[int, int] = {}
             for factor in zne_factors:
-                if realized_fold_factor(factor) == 1:
+                realized_factor = realized_fold_factor(factor)
+                if realized_factor == 1:
                     # Unfolded: the very runs (circuits, shares and seeds)
                     # already made above.
                     counts_per_factor.append(counts)
                     continue
+                # A factor folding like an earlier one ((1, 2, 3) folds 2 and 3
+                # alike) is a second sample of that noise level, as on
+                # hardware.  Rerunning the identical circuit with the identical
+                # seeds would only copy the first sample on a simulator, so
+                # every repeat shifts the seeds past those already used.
+                repeat = repeats.get(realized_factor, 0)
+                repeats[realized_factor] = repeat + 1
+                seed_offset = repeat * len(instances)
                 folded_counts = []
                 for index, instance, flip_map, share in runs:
                     folded = fold_global_for_backend(instance, backend, factor)
                     folded_raw = run_counts(
-                        backend, folded, shots=share, seed_simulator=seed + index
+                        backend,
+                        folded,
+                        shots=share,
+                        seed_simulator=seed + seed_offset + index,
                     )
                     folded_counts.append(
                         apply_measurement_untwirl_counts(folded_raw, flip_map)

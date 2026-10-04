@@ -24,7 +24,7 @@ from qbalance.plugins import list_plugins
 from qbalance.reports.html import render_html
 from qbalance.reports.markdown import render_markdown
 from qbalance.strategies import StrategySpec, load_strategy_specs
-from qbalance.utils import replacing_directory
+from qbalance.utils import replacing_directory, strict_json_value
 from qbalance.workflow.workload import Workload
 
 
@@ -449,7 +449,10 @@ def compile_cmd(
                 with (staging / "compiled" / output_name).open("wb") as f:
                     qpy.dump(instances, f)
                 meta["artifacts"][rec.name] = f"compiled/{output_name}"
-        (staging / "meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+        (staging / "meta.json").write_text(
+            json.dumps(strict_json_value(meta), indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
     console.print(f"[green]Wrote[/green] {escape(str(out))}")
 
 

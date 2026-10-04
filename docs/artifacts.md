@@ -112,6 +112,8 @@ A minimal shape is:
 
 Both write their output under a temporary name beside the destination and move it into place only once it is complete, so a failed save or export leaves an existing one intact; `save_dataset` and `qbalance compile` do the same.
 
+`results.json`, the matrix JSON, and the `meta.json` of `qbalance compile` are strict JSON that any parser accepts: a non-finite number is written as `null`, never as a bare `NaN` or `Infinity`. The one such value a run normally produces is the `objective_score` of an infeasible candidate, which is $+\infty$ in memory; its `strategy_failed` flag still marks it, so a reloaded workload ranks and diagnoses exactly as the one that was saved.
+
 
 Selection diagnostics are JSON-safe and finite-aware:
 
@@ -122,11 +124,11 @@ Selection diagnostics are JSON-safe and finite-aware:
 
 Candidate rankings are derived from `evaluation_history` and are also JSON-safe:
 
-- entries are sorted by the same finite-safe selection score used for final strategy selection, then by `original_index` for deterministic ties;
+- entries are sorted by the same finite-safe selection score used for final strategy selection, with the selected candidate first among equal scores, then by `original_index` for deterministic ties;
 - `objective_score` is the diagnostic score recomputed from finite weighted objective terms;
 - `selection_score` mirrors selection semantics, including a valid stored `metrics["objective_score"]` when available, and becomes `null` for incomparable candidates;
 - `objective_terms` records the finite weighted terms used for the diagnostic score;
-- `selected` marks the row matching the saved selected strategy and metrics;
+- `selected` marks the row matching the saved selected strategy and metrics; it ranks first unless the regression guard or `pareto=True` chose it (the Pareto front ignores objective terms outside its four metrics, so a candidate off the front can score better);
 - when `allow_regression=False` chooses the baseline and that baseline was not in `evaluation_history`, `candidate_rankings` includes one synthetic selected baseline row with `original_index: null` so consumers can still identify the final selection exactly once.
 
 Reload a saved workload directory with `qbalance.load_balanced_workload(out_dir)`. The loader expects the directory layout above (not the ZIP file itself), reconstructs the `BalancedWorkload`, and validates that selections, baseline metrics, and evaluation-history entries refer only to circuits in the copied dataset. `selection_diagnostics` and `candidate_rankings` are derived metadata and are recomputed by `BalancedWorkload.selection_diagnostics()` and `BalancedWorkload.candidate_rankings()` after loading, so older artifacts that omit them still load. Older artifacts that omit `evaluation_history` or set it to `null` also still load, with an empty history mapping. Extract a ZIP bundle first if you need to reload a download archive.

@@ -1025,6 +1025,88 @@ def test_candidate_rankings_match_selection_score_and_are_json_safe(tmp_path):
     json.dumps(rankings, allow_nan=False)
 
 
+def test_saved_results_are_strict_json_and_reload_losslessly(tmp_path):
+    """Regression: an infeasible candidate wrote ``Infinity`` into results.json.
+
+    Its ``objective_score`` is +inf in memory, and ``json.dumps`` writes that
+    (and NaN) as bare tokens that are not JSON, so strict parsers rejected the
+    whole file.  They are written as null; ``strategy_failed`` still marks the
+    candidate, so a reloaded workload ranks and diagnoses exactly as before.
+    """
+    dsroot = tmp_path / "ds_strict_json"
+    dsroot.mkdir()
+    (dsroot / "c0.qpy").write_bytes(b"artifact")
+    dataset = wl.CircuitDataset(dsroot, [wl.CircuitRecord("c0", "c0.qpy", "qpy", {})])
+    selected = Strategy(
+        spec=StrategySpec(optimization_level=2),
+        metrics={"depth": 3.0, "objective_score": 3.0},
+    )
+    failed = Strategy(
+        spec=StrategySpec(optimization_level=3),
+        metrics={
+            "compile_error": "boom",
+            "strategy_failed": True,
+            "strategy_failure_reason": "compile_failed",
+            "objective_score": float("inf"),
+        },
+    )
+    balanced = wl.BalancedWorkload(
+        dataset=dataset,
+        backend_spec="fake:generic:2",
+        selections={"c0": selected},
+        baseline_metrics={"c0": {"depth": 4.0, "compile_time_s": float("nan")}},
+        objective=Objective({"depth": 1.0}),
+        evaluation_history={"c0": [selected, failed]},
+    )
+    out = tmp_path / "balanced_strict_json"
+    balanced.save(out)
+
+    def reject_constant(constant):
+        raise ValueError(f"non-standard JSON constant {constant}")
+
+    text = (out / "results.json").read_text(encoding="utf-8")
+    payload = json.loads(text, parse_constant=reject_constant)
+    history = payload["evaluation_history"]["c0"]
+    assert history[1]["metrics"]["objective_score"] is None
+    assert payload["baseline_metrics"]["c0"]["compile_time_s"] is None
+
+    reloaded = wl.load_balanced_workload(out)
+    assert reloaded.candidate_rankings() == balanced.candidate_rankings()
+    assert reloaded.selection_diagnostics() == balanced.selection_diagnostics()
+    assert reloaded.summary() == balanced.summary()
+
+
+def test_matrix_json_is_strict_json(tmp_path, monkeypatch):
+    """A non-finite metric is written as null, not as a bare NaN token."""
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.dataset import save_dataset
+
+    qc = QuantumCircuit(1, 1, name="c0")
+    qc.measure(0, 0)
+    save_dataset(tmp_path / "ds", [qc])
+    monkeypatch.setattr(
+        matrix_mod,
+        "_evaluate_trial",
+        lambda *args, **kwargs: {"depth": float("nan"), "ratio": float("-inf")},
+    )
+    out = matrix_mod.run_matrix(
+        tmp_path / "ds",
+        ["fake:generic:2"],
+        [StrategySpec()],
+        tmp_path / "matrix.json",
+    )
+
+    def reject_constant(constant):
+        raise ValueError(f"non-standard JSON constant {constant}")
+
+    payload = json.loads(
+        out.read_text(encoding="utf-8"), parse_constant=reject_constant
+    )
+    assert payload["results"][0]["metrics"] == {"depth": None, "ratio": None}
+
+
 def test_load_balanced_workload_rejects_unknown_selection(tmp_path):
     out = tmp_path / "bad_balanced"
     dataset_dir = out / "dataset"
@@ -4150,3 +4232,59 @@ def test_adjust_does_not_warn_when_every_objective_term_is_reported(tmp_path, ca
         )
 
     assert "Objective term" not in caplog.text
+
+
+def test_cut_subexperiments_are_identical_circuits_across_runs(tmp_path):
+    """Regression: no cut subexperiment ever hit the compile cache.
+
+    qiskit-addon-cutting names its circuits and quantum registers from Qiskit's
+    global counters, and QPY records both names, so the same cut produced new
+    fingerprints on every run.  A warm-cache rerun recompiled every
+    subexperiment and re-ranked the cut candidate on fresh compile times.
+    """
+    pytest.importorskip("qiskit_addon_cutting")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.cache import fingerprint_circuit
+
+    qc = QuantumCircuit(5, 4, name="chain")
+    qc.h(0)
+    for qubit in range(4):
+        qc.cx(qubit, qubit + 1)
+    qc.measure([0, 2, 3, 4], [3, 0, 1, 2])
+
+    first = addon_cutting.prepare_cutting_experiment(qc, 4)
+    second = addon_cutting.prepare_cutting_experiment(qc, 4)
+    assert first is not None and second is not None
+    for label, circuits in first.subexperiments.items():
+        assert [fingerprint_circuit(c) for c in circuits] == [
+            fingerprint_circuit(c) for c in second.subexperiments[label]
+        ]
+        for circuit in circuits:
+            assert circuit.name == f"chain_cut_{label}"
+            # The reconstruction reads results by these register names.
+            assert {register.name for register in circuit.cregs} == {
+                "observable_measurements",
+                "qpd_measurements",
+            }
+
+    # A rerun on a warm cache replays the recorded metrics exactly.
+    backend = GenericBackendV2(num_qubits=5, seed=0)
+    spec = StrategySpec(cutting=True, max_subcircuit_qubits=4)
+
+    def evaluate():
+        return wl._evaluate_candidate(
+            qc,
+            backend,
+            spec,
+            objective=default_objective(),
+            execute=False,
+            shots=100,
+            seed=0,
+            profile=False,
+            cache_root=tmp_path / "cache",
+            backend_key="key",
+        )
+
+    assert evaluate() == evaluate()

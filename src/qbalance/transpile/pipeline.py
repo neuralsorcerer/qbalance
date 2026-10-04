@@ -27,16 +27,13 @@ from qbalance.transpile.suppression import (
     resolve_dd_sequence,
 )
 from qbalance.utils import (
-    SCHEDULING_DIRECTIVES,
     backend_display_name,
-    instruction_parts,
     operation_depth,
     operation_size,
+    two_qubit_operation_count,
 )
 
 log = get_logger(__name__)
-
-_DIRECTIVE_NAMES = SCHEDULING_DIRECTIVES
 
 # qbalance-specific layout name.  Qiskit does not know this method; it is
 # realized by handing the computed layout to the preset pass manager as an
@@ -45,17 +42,14 @@ NOISE_AWARE_LAYOUT = "qbalance_noise_aware"
 
 
 def _count_two_qubit_ops(circuit: Any) -> int:
-    """Count two-qubit gate operations, excluding scheduling directives.
+    """Count the two-qubit gate operations one shot of ``circuit`` executes.
 
     Barriers can span exactly two qubits; counting them as two-qubit gates
-    would inflate the objective for otherwise identical circuits.
+    would inflate the objective for otherwise identical circuits.  A
+    control-flow instruction counts the two-qubit operations its blocks run
+    (see :func:`~qbalance.utils.two_qubit_operation_count`).
     """
-    count = 0
-    for entry in circuit.data:
-        inst, qargs, _ = instruction_parts(entry)
-        if len(qargs) == 2 and getattr(inst, "name", "") not in _DIRECTIVE_NAMES:
-            count += 1
-    return count
+    return two_qubit_operation_count(circuit)
 
 
 def _backend_basis_gates(backend: Any, target: Any) -> list[str] | None:

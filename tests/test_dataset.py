@@ -761,7 +761,8 @@ def test_load_circuits_rejects_empty_qpy_payload(
         [CircuitRecord(name="a", artifact="a.qpy", format="qpy")],
     )
 
-    with pytest.raises(ValueError, match="Empty QPY file"):
+    # Like every other failure of this loader, the message names the record.
+    with pytest.raises(ValueError, match=r"Empty QPY file: record at index 0 \('a'\)"):
         dataset.load_circuits()
 
 

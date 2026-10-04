@@ -299,23 +299,41 @@ def test_fold_global_rounds_the_scale_up_to_an_odd_factor():
     assert fold_global(circuit, 1.0) is circuit
 
 
-def test_rebase_skips_a_circuit_whose_width_differs_from_the_backend():
-    """Re-basing needs an identity layout, which needs matching widths.
+def test_rebase_translates_a_narrower_circuit_without_relaying_it_out():
+    """A circuit narrower than the backend is translated in place.
 
     ``initial_layout=range(circuit.num_qubits)`` only describes the backend
-    when the two agree, so a mismatch has to be left alone rather than
-    silently re-laid-out onto different physical qubits.
+    when the two widths agree, and the preset pass manager would widen a
+    narrower circuit onto the whole device.  Its gates are translated in place
+    instead: no qubit moves, so the count keys keep their meaning.
     """
     from qiskit import QuantumCircuit
     from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.quantum_info import Statevector
 
     from qbalance.mitigation.zne import _rebase_to_backend
 
     backend = GenericBackendV2(num_qubits=5, seed=1)
-    narrow = QuantumCircuit(2)
+    narrow = QuantumCircuit(2, 1)
     narrow.h(0)
+    narrow.csx(0, 1)
+    narrow.measure(1, 0)
 
-    assert _rebase_to_backend(narrow, backend) is narrow
+    rebased = _rebase_to_backend(narrow, backend)
+
+    assert (rebased.num_qubits, rebased.num_clbits) == (2, 1)
+    assert set(rebased.count_ops()) <= set(backend.target.operation_names)
+    (measurement,) = [i for i in rebased.data if i.operation.name == "measure"]
+    assert rebased.find_bit(measurement.qubits[0]).index == 1
+    assert rebased.find_bit(measurement.clbits[0]).index == 0
+
+    def probabilities(circuit):
+        unmeasured = circuit.remove_final_measurements(inplace=False)
+        return Statevector.from_instruction(unmeasured).probabilities_dict()
+
+    expected, actual = probabilities(narrow), probabilities(rebased)
+    for key in set(expected) | set(actual):
+        assert actual.get(key, 0.0) == pytest.approx(expected.get(key, 0.0), abs=1e-9)
 
 
 def test_fold_global_rejects_a_measurement_that_is_not_terminal():

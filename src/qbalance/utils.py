@@ -6,17 +6,28 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import secrets
 import shutil
-import tempfile
 import threading
 import time
 from contextlib import contextmanager, suppress
 from numbers import Integral
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    Optional,
+    Tuple,
+    TypeVar,
+    cast,
+)
 
 import numpy as np
 from platformdirs import user_cache_dir
@@ -30,6 +41,76 @@ _ATOMIC_WRITE_LOCKS = tuple(threading.Lock() for _ in range(64))
 def _atomic_write_lock(path: Path) -> threading.Lock:
     normalized_path = os.path.normcase(os.path.abspath(path))
     return _ATOMIC_WRITE_LOCKS[hash(normalized_path) % len(_ATOMIC_WRITE_LOCKS)]
+
+
+# Temporary entries are staged under random names beside their destination and
+# renamed into place.  tempfile.mkstemp and mkdtemp would pick the names too,
+# but they create owner-only entries (0600 and 0700) meant to stay private; the
+# rename keeps that mode, so every dataset, workload, report and cache entry
+# came out unreadable to anyone else whatever the user's umask.  Creating them
+# with the ordinary 0o666 and 0o777 lets the kernel apply the umask, exactly as
+# a plain open() or mkdir() of the destination would.
+_TEMPORARY_NAME_ATTEMPTS = 100
+_TEMPORARY_FILE_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    # Without O_BINARY, Windows writes through the descriptor in text mode.
+    | getattr(os, "O_BINARY", 0)
+    | getattr(os, "O_NOFOLLOW", 0)
+)
+
+
+def _temporary_sibling(directory: Path, prefix: str, suffix: str) -> Path:
+    """Return a random absolute path in ``directory``.
+
+    Absolute like tempfile's, so a caller changing the working directory while
+    it writes the staged entry still commits the right one.
+    """
+    name = f"{prefix}{secrets.token_hex(8)}{suffix}"
+    return Path(os.path.abspath(directory)) / name
+
+
+def _create_temporary_file(
+    directory: Path, prefix: str, suffix: str
+) -> Tuple[int, Path]:
+    """Create a new file in ``directory`` with umask-governed permissions.
+
+    Returns:
+        The open, write-only descriptor and the file's path.
+
+    Raises:
+        FileExistsError: If no unused name was found.
+        OSError: If the file cannot be created.
+    """
+    for _ in range(_TEMPORARY_NAME_ATTEMPTS):
+        candidate = _temporary_sibling(directory, prefix, suffix)
+        try:
+            return os.open(candidate, _TEMPORARY_FILE_FLAGS, 0o666), candidate
+        except FileExistsError:
+            continue
+    raise FileExistsError(
+        errno.EEXIST, "No unused temporary file name found", str(directory)
+    )
+
+
+def _create_temporary_directory(directory: Path, prefix: str) -> Path:
+    """Create a new directory in ``directory`` with umask-governed permissions.
+
+    Raises:
+        FileExistsError: If no unused name was found.
+        OSError: If the directory cannot be created.
+    """
+    for _ in range(_TEMPORARY_NAME_ATTEMPTS):
+        candidate = _temporary_sibling(directory, prefix, "")
+        try:
+            os.mkdir(candidate, 0o777)
+        except FileExistsError:
+            continue
+        return candidate
+    raise FileExistsError(
+        errno.EEXIST, "No unused temporary directory name found", str(directory)
+    )
 
 
 def backend_display_name(backend: Any) -> str:
@@ -133,7 +214,8 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     The payload goes to a temporary file in the destination directory and is
     then renamed into place, which is atomic on every supported platform.  A run
     interrupted mid-write therefore leaves either the previous file or none at
-    all, never a truncated one for the next run to choke on.
+    all, never a truncated one for the next run to choke on.  The file gets the
+    permissions the umask gives any newly created file.
 
     Args:
         path: Destination file path.
@@ -147,10 +229,9 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     """
     with _atomic_write_lock(path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        handle, tmp_name = tempfile.mkstemp(
-            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        handle, tmp_path = _create_temporary_file(
+            path.parent, prefix=f".{path.name}.", suffix=".tmp"
         )
-        tmp_path = Path(tmp_name)
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(data)
@@ -180,7 +261,8 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     whatever is at ``target`` is moved aside, the staging directory renamed
     into its place, and the old entry deleted; should that rename fail, the
     old entry is put back.  Callers decide beforehand whether ``target`` may
-    be replaced at all.
+    be replaced at all.  The new directory gets the permissions the umask
+    gives any newly created directory.
 
     Args:
         target: Directory to create or replace.
@@ -193,7 +275,7 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     """
     target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.tmp-", dir=target.parent))
+    staging = _create_temporary_directory(target.parent, prefix=f".{target.name}.tmp-")
     committed = False
     try:
         yield staging
@@ -220,6 +302,26 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     finally:
         if not committed:
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def strict_json_value(value: Any) -> Any:
+    """Return ``value`` with every non-finite float replaced by ``None``.
+
+    ``json.dumps`` writes NaN and infinity as the bare tokens ``NaN`` and
+    ``Infinity``, which are not JSON: strict parsers (JavaScript's
+    ``JSON.parse``, most other languages) reject the whole file, and ``jq``
+    silently turns ``Infinity`` into ``1.8e308``.  ``null`` is what
+    JavaScript's ``JSON.stringify`` writes for them.  Mappings, lists and
+    tuples are converted recursively (tuples become lists, as in JSON);
+    mapping keys are kept.
+    """
+    if isinstance(value, float):
+        return value if np.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: strict_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [strict_json_value(item) for item in value]
+    return value
 
 
 def dump_json(path: Path, obj: Dict[str, Any]) -> None:
@@ -324,12 +426,131 @@ def is_terminal_measurement(
     return True
 
 
-def _counts_as_operation(instruction: Any) -> bool:
-    """Whether ``instruction`` adds to depth and size (it is not a directive)."""
-    operation = getattr(instruction, "operation", None)
+def _is_operation(operation: Any) -> bool:
+    """Whether ``operation`` adds to depth and size (it is not a directive)."""
     if getattr(operation, "_directive", False):
         return False
     return getattr(operation, "name", "") not in SCHEDULING_DIRECTIVES
+
+
+def _counts_as_operation(instruction: Any) -> bool:
+    """Whether ``instruction`` adds to depth and size (it is not a directive)."""
+    return _is_operation(getattr(instruction, "operation", None))
+
+
+_T = TypeVar("_T")
+
+
+def control_flow_cost(
+    operation: Any,
+    block_cost: Callable[[Any], _T],
+    *,
+    repeat: Callable[[_T, int], _T],
+    worst: Callable[[Iterable[_T]], _T],
+) -> Optional[_T]:
+    """Return what one execution of a control-flow ``operation`` costs.
+
+    A control-flow instruction stands for the instructions its blocks run, so
+    metrics price it by them: a ``for_loop`` runs its body once per index, an
+    ``if_else`` or ``switch_case`` its costliest branch (an ``if`` without
+    ``else`` may run nothing, so its body is the worst case), and a
+    ``while_loop`` or ``box`` its body once -- a while loop's iteration count
+    is only known at run time, so it is priced by its first pass.
+
+    Args:
+        operation: The instruction's operation.
+        block_cost: Prices one block (a circuit).
+        repeat: Combines one body's cost over a number of iterations.
+        worst: Picks the costliest of several branches.
+
+    Returns:
+        The cost, or ``None`` when ``operation`` has no blocks.
+    """
+    blocks = getattr(operation, "blocks", None)
+    if not blocks:
+        return None
+    costs = [block_cost(block) for block in blocks]
+    if getattr(operation, "name", "") == "for_loop":
+        return repeat(costs[0], len(operation.params[0]))
+    return worst(costs)
+
+
+def _repeated_count(count: int, times: int) -> int:
+    """A count over ``times`` iterations."""
+    return count * times
+
+
+def _largest_count(counts: Iterable[int]) -> int:
+    """The largest of several branch counts."""
+    return max(counts)
+
+
+def _has_control_flow(circuit: Any) -> bool:
+    """Whether some instruction of ``circuit`` has blocks (control flow)."""
+    return any(
+        getattr(instruction_parts(entry)[0], "blocks", None)
+        for entry in getattr(circuit, "data", None) or ()
+    )
+
+
+def executed_operation_count(
+    circuit: Any, counts: Callable[[Any, tuple[Any, ...]], bool]
+) -> int:
+    """Count the operations one shot of ``circuit`` executes that ``counts``.
+
+    ``counts(operation, qubits)`` decides for an ordinary instruction; a
+    control-flow instruction is not counted itself but contributes the count
+    of its blocks (see :func:`control_flow_cost`).
+    """
+    total = 0
+    for entry in getattr(circuit, "data", None) or ():
+        operation, qargs, _ = instruction_parts(entry)
+        nested = control_flow_cost(
+            operation,
+            lambda block: executed_operation_count(block, counts),
+            repeat=_repeated_count,
+            worst=_largest_count,
+        )
+        if nested is not None:
+            total += nested
+        elif counts(operation, qargs):
+            total += 1
+    return total
+
+
+def two_qubit_operation_count(circuit: Any) -> int:
+    """Count the two-qubit operations one shot of ``circuit`` executes.
+
+    Directives spanning two qubits (a barrier) are not operations, and a
+    control-flow instruction on two qubits is no two-qubit gate: it counts
+    the two-qubit operations of its blocks instead.
+    """
+    return executed_operation_count(
+        circuit,
+        lambda operation, qargs: len(qargs) == 2 and _is_operation(operation),
+    )
+
+
+def _executed_depth(circuit: Any) -> int:
+    """Depth of ``circuit`` with every control-flow block priced in layers."""
+    levels: Dict[Tuple[str, int], int] = {}
+    for entry in getattr(circuit, "data", None) or ():
+        operation, qargs, cargs = instruction_parts(entry)
+        weight = control_flow_cost(
+            operation,
+            _executed_depth,
+            repeat=_repeated_count,
+            worst=_largest_count,
+        )
+        if weight is None:
+            weight = 1 if _is_operation(operation) else 0
+        wires = [("q", bit_index(circuit, bit)) for bit in qargs] + [
+            ("c", bit_index(circuit, bit)) for bit in cargs
+        ]
+        level = max((levels.get(wire, 0) for wire in wires), default=0) + weight
+        for wire in wires:
+            levels[wire] = level
+    return max(levels.values(), default=0)
 
 
 def operation_depth(circuit: Any) -> int:
@@ -340,12 +561,27 @@ def operation_depth(circuit: Any) -> int:
     delays) would then be several layers deeper than the same circuit left
     unscheduled, although it runs for exactly as long.  Directives still
     synchronize the wires they touch, as Qiskit's own barrier handling does.
+
+    Qiskit also counts a control-flow instruction as one layer, whatever its
+    blocks run; here it takes the layers its blocks run instead (see
+    :func:`control_flow_cost`), so a loop of ten gates is no shallower than
+    the ten gates.
     """
+    if _has_control_flow(circuit):
+        return _executed_depth(circuit)
     return int(circuit.depth(filter_function=_counts_as_operation))
 
 
 def operation_size(circuit: Any) -> int:
-    """Return the number of operations in ``circuit``, excluding directives."""
+    """Return the number of operations one shot of ``circuit`` executes.
+
+    Directives are excluded, and a control-flow instruction counts the
+    operations its blocks run (see :func:`control_flow_cost`).
+    """
+    if _has_control_flow(circuit):
+        return executed_operation_count(
+            circuit, lambda operation, qargs: _is_operation(operation)
+        )
     return int(circuit.size(filter_function=_counts_as_operation))
 
 
@@ -405,8 +641,10 @@ def measured_qubits_by_clbit(circuit: Any) -> list[int]:
         Physical qubit index per measured classical bit.
 
     Raises:
-        None.
+        ValueError: If a control-flow block of ``circuit`` measures (see
+            :func:`_reject_conditional_measurements`).
     """
+    _reject_conditional_measurements(circuit)
     mapping = _measurement_map(circuit)
     if not mapping:
         return list(range(int(getattr(circuit, "num_qubits", 0) or 0)))
@@ -425,9 +663,59 @@ def measured_clbits(circuit: Any) -> Optional[list[int]]:
         The measured classical bit indices, or ``None`` when no per-bit
         mapping can be recovered (matching the fallback of
         :func:`measured_qubits_by_clbit`).
+
+    Raises:
+        ValueError: If a control-flow block of ``circuit`` measures (see
+            :func:`_reject_conditional_measurements`).
     """
+    _reject_conditional_measurements(circuit)
     mapping = _measurement_map(circuit)
     return sorted(mapping) if mapping else None
+
+
+def _block_measures(data: Any) -> bool:
+    """Whether ``data`` holds a measurement, inside nested blocks too."""
+    for entry in data:
+        operation = instruction_parts(entry)[0]
+        if getattr(operation, "name", "") == "measure":
+            return True
+        for block in getattr(operation, "blocks", None) or ():
+            if _block_measures(getattr(block, "data", None) or ()):
+                return True
+    return False
+
+
+def _reject_conditional_measurements(circuit: Any) -> None:
+    """Refuse a circuit whose control-flow blocks measure.
+
+    The per-bit map only sees top-level measurements.  A measurement inside a
+    control-flow block (``if_else``, ``switch``, a loop, ``box``) acts on the
+    block's own bits, may run on only some shots or several times per shot,
+    and on the shots an ``if_else`` branch skips leaves its classical bit
+    holding whatever it held -- no readout of any one qubit.  Mitigating with
+    the top-level map projected such a bit out and restored it as ``0``: a
+    circuit whose counts were ``00`` and ``11`` came back as ``00`` and
+    ``01``.  Readout mitigation must not be attempted on such a circuit.
+
+    Raises:
+        ValueError: If a control-flow block of ``circuit`` measures.
+    """
+    try:
+        conditional = any(
+            _block_measures(getattr(block, "data", None) or ())
+            for entry in list(getattr(circuit, "data", None) or [])
+            for block in getattr(instruction_parts(entry)[0], "blocks", None) or ()
+        )
+    except ValueError:
+        # Not a readable circuit: there is no measurement map to protect.
+        return
+    if conditional:
+        raise ValueError(
+            "Measurement mitigation needs every measurement at the top level of "
+            "the circuit: a measurement inside a control-flow block may run on "
+            "only some shots, or several times, so its classical bit cannot be "
+            "attributed to the readout of one qubit."
+        )
 
 
 def _measurement_map(circuit: Any) -> Dict[int, int]:

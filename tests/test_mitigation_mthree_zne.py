@@ -825,3 +825,272 @@ def test_mthree_on_a_generic_backend_is_reproducible_for_a_seed():
         )
 
     assert mitigate() == mitigate()
+
+
+class _RecordingSimulator:
+    """A backend stub with mthree's view of a simulator, recording run options."""
+
+    name = "recording_simulator"
+    version = 2
+
+    def __init__(self, simulator=True, name=None):
+        self._simulator = simulator
+        if name is not None:
+            self.name = name
+        self.options_seen = []
+
+    def configuration(self):
+        return types.SimpleNamespace(simulator=self._simulator)
+
+    def run(self, run_input, **options):
+        self.options_seen.append(options)
+        return run_input
+
+
+def test_mthree_seeds_the_calibration_of_every_local_simulator():
+    """Regression: only ``fake:generic`` calibrations were seeded.
+
+    mthree runs its calibration circuits through ``backend.run`` without a
+    seed, so on an Aer simulator or a ``fake:ibm`` snapshot the mitigated
+    result changed from one identical run to the next.  Those are calibrated
+    on themselves with every job seeded; the backend object itself is never
+    modified, and hardware is passed through untouched.
+    """
+    simulator = _RecordingSimulator()
+    system = mthree_mod._calibration_system(simulator, seed=11)
+    assert system is not simulator
+    # mthree reads these off the system it is given.
+    assert system.name == "recording_simulator"
+    assert system.version == 2
+    assert system.configuration().simulator is True
+    system.run(["circuit"], shots=10)
+    assert simulator.options_seen == [{"shots": 10, "seed_simulator": 11}]
+
+    # Device snapshots report the device's configuration but run on Aer.
+    snapshot = _RecordingSimulator(simulator=False, name="fake_manila")
+    mthree_mod._calibration_system(snapshot, seed=3).run(["circuit"])
+    assert snapshot.options_seen == [{"seed_simulator": 3}]
+
+    # Unseeded calls, hardware, and runs without a seed keyword pass through.
+    assert mthree_mod._calibration_system(simulator) is simulator
+    hardware = _RecordingSimulator(simulator=False, name="ibm_device")
+    assert mthree_mod._calibration_system(hardware, seed=3) is hardware
+    no_seed = types.SimpleNamespace(
+        configuration=lambda: types.SimpleNamespace(simulator=True),
+        run=lambda run_input, shots=None: run_input,
+    )
+    assert mthree_mod._calibration_system(no_seed, seed=3) is no_seed
+
+
+@pytest.mark.parametrize("spec", ["aer:from_backend:fake:generic:3", "fake:ibm:manila"])
+def test_mthree_is_reproducible_for_a_seed_on_any_simulator(spec):
+    """The same seed gives the same mitigated distribution on every simulator."""
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    if spec.startswith("fake:ibm"):
+        pytest.importorskip("qiskit_ibm_runtime")
+    from qiskit import QuantumCircuit, transpile
+
+    from qbalance.backends import resolve_backend
+
+    backend = resolve_backend(spec)
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    compiled = transpile(qc, backend, optimization_level=0, initial_layout=[0, 1])
+    counts = backend.run(compiled, shots=2000, seed_simulator=1).result().get_counts()
+
+    def mitigate():
+
+        return mthree_mod.mitigate_twirled_counts(
+            backend, [counts], [{}], [0, 1], calibration_shots=2000, seed=5
+        )
+
+    assert mitigate() == mitigate()
+
+
+def test_fold_global_runs_leading_resets_once_ahead_of_the_folded_unitary():
+    """Regression: a reset preamble made every circuit using it unfoldable.
+
+    Qiskit keeps a circuit's initial resets at every optimization level, and
+    ``reset`` has no inverse, so ZNE failed outright on the common
+    ``reset(range(n))`` preamble.  A reset before anything else acts on its
+    qubit only re-prepares ``|0>``; it runs once, ahead of the folded unitary,
+    just as terminal measurements run once after it.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+    from qiskit.circuit.exceptions import CircuitError
+    from qiskit.quantum_info import DensityMatrix
+
+    qc = QuantumCircuit(2, 2, global_phase=0.3)
+    qc.reset([0, 1])
+    qc.barrier()
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.ry(0.4, 1)
+    qc.measure([0, 1], [0, 1])
+
+    folded = zne.fold_global(qc, 3)
+
+    names = [instruction.operation.name for instruction in folded.data]
+    assert names[:2] == ["reset", "reset"]
+    assert names.count("reset") == 2
+    assert names[-2:] == ["measure", "measure"]
+    assert folded.count_ops()["cx"] == 3
+    assert folded.global_phase == pytest.approx(qc.global_phase)
+
+    def probabilities(circuit):
+        unmeasured = circuit.remove_final_measurements(inplace=False)
+        return DensityMatrix.from_instruction(unmeasured).probabilities_dict()
+
+    expected, actual = probabilities(qc), probabilities(folded)
+    for key in set(expected) | set(actual):
+        assert actual.get(key, 0.0) == pytest.approx(expected.get(key, 0.0), abs=1e-9)
+
+    # A reset after another operation on its qubit is part of the computation
+    # and still cannot be folded.
+    mid = QuantumCircuit(1, 1)
+    mid.h(0)
+    mid.reset(0)
+    mid.x(0)
+    mid.measure(0, 0)
+    with pytest.raises(CircuitError, match="reset"):
+        zne.fold_global(mid, 3)
+
+
+def test_zne_runs_on_compiled_circuits_with_a_reset_preamble():
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit.providers.fake_provider import GenericBackendV2
+
+    from qbalance.execution.ensemble import run_ensemble
+    from qbalance.strategies import StrategySpec
+    from qbalance.transpile.pipeline import compile_ensemble
+
+    backend = GenericBackendV2(num_qubits=3, seed=0)
+    qc = QuantumCircuit(2, 2)
+    qc.reset([0, 1])
+    qc.h(0)
+    qc.cx(0, 1)
+    qc.measure([0, 1], [0, 1])
+    spec = StrategySpec(zne=True)
+    instances, metrics = compile_ensemble(qc, backend, spec)
+    assert instances[0].count_ops()["reset"] == 2
+
+    run = run_ensemble(
+        backend, instances, metrics, shots=500, seed=1, zne_factors=spec.zne_factors
+    )
+
+    assert run.zne_error is None
+    assert run.zne_realized_factors == [1.0, 3.0, 5.0]
+    assert run.zne_probs
+
+
+def test_measurement_maps_refuse_measurements_inside_control_flow():
+    """Regression: M3 silently forced conditionally written bits to ``0``.
+
+    The per-bit map only sees top-level measurements, so a bit written by a
+    measurement inside an ``if_else`` block looked unmeasured: mitigation
+    projected it out and restored it as ``0``, turning counts ``00``/``11``
+    into ``00``/``01``.  Such a bit is no readout of any one qubit on the
+    shots that skip the branch, so the maps refuse the circuit instead.
+    """
+    pytest.importorskip("qiskit")
+    from qiskit import QuantumCircuit
+
+    from qbalance.utils import measured_clbits, measured_qubits_by_clbit
+
+    dynamic = QuantumCircuit(2, 2)
+    dynamic.h(0)
+    dynamic.measure(0, 0)
+    with dynamic.if_test((dynamic.clbits[0], 1)):
+        dynamic.measure(1, 1)
+    for helper in (measured_qubits_by_clbit, measured_clbits):
+        with pytest.raises(ValueError, match="control-flow block"):
+            helper(dynamic)
+
+    # Control flow that does not measure keeps a faithful map.
+    feedforward = QuantumCircuit(2, 2)
+    feedforward.h(0)
+    feedforward.measure(0, 0)
+    with feedforward.if_test((feedforward.clbits[0], 1)):
+        feedforward.x(1)
+    feedforward.measure(1, 1)
+    assert measured_qubits_by_clbit(feedforward) == [0, 1]
+    assert measured_clbits(feedforward) == [0, 1]
+
+
+def test_mthree_records_an_error_for_a_circuit_measuring_in_control_flow():
+    pytest.importorskip("mthree")
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit_aer import AerSimulator
+
+    from qbalance.execution.ensemble import run_ensemble
+
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.x(1)
+    qc.measure(0, 0)
+    with qc.if_test((qc.clbits[0], 1)):
+        qc.measure(1, 1)
+
+    run = run_ensemble(
+        AerSimulator(),
+        [qc],
+        {"measurement_flip_map": {}},
+        shots=400,
+        seed=1,
+        mthree=True,
+    )
+
+    assert set(run.counts) == {"00", "11"}
+    assert run.mthree_probs is None
+    assert "control-flow block" in run.mthree_error
+
+
+def test_zne_folds_run_on_an_unconstrained_aer_simulator():
+    """Regression: folding added gates Aer cannot run, and nothing translated them.
+
+    ``AerSimulator()`` runs ``csx`` but not its inverse ``csxdg``, and an
+    unconstrained simulator keeps a circuit's own width, which the re-basing
+    used to skip ("not sized for this backend").  Every ZNE candidate with a
+    ``csx`` then failed with "unknown instruction: csxdg".
+    """
+    pytest.importorskip("qiskit_aer")
+    from qiskit import QuantumCircuit
+    from qiskit.quantum_info import Statevector
+    from qiskit_aer import AerSimulator
+
+    from qbalance.execution.ensemble import run_ensemble
+
+    backend = AerSimulator()
+    qc = QuantumCircuit(2, 2)
+    qc.h(0)
+    qc.csx(0, 1)
+    qc.measure([0, 1], [0, 1])
+
+    folded = zne.fold_global_for_backend(qc, backend, 3)
+    assert folded.num_qubits == 2
+    assert set(folded.count_ops()) <= set(backend.target.operation_names)
+
+    def probabilities(circuit):
+        unmeasured = circuit.remove_final_measurements(inplace=False)
+        return Statevector.from_instruction(unmeasured).probabilities_dict()
+
+    expected, actual = probabilities(qc), probabilities(folded)
+    for key in set(expected) | set(actual):
+        assert actual.get(key, 0.0) == pytest.approx(expected.get(key, 0.0), abs=1e-9)
+
+    run = run_ensemble(
+        backend,
+        [qc],
+        {"measurement_flip_map": {}},
+        shots=200,
+        seed=1,
+        zne_factors=(1.0, 3.0, 5.0),
+    )
+    assert run.zne_error is None
+    assert run.zne_realized_factors == [1.0, 3.0, 5.0]

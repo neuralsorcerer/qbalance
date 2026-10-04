@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -22,10 +23,15 @@ copyright = f"{datetime.now(UTC):%Y}, {author}"
 
 try:
     release = version(project)
-except (
-    PackageNotFoundError
-):  # pragma: no cover - used when building without installation
-    release = "0.0.0"
+except PackageNotFoundError:
+    # The docs build installs only docs/requirements.txt, not qbalance, so
+    # read the in-tree version (importing qbalance would need its runtime
+    # dependencies too).
+    _version_source = (ROOT / "src" / "qbalance" / "_version.py").read_text(
+        encoding="utf-8"
+    )
+    _match = re.search(r'^__version__ = "([^"]+)"$', _version_source, re.M)
+    release = _match.group(1) if _match else "0.0.0"
 
 version = ".".join(release.split(".")[:2])
 
