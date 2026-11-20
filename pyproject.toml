@@ -29,7 +29,7 @@ classifiers = [
 ]
 
 dependencies = [
-  "numpy>=1.24",
+  "numpy>=1.26",
   "pydantic>=2.5",
   "typer>=0.16",
   "rich>=13.7",
@@ -82,7 +82,7 @@ qbalance = "qbalance.cli:main"
 "html" = "qbalance.reports.html:render_html"
 
 [tool.black]
-target-version = ["py310"]
+target-version = ["py312"]
 
 [tool.ruff.lint]
 # Black and isort handle formatting. Check Python errors and common logic bugs.
