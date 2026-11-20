@@ -11,7 +11,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 
 [![Qiskit Ecosystem](https://qisk.it/e-88affdcb)](https://qisk.it/e)
 [![Current Release](https://img.shields.io/github/release/neuralsorcerer/qbalance.svg)](https://github.com/neuralsorcerer/qbalance/releases)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Qiskit](https://img.shields.io/badge/Qiskit-2.0%2B-purple?logo=qiskit&logoColor=white)](https://www.ibm.com/quantum/qiskit/)
 [![Test Linux](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml?query=branch%3Amain)
@@ -95,7 +95,7 @@ pip install "qbalance[all]"         # all optional dependencies + dev tools
 pip install -e ".[all]"
 ```
 
-**Python requirement**: `>=3.10`.
+**Python requirement**: `>=3.12`.
 
 ---
 
