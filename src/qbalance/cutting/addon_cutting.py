@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass, field
 from typing import (
     Any,
@@ -21,13 +22,14 @@ from typing import (
 
 import numpy as np
 
-from qbalance.errors import OptionalDependencyError, QBalanceError
+from qbalance.errors import OptionalDependencyError, QBalanceError, error_message
 from qbalance.logging import get_logger
 from qbalance.utils import (
     SCHEDULING_DIRECTIVES,
     bit_index,
     instruction_parts,
     is_terminal_measurement,
+    validate_integral,
 )
 
 log = get_logger(__name__)
@@ -407,8 +409,8 @@ def run_cutting_experiment(
             ``experiment.subexperiments``.
         backend: Backend to run on.
         shots: Shots per subexperiment.
-        seed (default: None): Simulator seed, forwarded only to backends whose
-            ``run`` accepts ``seed_simulator``.
+        seed (default: None): Base simulator seed. Each partition runs on a
+            separate random stream when the backend supports seeding.
 
     Returns:
         The reconstructed ``<Z x ... x Z>`` over the measured qubits.
@@ -427,14 +429,29 @@ def run_cutting_experiment(
     from qbalance.execution.runner import _ensure_backend, _prepare_run_kwargs
 
     runnable = _ensure_backend(backend)
-    options: Dict[str, Any] = {"default_shots": int(shots)}
-    if seed is not None and _prepare_run_kwargs(runnable.run, {"seed_simulator": seed}):
-        options["seed_simulator"] = int(seed)
-    sampler = BackendSamplerV2(backend=runnable, options=options)
-    results = {
-        lab: sampler.run(list(compiled[lab])).result()
-        for lab in experiment.subexperiments
-    }
+    options = {"default_shots": validate_integral("shots", shots, positive=True)}
+    base_seed = None if seed is None else validate_integral("seed", seed)
+    if not _prepare_run_kwargs(runnable.run, {"seed_simulator": base_seed}):
+        # BackendSamplerV2 always passes seed_simulator, even when it is None.
+        # Keep the original backend's state and run method untouched.
+        original_run = runnable.run
+
+        def run_unseeded(
+            circuits: Any, *, seed_simulator: Any = None, **kwargs: Any
+        ) -> Any:
+            return original_run(circuits, **kwargs)
+
+        runnable = copy(runnable)
+        runnable.run = run_unseeded
+        base_seed = None
+    results = {}
+    for index, lab in enumerate(experiment.subexperiments):
+        if base_seed is not None:
+            # Reconstruction multiplies partition estimates. Restarting the
+            # same random stream for identical circuits biases that product.
+            options["seed_simulator"] = base_seed + index
+        sampler = BackendSamplerV2(backend=runnable, options=options)
+        results[lab] = sampler.run(list(compiled[lab])).result()
     values = reconstruct_expectation_values(
         results, experiment.coefficients, experiment.subobservables
     )
@@ -478,7 +495,7 @@ def evaluate_cutting_experiment(
                 compiled[label].append(sub_instances[0])
                 sub_metrics.append(sub_m)
     except Exception as e:
-        return {"compile_error": str(e), **experiment.metadata}
+        return {"compile_error": error_message(e), **experiment.metadata}
 
     m = combine_subexperiment_metrics(sub_metrics, experiment)
     if execute:
@@ -488,5 +505,5 @@ def evaluate_cutting_experiment(
             )
             m["cut_shots_total"] = int(shots) * int(m["num_subexperiments"])
         except Exception as e:
-            m["exec_error"] = str(e)
+            m["exec_error"] = error_message(e)
     return m

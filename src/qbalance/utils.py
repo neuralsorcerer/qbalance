@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import math
 import os
 import secrets
 import shutil
@@ -39,7 +40,7 @@ _ATOMIC_WRITE_LOCKS = tuple(threading.Lock() for _ in range(64))
 
 
 def _atomic_write_lock(path: Path) -> threading.Lock:
-    normalized_path = os.path.normcase(os.path.abspath(path))
+    normalized_path = os.path.normcase(path.parent.resolve() / path.name)
     return _ATOMIC_WRITE_LOCKS[hash(normalized_path) % len(_ATOMIC_WRITE_LOCKS)]
 
 
@@ -68,7 +69,7 @@ def _temporary_sibling(directory: Path, prefix: str, suffix: str) -> Path:
     it writes the staged entry still commits the right one.
     """
     name = f"{prefix}{secrets.token_hex(8)}{suffix}"
-    return Path(os.path.abspath(directory)) / name
+    return directory.absolute() / name
 
 
 def _create_temporary_file(
@@ -134,6 +135,21 @@ def backend_display_name(backend: Any) -> str:
     if callable(name):
         name = name()
     return str(name or backend.__class__.__name__)
+
+
+def finite_float_or_none(value: Any) -> Optional[float]:
+    """Convert a real scalar to a finite float, returning None for unusable values."""
+    if isinstance(value, np.ndarray):
+        if value.ndim != 0:
+            return None
+        value = value.item()
+    if isinstance(value, (complex, np.complexfloating)):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if math.isfinite(result) else None
 
 
 def validate_integral(
@@ -227,6 +243,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
     Raises:
         OSError: If the temporary file cannot be written or renamed.
     """
+    path = Path(path).absolute()
     with _atomic_write_lock(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, tmp_path = _create_temporary_file(
@@ -252,7 +269,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 @contextmanager
-def replacing_directory(target: Path) -> Iterator[Path]:
+def replacing_directory(target: Path, *, overwrite: bool = True) -> Iterator[Path]:
     """Yield an empty staging directory that replaces ``target`` on success.
 
     The staging directory is a sibling of ``target``, so the final rename
@@ -260,12 +277,13 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     left exactly as it was and the staging directory is removed.  Otherwise
     whatever is at ``target`` is moved aside, the staging directory renamed
     into its place, and the old entry deleted; should that rename fail, the
-    old entry is put back.  Callers decide beforehand whether ``target`` may
-    be replaced at all.  The new directory gets the permissions the umask
+    old entry is put back. With ``overwrite=False``, a target created while
+    staging is preserved. The new directory gets the permissions the umask
     gives any newly created directory.
 
     Args:
         target: Directory to create or replace.
+        overwrite: Whether the commit may replace an existing destination.
 
     Yields:
         The staging directory to write the new contents into.
@@ -273,7 +291,7 @@ def replacing_directory(target: Path) -> Iterator[Path]:
     Raises:
         OSError: If the staging directory cannot be created or swapped in.
     """
-    target = Path(target)
+    target = Path(target).absolute()
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = _create_temporary_directory(target.parent, prefix=f".{target.name}.tmp-")
     committed = False
@@ -281,16 +299,27 @@ def replacing_directory(target: Path) -> Iterator[Path]:
         yield staging
         backup = Path(f"{staging}.backup")
         backed_up = False
-        try:
-            if os.path.lexists(target):
-                os.replace(target, backup)
-                backed_up = True
-            os.replace(staging, target)
-            committed = True
-        except BaseException:
-            if backed_up and not os.path.lexists(target):
-                os.replace(backup, target)
-            raise
+        with _atomic_write_lock(target):
+            try:
+                if os.path.lexists(target):
+                    if not overwrite:
+                        raise FileExistsError(f"{target} exists (use overwrite=True)")
+                    os.replace(target, backup)
+                    backed_up = True
+                os.replace(staging, target)
+                committed = True
+            except BaseException as exc:
+                if backed_up and not os.path.lexists(target):
+                    os.replace(backup, target)
+                if (
+                    not overwrite
+                    and isinstance(exc, OSError)
+                    and exc.errno == errno.ENOTEMPTY
+                ):
+                    raise FileExistsError(
+                        f"{target} exists (use overwrite=True)"
+                    ) from exc
+                raise
         # The new contents are in place: failing to delete the old ones must
         # not report the completed replacement as a failure.
         if backed_up:
@@ -398,6 +427,35 @@ def shares_bit(bits: Any, other: Any) -> bool:
 SCHEDULING_DIRECTIVES = frozenset({"barrier", "delay"})
 
 
+def _classical_resources(operation: Any) -> tuple[list[Any], list[Any]]:
+    """Classical bits and standalone variables referenced outside instruction cargs."""
+    name = getattr(operation, "name", "")
+    condition = getattr(operation, "condition", None)
+    operands = []
+    if condition is not None:
+        operands.append(condition[0] if isinstance(condition, tuple) else condition)
+    elif name == "switch_case":
+        operands.append(operation.target)
+    elif name == "store":
+        operands.extend((operation.lvalue, operation.rvalue))
+
+    clbits: list[Any] = []
+    variables = [v.var for v in getattr(operation, "iter_captured_vars", lambda: ())()]
+    if operands:
+        from qiskit.circuit import ClassicalRegister
+        from qiskit.circuit.classical import expr
+
+        for operand in operands:
+            for node in expr.iter_vars(expr.lift(operand)):
+                if node.standalone:
+                    variables.append(node.var)
+                elif isinstance(node.var, ClassicalRegister):
+                    clbits.extend(node.var)
+                else:
+                    clbits.append(node.var)
+    return clbits, variables
+
+
 def is_terminal_measurement(
     data: list[tuple[Any, tuple[Any, ...], tuple[Any, ...]]], index: int
 ) -> bool:
@@ -422,6 +480,9 @@ def is_terminal_measurement(
         if getattr(later_inst, "name", "") in SCHEDULING_DIRECTIVES:
             continue
         if shares_bit(qargs, later_qargs) or shares_bit(cargs, later_cargs):
+            return False
+        implicit_clbits, _ = _classical_resources(later_inst)
+        if shares_bit(cargs, implicit_clbits):
             return False
     return True
 
@@ -533,7 +594,7 @@ def two_qubit_operation_count(circuit: Any) -> int:
 
 def _executed_depth(circuit: Any) -> int:
     """Depth of ``circuit`` with every control-flow block priced in layers."""
-    levels: Dict[Tuple[str, int], int] = {}
+    levels: Dict[Tuple[str, Any], int] = {}
     for entry in getattr(circuit, "data", None) or ():
         operation, qargs, cargs = instruction_parts(entry)
         weight = control_flow_cost(
@@ -544,9 +605,12 @@ def _executed_depth(circuit: Any) -> int:
         )
         if weight is None:
             weight = 1 if _is_operation(operation) else 0
-        wires = [("q", bit_index(circuit, bit)) for bit in qargs] + [
-            ("c", bit_index(circuit, bit)) for bit in cargs
-        ]
+        implicit_clbits, variables = _classical_resources(operation)
+        wires = [("q", bit_index(circuit, bit)) for bit in qargs]
+        wires.extend(
+            ("c", bit_index(circuit, bit)) for bit in (*cargs, *implicit_clbits)
+        )
+        wires.extend(("var", variable) for variable in variables)
         level = max((levels.get(wire, 0) for wire in wires), default=0) + weight
         for wire in wires:
             levels[wire] = level
@@ -641,8 +705,8 @@ def measured_qubits_by_clbit(circuit: Any) -> list[int]:
         Physical qubit index per measured classical bit.
 
     Raises:
-        ValueError: If a control-flow block of ``circuit`` measures (see
-            :func:`_reject_conditional_measurements`).
+        ValueError: If a control-flow block measures or a classical store can
+            overwrite a final measurement.
     """
     _reject_conditional_measurements(circuit)
     mapping = _measurement_map(circuit)
@@ -656,8 +720,8 @@ def measured_clbits(circuit: Any) -> Optional[list[int]]:
 
     The ``i``-th entry is the classical bit :func:`measured_qubits_by_clbit`'s
     ``i``-th qubit feeds.  A circuit can carry classical bits no measurement
-    writes (``QuantumCircuit(3, 3)`` measuring two qubits); those stay ``0``
-    in every count key, and measurement mitigation has to skip them.
+    writes (``QuantumCircuit(3, 3)`` measuring two qubits), which measurement
+    mitigation skips.
 
     Returns:
         The measured classical bit indices, or ``None`` when no per-bit
@@ -665,8 +729,8 @@ def measured_clbits(circuit: Any) -> Optional[list[int]]:
         :func:`measured_qubits_by_clbit`).
 
     Raises:
-        ValueError: If a control-flow block of ``circuit`` measures (see
-            :func:`_reject_conditional_measurements`).
+        ValueError: If a control-flow block measures or a classical store can
+            overwrite a final measurement.
     """
     _reject_conditional_measurements(circuit)
     mapping = _measurement_map(circuit)
@@ -719,19 +783,42 @@ def _reject_conditional_measurements(circuit: Any) -> None:
 
 
 def _measurement_map(circuit: Any) -> Dict[int, int]:
-    """Map each measured classical bit to the qubit last measured into it."""
+    """Map outputs to their last measurement, detecting classical overwrites."""
     mapping: Dict[int, int] = {}
+    overwritten: set[int] = set()
     try:
         for entry in list(getattr(circuit, "data", None) or []):
             inst, qargs, cargs = instruction_parts(entry)
-            if getattr(inst, "name", "") != "measure":
-                continue
-            if len(qargs) != 1 or len(cargs) != 1:
-                continue
-            mapping[bit_index(circuit, cargs[0])] = bit_index(circuit, qargs[0])
+            if getattr(inst, "name", "") == "measure" and len(qargs) == len(cargs) == 1:
+                output = bit_index(circuit, cargs[0])
+                mapping[output] = bit_index(circuit, qargs[0])
+                overwritten.discard(output)
+            elif mapping:
+                for bit in _stored_clbits(inst, cargs):
+                    output = bit_index(circuit, bit)
+                    if output in mapping:
+                        overwritten.add(output)
     except Exception:
         return {}
+    if overwritten:
+        raise ValueError(
+            "A classical store can overwrite the last measurement of classical "
+            f"bits {sorted(overwritten)}; their outputs cannot be readout-mitigated."
+        )
     return mapping
+
+
+def _stored_clbits(operation: Any, cargs: tuple[Any, ...]) -> Iterator[Any]:
+    """Storage targets in the parent circuit, including writes within blocks."""
+    if getattr(operation, "name", "") == "store":
+        from qiskit.circuit.controlflow import node_resources
+
+        yield from node_resources(operation.lvalue).clbits
+    for block in getattr(operation, "blocks", None) or ():
+        for entry in block.data:
+            nested, _, nested_cargs = instruction_parts(entry)
+            for bit in _stored_clbits(nested, nested_cargs):
+                yield cargs[bit_index(block, bit)]
 
 
 def default_cache_dir(app: str = "qbalance") -> Path:

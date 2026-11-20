@@ -475,6 +475,7 @@ def test_mthree_mitigation_improves_a_readout_noisy_distribution():
         noisy, raw, measured_qubits=measured, shots=shots
     )
     assert all(isinstance(value, float) for value in mitigated.values())
+    assert sum(mitigated.values()) == pytest.approx(1.0, rel=0, abs=1e-12)
 
     ideal_probs = normalized(ideal)
     raw_error = total_variation(ideal_probs, normalized(raw))
@@ -681,6 +682,7 @@ def test_mitigate_twirled_counts_recovers_asymmetric_readout():
         sim, raw, flips, measured_qubits=[0], calibration_shots=100_000
     )
 
+    assert sum(probs.values()) == pytest.approx(1.0, rel=0, abs=1e-12)
     assert probs["0"] == pytest.approx(0.5, abs=0.02)
     assert probs["1"] == pytest.approx(0.5, abs=0.02)
 

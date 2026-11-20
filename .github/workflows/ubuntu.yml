@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.12", "3.13", "3.14", "3.15"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -42,19 +42,24 @@ jobs:
   # Installs the oldest release every declared lower bound allows, so a bound
   # that no longer holds (a dependency whose oldest allowed release breaks
   # with qbalance or with Qiskit 2) fails here instead of on a user's machine.
-  # The docs examples record exact outputs of specific releases and are left
-  # to the job above.
   test-lowest-versions:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.10"
+          python-version: "3.12"
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip uv
-          uv pip install --system --resolution lowest-direct -e ".[dev,aer,runtime,mitigation,cutting,report]"
+          # Older IBM SDK source distributions need pkg_resources when building.
+          echo 'setuptools<81' > "$RUNNER_TEMP/build-constraints.txt"
+          # Typer 0.16 uses the Click 8.2 API.
+          echo 'click<8.3' > "$RUNNER_TEMP/runtime-constraints.txt"
+          uv pip install --system --resolution lowest-direct \
+            --build-constraint "$RUNNER_TEMP/build-constraints.txt" \
+            --constraint "$RUNNER_TEMP/runtime-constraints.txt" \
+            -e ".[dev,aer,runtime,mitigation,cutting,report]"
       # The oldest supported numpy bundles OpenBLAS 0.3.20, which picks its
       # kernels from the CPU.  Record both, so a numerical failure here can be
       # traced to the runner hardware it happened on.
@@ -63,4 +68,4 @@ jobs:
           lscpu | grep "Model name"
           OPENBLAS_VERBOSE=2 python -c "import numpy; print('numpy', numpy.__version__)"
       - name: Run tests
-        run: pytest -q -rs --deselect tests/test_docs_examples.py::test_docs_examples
+        run: pytest -q -rs

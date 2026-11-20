@@ -37,7 +37,7 @@ def _target_instruction_error(
         return None
     try:
         properties_map = target[name]
-        props = properties_map.get(qubits)
+        props = properties_map.get(qubits, properties_map.get(None))
         if props is None:
             return None
         return _coerce_error_rate(getattr(props, "error", None))
@@ -227,12 +227,11 @@ def _worst_survival(survivals: Iterable[float]) -> float:
 def _survival(
     backend: Any, target: Any, circuit: Any, physical: Callable[[Any], int]
 ) -> float:
-    """Probability that no instruction of ``circuit`` fails (``1 - prod(1 - e_i)``).
+    """Probability that no instruction of ``circuit`` fails (``prod(1 - e_i)``).
 
     ``physical`` maps a qubit of ``circuit`` to the backend qubit it runs on;
     a control-flow block's qubits are its instruction's, in order.
     """
-    # 1 - Π(1-e_i) approximation
     total_survival = 1.0
     for entry in circuit.data:
         inst, qargs, _ = instruction_parts(entry)
@@ -245,7 +244,10 @@ def _survival(
 
         def block_survival(block: Any, outer: List[int] = outer) -> float:
             return _survival(
-                backend, target, block, lambda qubit: outer[bit_index(block, qubit)]
+                backend,
+                target,
+                block,
+                lambda block_bit: outer[bit_index(block, block_bit)],
             )
 
         nested = control_flow_cost(
@@ -487,7 +489,9 @@ def _pair_weights(
         def block_weights(
             block: Any, outer: List[int] = outer
         ) -> Dict[Tuple[int, int], float]:
-            return _pair_weights(block, lambda qubit: outer[bit_index(block, qubit)])
+            return _pair_weights(
+                block, lambda block_bit: outer[bit_index(block, block_bit)]
+            )
 
         nested = control_flow_cost(
             inst,
@@ -726,6 +730,8 @@ def noise_aware_initial_layout(backend: Any, circuit: Any) -> Optional[Any]:
 
     phys_n = getattr(backend, "num_qubits", None)
     if phys_n is None:
+        phys_n = getattr(_backend_target(backend), "num_qubits", None)
+    if phys_n is None:
         try:
             phys_n = backend.configuration().num_qubits
         except Exception:
@@ -749,7 +755,7 @@ def noise_aware_initial_layout(backend: Any, circuit: Any) -> Optional[Any]:
     qualities = (1.0 - ro) + _COHERENCE_WEIGHT * (t1 + t2)
 
     physical_for_logical: Optional[List[int]] = None
-    adjacency = _coupling_adjacency(backend, phys_n)
+    adjacency = _coupling_adjacency(backend, phys_n) if weights else None
     if adjacency is not None:
         edge_errors = _edge_errors(backend, adjacency)
         physical_for_logical = _connected_placement(
@@ -766,12 +772,10 @@ def noise_aware_initial_layout(backend: Any, circuit: Any) -> Optional[Any]:
         logical_order = list(np.argsort(-deg, kind="stable"))  # most active first
         physical_order = list(np.argsort(-qualities, kind="stable"))  # best first
         physical_for_logical = [0] * n
-        for lq, pq in zip(logical_order, physical_order[:n]):
+        for lq, pq in zip(logical_order, physical_order[:n], strict=True):
             physical_for_logical[int(lq)] = int(pq)
 
     layout = Layout()
     for lq, pq in enumerate(physical_for_logical):
-        layout[circuit.qubits[lq]] = (
-            backend.qubits[pq] if hasattr(backend, "qubits") else int(pq)
-        )
+        layout[circuit.qubits[lq]] = int(pq)
     return layout

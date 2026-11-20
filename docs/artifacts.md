@@ -108,7 +108,7 @@ A minimal shape is:
 }
 ```
 
-`BalancedWorkload.to_download(zip_path, overwrite=False)` creates a ZIP bundle containing the same saved workload layout.
+`BalancedWorkload.to_download(zip_path, overwrite=False)` creates a ZIP bundle containing the same saved workload layout. The export protects the source dataset index and circuit artifacts even when `overwrite=True`.
 
 Both write their output under a temporary name beside the destination and move it into place only once it is complete, so a failed save or export leaves an existing one intact; `save_dataset` and `qbalance compile` do the same.
 

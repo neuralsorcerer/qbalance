@@ -423,7 +423,7 @@ def compile_cmd(
     used_outputs: set[str] = set()
     # Written beside --out and swapped in at the end, so a circuit that fails
     # to compile leaves a previous output intact rather than deleted.
-    with replacing_directory(out) as staging:
+    with replacing_directory(out, overwrite=overwrite) as staging:
         (staging / "compiled").mkdir()
         for qc, rec in zip(circuits, ds.records):
             # A twirled strategy only suppresses noise averaged over its random

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 project = "qBalance"
 author = "Soumyadip Sarkar"
-copyright = f"{datetime.now(UTC):%Y}, {author}"
+copyright = f"{datetime.now(timezone.utc):%Y}, {author}"
 
 try:
     release = version(project)

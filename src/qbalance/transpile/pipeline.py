@@ -28,6 +28,7 @@ from qbalance.transpile.suppression import (
 )
 from qbalance.utils import (
     backend_display_name,
+    bit_index,
     operation_depth,
     operation_size,
     two_qubit_operation_count,
@@ -98,8 +99,8 @@ def _preset_layout_method(spec: StrategySpec) -> str | None:
     return spec.layout_method
 
 
-def _supports_preset_pass_manager(backend: Any) -> bool:
-    """Return True when Qiskit's preset pass manager can target ``backend``.
+def _preset_target(backend: Any) -> dict[str, Any] | None:
+    """Return the backend or target keyword accepted by the preset pass manager.
 
     Lightweight stubs and pre-BackendV2 objects do not carry the transpiler
     ``Target`` the preset generator needs; those fall back to the
@@ -109,18 +110,19 @@ def _supports_preset_pass_manager(backend: Any) -> bool:
         from qiskit.providers import BackendV2
         from qiskit.transpiler import Target
     except Exception:  # pragma: no cover - qiskit always provides these
-        return False
+        return None
 
     if isinstance(backend, BackendV2):
-        return True
-    return isinstance(getattr(backend, "target", None), Target)
+        return {"backend": backend}
+    target = getattr(backend, "target", None)
+    return {"target": target} if isinstance(target, Target) else None
 
 
 def _generate_stage_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
     """Build a translation-only pass manager for backends without a Target.
 
     This fallback cannot honor ``optimization_level`` or perform routing, so it
-    is used only when :func:`_supports_preset_pass_manager` rejects the backend.
+    is used only when the backend lacks a target for the preset pass manager.
 
     Args:
         backend: Backend to translate for; its basis gates are the
@@ -201,7 +203,8 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
         TranspilerError: Raised when the strategy names an unknown layout,
             routing, or translation method.
     """
-    if _supports_preset_pass_manager(backend):
+    preset_target = _preset_target(backend)
+    if preset_target is not None:
         try:
             from qiskit.transpiler.preset_passmanagers import (
                 generate_preset_pass_manager,
@@ -213,7 +216,7 @@ def _generate_pm(backend: Any, spec: StrategySpec, initial_layout: Any = None):
 
         return generate_preset_pass_manager(
             optimization_level=spec.optimization_level,
-            backend=backend,
+            **preset_target,
             layout_method=_preset_layout_method(spec),
             routing_method=spec.routing_method,
             translation_method=spec.translation_method,
@@ -242,6 +245,29 @@ def _restore_layout(result: Any, source: Any) -> Any:
         if layout is not None:
             result._layout = layout
     return result
+
+
+def _translate_measurement_flips(circuit: Any, backend: Any) -> Any:
+    """Synthesize inserted X gates when the physical qubits require another basis."""
+    target = getattr(backend, "target", None)
+    supports = getattr(target, "instruction_supported", None)
+    basis = _backend_basis_gates(backend, target)
+    if callable(supports):
+        if all(
+            supports(operation_name="x", qargs=(bit_index(circuit, entry.qubits[0]),))
+            for entry in circuit.data
+            if entry.operation.name == "x"
+        ):
+            return circuit
+    elif not basis or "x" in basis:
+        return circuit
+
+    from qiskit.circuit.equivalence_library import SessionEquivalenceLibrary
+    from qiskit.transpiler import PassManager
+    from qiskit.transpiler.passes import BasisTranslator
+
+    translator = BasisTranslator(SessionEquivalenceLibrary, basis, target=target)
+    return _restore_layout(PassManager(translator).run(circuit), circuit)
 
 
 def _instance_seed(seed: Any, index: int) -> Any:
@@ -320,6 +346,7 @@ def compile_ensemble(
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit required") from e
 
+    t0 = time.perf_counter()
     profile_report = ProfileReport()
     initial_layout = None
     if spec.layout_method == NOISE_AWARE_LAYOUT:
@@ -333,9 +360,7 @@ def compile_ensemble(
     pm = _generate_pm(backend, spec, initial_layout=initial_layout)
 
     cb = make_callback(profile_report) if profile else None
-    t0 = time.time()
     compiled = pm.run(circuit, callback=cb) if cb is not None else pm.run(circuit)
-    t1 = time.time()
 
     target = getattr(backend, "target", None)
     count = _twirl_instance_count(spec)
@@ -391,6 +416,8 @@ def compile_ensemble(
                 )
             except Exception as e:
                 log.warning("Measurement twirling failed (continuing): %s", e)
+            if flip_map:
+                out = _translate_measurement_flips(out, backend)
 
         # DD schedules the circuit and pads its idle windows, so it runs last:
         # a gate inserted afterwards (a measurement-twirl X) would shift the
@@ -407,12 +434,13 @@ def compile_ensemble(
         flip_maps.append(flip_map)
         dd_flags.append(dd_applied)
 
+    compile_time_s = time.perf_counter() - t0
     per_instance = [_circuit_metrics(backend, out) for out in finished]
     errors = [
         m["estimated_error"] for m in per_instance if m["estimated_error"] is not None
     ]
     metrics: Dict[str, Any] = {
-        "compile_time_s": float(t1 - t0),
+        "compile_time_s": compile_time_s,
         "depth": max(m["depth"] for m in per_instance),
         "size": max(m["size"] for m in per_instance),
         "width": max(m["width"] for m in per_instance),

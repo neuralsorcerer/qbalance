@@ -483,15 +483,15 @@ def test_measurement_twirling_round_trips_through_untwirl():
 
         ideal = {"000": 40, "111": 60, "010": 7}
 
-        def as_measured(key):
+        def as_measured(key, flips):
 
             bits = list(key)
-            for clbit, flipped in flip_map.items():
+            for clbit, flipped in flips.items():
                 if flipped:
                     position = len(bits) - 1 - clbit
                     if 0 <= position < len(bits):
                         bits[position] = "1" if bits[position] == "0" else "0"
             return "".join(bits)
 
-        observed = {as_measured(k): v for k, v in ideal.items()}
+        observed = {as_measured(k, flip_map): v for k, v in ideal.items()}
         assert apply_measurement_untwirl_counts(observed, flip_map) == ideal

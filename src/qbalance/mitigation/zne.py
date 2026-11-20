@@ -16,6 +16,7 @@ from qbalance.utils import (
     instruction_parts,
     is_terminal_measurement,
     shares_bit,
+    validate_integral,
 )
 
 log = get_logger(__name__)
@@ -138,6 +139,31 @@ def realized_fold_factor(scale: float) -> int:
     return k
 
 
+def _intercept_weights(factors: np.ndarray, degree: int) -> np.ndarray:
+    """Weights mapping measured values to the fitted polynomial at zero."""
+    if degree == 0:
+        return np.full(len(factors), 1 / len(factors))
+    low = float(factors.min())
+    span = float(factors.max()) - low
+    # Raw powers of even modest noise factors can differ by many orders of
+    # magnitude. Use a Chebyshev basis on [-1, 1] for the same polynomial fit.
+    scaled = 2 * ((factors - low) / span) - 1
+    design = np.polynomial.chebyshev.chebvander(scaled, degree)
+    try:
+        with np.errstate(over="raise", invalid="raise"):
+            at_zero = np.polynomial.chebyshev.chebvander(
+                [-1 - 2 * (low / span)], degree
+            )[0]
+    except FloatingPointError as exc:
+        raise ValueError("noise factors exceed the numerical range of the fit") from exc
+    weights, _, rank, _ = np.linalg.lstsq(design.T, at_zero, rcond=None)
+    if rank < degree + 1 or not np.all(np.isfinite(weights)):
+        raise ValueError(
+            "noise factors are too ill-conditioned for the requested degree"
+        )
+    return weights
+
+
 def zne_sampling_overhead(factors: Sequence[float], degree: int = 1) -> float:
     """Return the factor by which ZNE multiplies the shots a precision needs.
 
@@ -168,18 +194,20 @@ def zne_sampling_overhead(factors: Sequence[float], degree: int = 1) -> float:
             for ``degree``.
     """
     realized = np.asarray([realized_fold_factor(f) for f in factors], dtype=float)
-    if isinstance(degree, bool) or int(degree) != degree or degree < 0:
-        raise ValueError("degree must be a non-negative integer")
-    if np.unique(realized).size < int(degree) + 1:
+    degree = validate_integral("degree", degree, non_negative=True)
+    if np.unique(realized).size < degree + 1:
         raise ValueError("not enough distinct realized factors for the degree")
-    design = np.vander(realized, int(degree) + 1, increasing=True)
-    intercept_weights = np.linalg.pinv(design)[0]
+    intercept_weights = _intercept_weights(realized, degree)
     unfolded = realized == 1.0
     runs = int(np.any(unfolded)) + int(np.count_nonzero(~unfolded))
-    variance = float(np.sum(intercept_weights[unfolded])) ** 2 + float(
-        np.sum(intercept_weights[~unfolded] ** 2)
-    )
-    return float(runs * variance)
+    try:
+        with np.errstate(over="raise", invalid="raise"):
+            variance = np.sum(intercept_weights[unfolded]) ** 2 + np.sum(
+                intercept_weights[~unfolded] ** 2
+            )
+            return float(runs * variance)
+    except FloatingPointError as exc:
+        raise ValueError("ZNE sampling overhead exceeds the numerical range") from exc
 
 
 def fold_global(circuit: Any, scale: float) -> Any:
@@ -320,20 +348,6 @@ def _parity(bitstr: str) -> int:
     return sum(1 for char in bitstr if char == "1") % 2
 
 
-def _synthetic_parity_key(template: str | None, *, odd: bool) -> str:
-    """Create an all-zero/easy-odd key preserving count-key spacing when possible."""
-    if not template:
-        return "1" if odd else "0"
-
-    chars = ["0" if char in {"0", "1"} else char for char in template]
-    positions = _bit_positions(template)
-    if not positions:
-        return "1" if odd else "0"
-    if odd:
-        chars[positions[-1]] = "1"
-    return "".join(chars)
-
-
 def _counts_to_expval_z(counts: Mapping[str, int], *, validate: bool = False) -> float:
     """Return the Z-parity expectation of ``counts``.
 
@@ -351,7 +365,7 @@ def _counts_to_expval_z(counts: Mapping[str, int], *, validate: bool = False) ->
         raise ValueError("counts entries must be non-empty mappings")
 
     shots = 0
-    s = 0.0
+    s = 0
     for bitstr, c in counts.items():
         if validate:
             if isinstance(c, bool) or not isinstance(c, (int, np.integer)):
@@ -369,8 +383,9 @@ def _counts_to_expval_z(counts: Mapping[str, int], *, validate: bool = False) ->
                 )
 
         parity = _parity(bitstr)
-        shots += int(c)
-        s += (1.0 if parity == 0 else -1.0) * c
+        count = int(c)
+        shots += count
+        s += count if parity == 0 else -count
 
     if validate:
         if shots <= 0:
@@ -420,8 +435,8 @@ def zne_extrapolate_counts(
     evaluated at 0.  The returned distribution is the one measured at the
     factor closest to 1 with its even- and odd-parity mass rescaled (each
     class keeping its shape) so its parity equals that value, clipped to
-    ``[-1, 1]``.  A parity class the reference counts never sampled gets
-    one synthetic key, so any target is reachable.
+    ``[-1, 1]``. For a parity class absent from the reference, its shape comes
+    from the lowest noise factor at which that class was observed.
 
     Args:
         factors: Noise scale factors, each ``>= 1``; pass the realized ones
@@ -438,10 +453,7 @@ def zne_extrapolate_counts(
             a factor is not finite or is below 1, or a counts mapping fails
             the checks of :func:`_counts_to_expval_z`.
     """
-    if isinstance(degree, bool) or not isinstance(degree, (int, np.integer)):
-        raise ValueError("degree must be a non-negative integer")
-    if degree < 0:
-        raise ValueError("degree must be a non-negative integer")
+    degree = validate_integral("degree", degree, non_negative=True)
 
     if len(factors) != len(counts_per_factor):
         raise ValueError("factors and counts_per_factor must have same length")
@@ -460,54 +472,37 @@ def zne_extrapolate_counts(
         [_counts_to_expval_z(c, validate=True) for c in counts_per_factor], dtype=float
     )
 
-    coeffs = np.polyfit(xs, ys, deg=degree)
-    # value at x=0 is constant term (last)
-    y0 = float(np.polyval(coeffs, 0.0))
+    y0 = (
+        float(ys[0])
+        if np.all(ys == ys[0])
+        else float(_intercept_weights(xs, degree) @ ys)
+    )
 
     # Build a pseudo distribution from the least-noisy (factor closest to 1) counts,
     # then gently adjust parity mass to match y0.
     idx0 = int(np.argmin(np.abs(xs - 1.0)))
     base = counts_per_factor[idx0]
-    shots = sum(base.values()) or 1
-    probs = {k: v / shots for k, v in base.items()}
-
-    # Adjust parity mass.  The extrapolated observable constrains the total
-    # even/odd parity probability, so keep the shape within each existing parity
-    # class when possible and create the missing complementary class only when
-    # the reference counts never sampled it.
-    even_keys = [b for b in probs if _parity(b) == 0]
-    odd_keys = [b for b in probs if _parity(b) != 0]
-    even_mass = sum(probs[b] for b in even_keys)
-    odd_mass = sum(probs[b] for b in odd_keys)
-    # expval = even - odd => target even = (1+exp)/2
+    probs = dict.fromkeys(base, 0.0)
     target_even = max(0.0, min(1.0, (1.0 + y0) / 2.0))
-    target_odd = 1.0 - target_even
-
-    template = next(iter(probs), None)
-    if target_even > 0.0 and not even_keys:
-        even_keys = [_synthetic_parity_key(template, odd=False)]
-        probs[even_keys[0]] = 0.0
-    if target_odd > 0.0 and not odd_keys:
-        odd_keys = [_synthetic_parity_key(template, odd=True)]
-        probs[odd_keys[0]] = 0.0
-
-    # Rescale each parity class to its target mass.  When a class carries no
-    # sampled mass its shape is unknown, so the target is spread uniformly over
-    # that class -- assigning the full target to every key would multiply the
-    # class mass by the number of keys in it.
-    for keys, mass, target in (
-        (even_keys, even_mass, target_even),
-        (odd_keys, odd_mass, target_odd),
-    ):
-        if not keys:
+    for parity, target in enumerate((target_even, 1.0 - target_even)):
+        if target == 0:
             continue
-        if mass > 0.0:
-            for b in keys:
-                probs[b] = probs[b] * target / mass
-        else:
-            share = target / len(keys)
-            for b in keys:
-                probs[b] = share
+        weights = {k: int(v) for k, v in base.items() if _parity(k) == parity}
+        if not weights:
+            # A synthetic outcome can change a fixed register bit. Recover this
+            # class from the least noisy reference that actually sampled it.
+            for index in np.argsort(xs, kind="stable"):
+                weights = {
+                    k: int(v)
+                    for k, v in counts_per_factor[index].items()
+                    if v > 0 and _parity(k) == parity
+                }
+                if weights:
+                    break
+        mass = sum(weights.values())
+        for key, count in weights.items():
+            fraction = count / mass if mass else 1.0 / len(weights)
+            probs[key] = target * fraction
 
     # renormalize against roundoff and degenerate polynomial outputs.
     s = sum(probs.values()) or 1.0

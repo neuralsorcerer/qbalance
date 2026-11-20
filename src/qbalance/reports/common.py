@@ -9,9 +9,11 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from statistics import mean
 from typing import Any, Dict, List, Mapping, cast
 
 from qbalance.strategies import StrategySpec
+from qbalance.utils import atomic_write_bytes
 
 
 def load_matrix(path: Path) -> Dict[str, Any]:
@@ -39,6 +41,16 @@ def load_matrix(path: Path) -> Dict[str, Any]:
     if not isinstance(data, Mapping):
         raise ValueError(f"Matrix JSON in {source} must be an object.")
     return cast(Dict[str, Any], dict(data))
+
+
+def write_report(matrix_json: Path, destination: Path, content: str) -> Path:
+    """Publish a complete report and preserve the matrix it was rendered from."""
+    if destination.exists() and destination.samefile(matrix_json):
+        raise ValueError(
+            f"Report output {destination} would overwrite the input matrix"
+        )
+    atomic_write_bytes(destination, content.encode("utf-8"))
+    return destination
 
 
 def matrix_results(data: Mapping[str, Any]) -> List[Dict[str, Any]]:
@@ -101,8 +113,10 @@ _DEFAULT_ZNE_FACTORS = tuple(StrategySpec.model_fields["zne_factors"].default)
 def _format_zne_factors(factors: Any) -> str:
     """Render ZNE noise factors compactly for a report row label."""
     try:
-        return "|".join(f"{float(factor):g}" for factor in factors)
-    except (TypeError, ValueError):
+        # The label is also the grouping key. Six-digit formatting can merge
+        # factors on opposite sides of an odd-integer folding threshold.
+        return "|".join(str(float(factor)).removesuffix(".0") for factor in factors)
+    except (TypeError, ValueError, OverflowError):
         return str(factors)
 
 
@@ -170,7 +184,8 @@ def strategy_key(spec: Dict[str, Any]) -> str:
     resilience_level = spec.get("resilience_level")
     if resilience_level is not None:
         parts.append(f"res={resilience_level}")
-    return ",".join(parts) if parts else "default"
+    # A method name may itself contain the separator for the next field.
+    return ",".join(part.replace("\\", "\\\\").replace(",", "\\,") for part in parts)
 
 
 def sort_value(value: Any) -> float:
@@ -225,8 +240,7 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, float]:
         The four means, keyed by metric name.
     """
     keys = ("depth", "two_qubit_ops", "estimated_error", "compile_time_s")
-    sums = {key: 0.0 for key in keys}
-    counts = {key: 0 for key in keys}
+    samples: Dict[str, List[float]] = {key: [] for key in keys}
 
     for row in rows:
         metrics = row.get("metrics", {})
@@ -242,9 +256,10 @@ def aggregate(rows: List[Dict[str, Any]]) -> Dict[str, float]:
                 continue
             if not math.isfinite(number):
                 continue
-            sums[key] += number
-            counts[key] += 1
+            samples[key].append(number)
 
+    # A finite mean may have a sum larger than any float. statistics.mean
+    # accumulates floats as exact ratios before converting the result.
     return {
-        key: (sums[key] / counts[key]) if counts[key] else float("nan") for key in keys
+        key: mean(values) if values else float("nan") for key, values in samples.items()
     }

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
+from qbalance.errors import error_message
 from qbalance.execution.runner import run_counts
 from qbalance.mitigation.mthree import mitigate_twirled_counts
 from qbalance.mitigation.zne import (
@@ -22,7 +23,7 @@ from qbalance.transpile.suppression import (
     apply_measurement_untwirl_counts,
     normalize_measurement_flip_map,
 )
-from qbalance.utils import measured_clbits, measured_qubits_by_clbit
+from qbalance.utils import measured_clbits, measured_qubits_by_clbit, validate_integral
 
 
 def split_shots(shots: int, instances: int) -> List[int]:
@@ -42,9 +43,9 @@ def split_shots(shots: int, instances: int) -> List[int]:
     Raises:
         ValueError: If either argument is not positive.
     """
-    if shots < 1 or instances < 1:
-        raise ValueError("shots and instances must both be positive")
-    base, extra = divmod(int(shots), int(instances))
+    shots = validate_integral("shots", shots, positive=True)
+    instances = validate_integral("instances", instances, positive=True)
+    base, extra = divmod(shots, instances)
     return [base + (1 if index < extra else 0) for index in range(instances)]
 
 
@@ -67,7 +68,7 @@ def instance_flip_maps(
     maps = metrics.get("measurement_flip_maps")
     if isinstance(maps, list) and len(maps) == instances:
         return [normalize_measurement_flip_map(flip_map) for flip_map in maps]
-    if instances == 1:
+    if instances == 1 and maps is None:
         return [normalize_measurement_flip_map(metrics.get("measurement_flip_map"))]
     raise ValueError(
         f"expected {instances} measurement flip maps, found "
@@ -182,7 +183,7 @@ def run_ensemble(
                 clbits=measured_clbits(instances[0]),
             )
         except Exception as e:
-            result.mthree_error = str(e)
+            result.mthree_error = error_message(e)
     if zne_factors:
         try:
             counts_per_factor = []
@@ -222,5 +223,5 @@ def run_ensemble(
                 realized, counts_per_factor, degree=zne_degree
             )
         except Exception as e:
-            result.zne_error = str(e)
+            result.zne_error = error_message(e)
     return result

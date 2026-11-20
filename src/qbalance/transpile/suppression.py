@@ -15,17 +15,12 @@ import numpy as np
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
 from qbalance.utils import (
-    SCHEDULING_DIRECTIVES,
     bit_index,
     instruction_parts,
-    shares_bit,
+    is_terminal_measurement,
 )
 
 log = get_logger(__name__)
-
-# Operations that cannot observe a measurement twirl inserted before them:
-# they neither change the qubit state nor read the classical bit.
-_TWIRL_TRANSPARENT_OPS = SCHEDULING_DIRECTIVES
 
 # Untwirling relabels keys only, so it applies to shot counts and to
 # (quasi-)probabilities alike.
@@ -61,9 +56,9 @@ def apply_pauli_twirling(
 ) -> List[Any]:
     """Return ``num_twirls`` Pauli-twirled copies of ``circuit``.
 
-    This wraps Qiskit's ``pauli_twirl_2q_gates``: every two-qubit gate is
-    conjugated by a random Pauli pair that leaves the circuit's unitary
-    unchanged.
+    Qiskit's ``pauli_twirl_2q_gates`` conjugates its supported gates
+    (CX, CZ, ECR and iSWAP) with random Pauli pairs that preserve the
+    circuit's unitary.
 
     Args:
         circuit: Circuit to twirl.
@@ -300,37 +295,6 @@ def build_dd_pass_manager(backend: Any, sequence: str = "XY4") -> Any:
     return pm
 
 
-def _is_terminal_measurement(
-    data: list[Any],
-    index: int,
-    qargs: tuple[Any, ...] = (),
-    cargs: tuple[Any, ...] = (),
-) -> bool:
-    """Return true when no later operation can observe the inserted flip.
-
-    A measurement twirl inserts an ``X`` immediately before the measurement and
-    undoes it by flipping the recorded classical bit.  That rewrite is only
-    equivalent when nothing after the measurement can see either half of it:
-
-    * no later instruction may act on the measured qubit -- a second
-      measurement of the same qubit would read the flipped post-measurement
-      state while the flip map only records one flip per classical bit, and any
-      later gate would act on a conjugated state; and
-    * no later instruction may write the classical bit that carries the
-      correction.
-
-    Barriers and delays neither change the state nor read the bit, so they stay
-    transparent.
-    """
-    for later_entry in data[index + 1 :]:
-        later_inst, later_qargs, later_cargs = instruction_parts(later_entry)
-        if getattr(later_inst, "name", "") in _TWIRL_TRANSPARENT_OPS:
-            continue
-        if shares_bit(qargs, later_qargs) or shares_bit(cargs, later_cargs):
-            return False
-    return True
-
-
 def apply_measurement_twirling(
     circuit: Any, seed: Optional[int] = None
 ) -> Tuple[Any, Dict[int, int]]:
@@ -373,14 +337,13 @@ def apply_measurement_twirling(
     copy_empty_like = getattr(circuit, "copy_empty_like", None)
     if callable(copy_empty_like):
         qc = copy_empty_like()
-        data = list(circuit.data)
-        for index, entry in enumerate(data):
-            inst, qargs, cargs = instruction_parts(entry)
+        data = [instruction_parts(entry) for entry in circuit.data]
+        for index, (inst, qargs, cargs) in enumerate(data):
             should_twirl = (
                 getattr(inst, "name", "") == "measure"
                 and len(qargs) == 1
                 and len(cargs) == 1
-                and _is_terminal_measurement(data, index, qargs, cargs)
+                and is_terminal_measurement(data, index)
             )
             if should_twirl:
                 cb = bit_index(circuit, cargs[0])

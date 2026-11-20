@@ -163,7 +163,8 @@ class CircuitDataset:
         """
         fraction_error = "frac_train must be a finite numeric non-boolean scalar in the inclusive range [0, 1]."
         if isinstance(
-            frac_train, (bool, np.bool_, str, bytes, bytearray)
+            frac_train,
+            (bool, np.bool_, complex, np.complexfloating, str, bytes, bytearray),
         ) or not np.isscalar(frac_train):
             raise ValueError(fraction_error)
 
@@ -322,10 +323,15 @@ def _normalize_metadata_entry(index: int, metadata: Any) -> Dict[str, Any]:
     if not isinstance(metadata, dict):
         raise ValueError(f"metadata entry at index {index} must be a dict or None.")
 
-    _validate_metadata_json_keys(metadata, index=index, path="metadata")
+    try:
+        _validate_metadata_json_keys(metadata, index=index, path="metadata")
+    except RecursionError as exc:
+        raise ValueError(
+            f"metadata entry at index {index} must be JSON-serializable."
+        ) from exc
     try:
         normalized = json.loads(json.dumps(metadata, allow_nan=False, sort_keys=True))
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError(
             f"metadata entry at index {index} must be JSON-serializable."
         ) from exc
@@ -387,7 +393,7 @@ def save_dataset(
 
     # Assembled beside dataset_dir and swapped in at the end, so a failure
     # leaves no partial dataset and keeps an existing one intact.
-    with replacing_directory(dataset_dir) as tmp_dir:
+    with replacing_directory(dataset_dir, overwrite=overwrite) as tmp_dir:
         records: List[CircuitRecord] = []
         used_names: set[str] = set()
         used_artifacts: set[str] = set()
@@ -521,6 +527,45 @@ def load_dataset(dataset_dir: Path) -> CircuitDataset:
         )
 
     return CircuitDataset(dataset_dir, records)
+
+
+def check_dataset_output_file(dataset: CircuitDataset, path: Path) -> None:
+    """Reject an output file that would replace the dataset index or a circuit."""
+    if not path.exists():
+        return
+    root = dataset.root
+    index = root / DATASET_INDEX
+
+    def protect(source: Path) -> None:
+        # File identity also handles alternate spellings on case-insensitive
+        # filesystems and links. An in-memory dataset need not have an index.
+        if source.is_file() and source.samefile(path):
+            raise ValueError(
+                f"Cannot overwrite {path}: it belongs to the source dataset."
+            )
+
+    protect(index)
+    artifacts = {record.artifact for record in dataset.records}
+    for name in artifacts:
+        protect(root / name)
+
+    # A split retains the same root as its sibling. An export must also
+    # preserve the records omitted from this view. Manually assembled datasets
+    # can have no index, or a stale one, and can still export their own records.
+    try:
+        payload = load_json(index)
+    except (OSError, ValueError):
+        return
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if isinstance(records, list):
+        for row in records:
+            artifact = row.get("artifact") if isinstance(row, dict) else None
+            if (
+                isinstance(artifact, str)
+                and _is_safe_artifact_path(artifact)
+                and artifact not in artifacts
+            ):
+                protect(root / artifact)
 
 
 def load_data(name: str) -> CircuitDataset:

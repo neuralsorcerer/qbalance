@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from numbers import Integral
 from typing import Any, Dict, Optional
 
@@ -26,7 +27,7 @@ def _ensure_backend(backend: Any) -> Any:
         OptionalDependencyError: If wrapping is needed and qiskit-aer is not
             installed.
     """
-    if hasattr(backend, "run"):
+    if callable(getattr(backend, "run", None)):
         return backend
     try:
         from qiskit_aer import AerSimulator
@@ -40,20 +41,29 @@ def _ensure_backend(backend: Any) -> Any:
 def _prepare_run_kwargs(func: Any, kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Return the subset of ``kwargs`` that ``func`` accepts.
 
-    Every keyword is kept when ``func`` takes ``**kwargs`` or its signature
-    cannot be inspected.
+    For backends taking ``**kwargs`` with an options mapping, a seed must
+    either be an explicit parameter or a supported backend option.
     """
     try:
-        params = inspect.signature(func).parameters.values()
+        params = inspect.signature(func).parameters
     except (TypeError, ValueError):
         return dict(kwargs)
 
-    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params):
-        return dict(kwargs)
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        options = getattr(getattr(func, "__self__", None), "options", None)
+        if not isinstance(options, Mapping):
+            return dict(kwargs)
+        return {
+            k: v
+            for k, v in kwargs.items()
+            if k not in {"seed_simulator", "seed_transpiler"}
+            or k in params
+            or k in options
+        }
 
     allowed = {
         param.name
-        for param in params
+        for param in params.values()
         if param.kind
         in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
     }

@@ -11,6 +11,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional
 
+import numpy as np
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Dynamical-decoupling sequences qbalance knows how to build.
@@ -62,7 +63,7 @@ class StrategySpec(BaseModel):
     )
     @classmethod
     def _reject_bool_integer_fields(cls, value: Any, info: Any) -> Any:
-        if isinstance(value, bool):
+        if isinstance(value, (bool, np.bool_)):
             raise ValueError(f"{info.field_name} must be an integer, not a boolean")
         return value
 
@@ -103,11 +104,11 @@ class StrategySpec(BaseModel):
         if isinstance(self.zne_degree, bool) or self.zne_degree < 0:
             raise ValueError("zne_degree must be a non-negative integer")
 
+        if any(not isfinite(f) for f in self.zne_factors):
+            raise ValueError("zne_factors must all be finite")
         if self.zne:
             if len(self.zne_factors) == 0:
                 raise ValueError("zne_factors must be non-empty when zne=True")
-            if any(not isfinite(f) for f in self.zne_factors):
-                raise ValueError("zne_factors must all be finite when zne=True")
             if any(f < 1.0 for f in self.zne_factors):
                 raise ValueError("zne_factors must all be >= 1.0 when zne=True")
             if tuple(self.zne_factors) != tuple(sorted(self.zne_factors)):

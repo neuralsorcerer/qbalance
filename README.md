@@ -11,7 +11,7 @@ A workflow toolkit for balancing quantum compilation, suppression, and mitigatio
 
 [![Qiskit Ecosystem](https://qisk.it/e-88affdcb)](https://qisk.it/e)
 [![Current Release](https://img.shields.io/github/release/neuralsorcerer/qbalance.svg)](https://github.com/neuralsorcerer/qbalance/releases)
-[![Python 3.10+](https://img.shields.io/badge/Python-3.10+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![Python 3.12+](https://img.shields.io/badge/Python-3.12+-fcbc2c.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![Qiskit](https://img.shields.io/badge/Qiskit-2.0%2B-purple?logo=qiskit&logoColor=white)](https://www.ibm.com/quantum/qiskit/)
 [![Test Linux](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/ubuntu.yml?query=branch%3Amain)
 [![Test Windows](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml/badge.svg)](https://github.com/neuralsorcerer/qbalance/actions/workflows/windows.yml?query=branch%3Amain)
@@ -95,7 +95,7 @@ pip install "qbalance[all]"         # all optional dependencies + dev tools
 pip install -e ".[all]"
 ```
 
-**Python requirement**: `>=3.10`.
+**Python requirement**: `>=3.12`.
 
 ---
 
@@ -137,7 +137,11 @@ print(reloaded.summary())
 
 ### CLI
 
+The matrix uses Aer for noisy simulation, and the HTML report uses the report extra.
+
 ```bash
+pip install "qbalance[aer,report]"
+
 # Create built-in dataset
 python -m qbalance dataset examples --out ./circuits --overwrite
 
@@ -199,7 +203,7 @@ CircuitDataset
          ├── baseline (compiled, and executed when execute=True)
          ├── candidate search (grid | bandit, optional max_evaluations budget)
          ├── compile once (+ twirl instances, DD, or cut subexperiments)
-         ├── optional execution of every instance (+ mitigation)
+         ├── optional execution across instances (+ mitigation)
          ├── objective scoring
          └── choose best (optional Pareto pre-filter)
                ↓
@@ -315,7 +319,9 @@ For each objective term, qbalance ignores a term when the metric is missing, non
 
 ### 2b) Reproducibility of `objective_score`
 
-Compilation itself is deterministic: with a fixed `seed`, two cold-cache runs produce identical `depth`, `two_qubit_ops` and `estimated_error` values for every candidate. So does execution on simulators: twirl instances, M3's calibration and ZNE's folded circuits all run with seeds derived from `seed`, so executed and mitigated metrics repeat exactly, whether the compiled circuits come fresh or from the cache. The default objective, however, weights `compile_time_s` at `0.1`, and compile time is wall-clock, so `objective_score` varies between runs. Candidates that compile to the same depth, two-qubit count, error and overhead (optimization levels 2 and 3 often do) are then ordered by timing noise, so which of them is selected can change from one cold-cache run to the next; a rerun on a warm cache replays the recorded compile times and repeats its selections. Drop the `compile_time_s` term to make scores and selection bit-reproducible:
+For repeatable runs, keep the backend calibration, toolchain, and seeds fixed. Each strategy's `seed_transpiler` and `seed_suppression` control compilation and twirling. Both default to 0. The workflow's `seed` controls candidate ordering, bandit search, and seeded simulator execution. Hardware results can vary between runs.
+
+The default objective weights `compile_time_s` at 0.1. Wall-clock timings vary across cold-cache runs and can decide between candidates with identical depth, two-qubit count, estimated error, and sampling overhead. A warm cache reuses the recorded compile times. For reproducible comparisons using the compiled metrics, omit the timing term from the objective.
 
 ```python
 from qbalance import Objective
@@ -398,7 +404,7 @@ with $p_i = c_i / \sum_j c_j$.
 
 - Z-parity expectation over the measured bits, $\langle Z\otimes\cdots\otimes Z\rangle=\sum_i (-1)^{|b_i|}p_i$, reported for every execution path so they can be compared: `raw_parity_expval` (observed counts), `mitigated_parity_expval` (M3), `zne_parity_expval` (zero-noise extrapolated) and `cut_parity_expval` (reconstructed from cut subexperiments).
 
-Twirled strategies run every twirl instance on an equal share of the shots and pool the untwirled counts, since a twirl only suppresses noise averaged over its instances.
+Twirled strategies divide the shot budget as evenly as possible across instances, skip instances assigned zero shots, and pool the untwirled counts.
 
 ---
 
@@ -410,7 +416,7 @@ Compiled circuits may be reused via cache key:
 \text{key}=\text{SHA256}(\text{toolchain}:\text{backend\_spec}\,|\,\text{calibration}\,|\,\text{backend\_name}:\text{circuit\_fingerprint}:\text{strategy\_json}:\text{profile})
 ```
 
-This avoids redundant transpilation for repeated `(circuit, backend, strategy)` tuples. The toolchain part (cache format and Qiskit version) and the calibration digest (the backend's gate errors and durations, qubit coherence times and frequencies, `dt`, and the calibration date when the backend reports one) make a new Qiskit, a changed pipeline, or a recalibrated device miss the cache instead of reusing layouts and `estimated_error` computed from stale data.
+The cache reuses compiled ensembles across runs. A change to the Qiskit version, pipeline cache version, or reported target data produces a new key. Target data includes gate errors and durations, qubit properties, timing constraints, and the calibration date when available. Backends that expose no calibration data use their spec and name. If reading calibration data or fingerprinting a circuit fails, the workflow compiles it without using the cache.
 
 Additional performance-relevant behavior:
 

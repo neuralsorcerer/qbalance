@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -16,7 +17,18 @@ from qbalance.reports.common import (
     matrix_results,
     sort_value,
     strategy_key,
+    write_report,
 )
+
+
+def _code_span(value: str) -> str:
+    """Show a label literally on one line, including embedded backticks."""
+    text = " ".join(value.splitlines())
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * (longest + 1)
+    # Padding prevents a backtick at either end from extending the delimiter.
+    padding = " " if longest or (text.startswith(" ") and text.endswith(" ")) else ""
+    return f"{fence}{padding}{text}{padding}{fence}"
 
 
 def _table_cell(value: str) -> str:
@@ -52,7 +64,6 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
     # empty report directory behind.
     results = matrix_results(load_matrix(matrix_json))
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     # group by backend -> strategy
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
@@ -63,9 +74,9 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
 
     lines = []
     lines.append("# qbalance report\n")
-    lines.append(f"Matrix: `{Path(matrix_json).name}`\n")
+    lines.append(f"Matrix: {_code_span(Path(matrix_json).name)}\n")
     for backend, strat_map in grouped.items():
-        lines.append(f"## Backend: {backend}\n")
+        lines.append(f"## Backend: {_code_span(backend)}\n")
         lines.append(
             "| Strategy | mean depth | mean 2q ops | mean est error | mean compile time (s) | failed trials |"
         )
@@ -83,9 +94,7 @@ def render_markdown(matrix_json: Path, out_dir: Path) -> Path:
         )
         for sk, agg, failed in items:
             lines.append(
-                f"| `{_table_cell(sk)}` | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} | {failed} |"
+                f"| {_code_span(_table_cell(sk))} | {agg['depth']:.4g} | {agg['two_qubit_ops']:.4g} | {agg['estimated_error']:.4g} | {agg['compile_time_s']:.4g} | {failed} |"
             )
         lines.append("")
-    out = out_dir / "report.md"
-    out.write_text("\n".join(lines), encoding="utf-8")
-    return out
+    return write_report(matrix_json, out_dir / "report.md", "\n".join(lines))

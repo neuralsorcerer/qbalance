@@ -38,7 +38,12 @@ def resolve(spec: str) -> Any:
     # Strip each part so the same tolerant spelling the fake plugin accepts
     # ("aer : simulator") resolves here too.
     parts = [part.strip() for part in spec.split(":")]
-    if len(parts) < 2:
+    if (
+        len(parts) < 2
+        or parts[0] != "aer"
+        or not all(parts)
+        or (parts[1] == "simulator" and len(parts) != 2)
+    ):
         raise QBalanceError(f"Invalid aer backend spec: {spec!r}")
 
     try:

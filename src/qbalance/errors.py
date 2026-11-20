@@ -11,3 +11,8 @@ class QBalanceError(RuntimeError):
 
 class OptionalDependencyError(QBalanceError):
     """Raised when an optional dependency is required but not installed."""
+
+
+def error_message(exc: Exception) -> str:
+    """Describe a failed stage even when its exception carries no message."""
+    return str(exc) or type(exc).__name__

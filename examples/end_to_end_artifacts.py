@@ -8,7 +8,6 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -16,7 +15,6 @@ from qbalance import Workload, load_data
 
 
 def main() -> None:
-    logging.disable(logging.ERROR)
     with TemporaryDirectory() as td:
         out = Path(td)
         ds = load_data("tiny")

@@ -17,7 +17,8 @@ from qbalance.cutting.addon_cutting import (
     evaluate_cutting_experiment,
     prepare_cutting_experiment,
 )
-from qbalance.dataset import load_dataset
+from qbalance.dataset import check_dataset_output_file, load_dataset
+from qbalance.errors import error_message
 from qbalance.execution.ensemble import run_ensemble
 from qbalance.logging import get_logger
 from qbalance.strategies import StrategySpec, coerce_strategy_specs
@@ -80,8 +81,8 @@ def run_matrix(
         ValueError: If ``shots`` is not a positive integer, ``seed`` not a
             non-negative integer, ``execute`` or ``profile`` not a boolean,
             ``backend_specs`` or ``strategies`` empty or a single item, a
-            strategy invalid, ``out_json`` a directory, or the dataset
-            invalid.
+            strategy invalid, ``out_json`` a directory or a file belonging to
+            the source dataset, or the dataset invalid.
         QBalanceError: If a backend spec cannot be resolved.
     """
     shots = validate_integral("shots", shots, positive=True)
@@ -107,6 +108,7 @@ def run_matrix(
         )
 
     ds = load_dataset(dataset_dir)
+    check_dataset_output_file(ds, out_json)
     circuits = ds.load_circuits()
     n_records = len(ds.records)
     n_circuits = len(circuits)
@@ -196,7 +198,7 @@ def _evaluate_trial(
         try:
             experiment = prepare_cutting_experiment(qc, max_subcircuit_qubits)
         except Exception as e:
-            return {"cutting_error": str(e)}
+            return {"cutting_error": error_message(e)}
         if experiment is not None:
             return _evaluate_cut_trial(
                 experiment,
@@ -213,7 +215,7 @@ def _evaluate_trial(
     except Exception as e:
         # One strategy the backend cannot compile (a circuit wider than the
         # device, say) must not abort the whole matrix.
-        return {"compile_error": str(e)}
+        return {"compile_error": error_message(e)}
     if getattr(spec, "cutting", False):
         # The circuit already fits the subcircuit width, so it runs uncut.
         m["cut_count"] = 0
@@ -231,7 +233,7 @@ def _evaluate_trial(
             zne_degree=getattr(spec, "zne_degree", 1),
         )
     except Exception as e:
-        m["exec_error"] = str(e)
+        m["exec_error"] = error_message(e)
         return m
     m["counts"] = run.counts
     m["shots"] = int(sum(run.counts.values()))
