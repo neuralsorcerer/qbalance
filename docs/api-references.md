@@ -4,7 +4,7 @@ This page documents every public name in qbalance, module by module: what it doe
 
 ## Reading the examples
 
-The examples form one Python session: they run top to bottom, later ones reuse names defined earlier, and they start in an empty working directory. Every output shown is the real output, and `tests/test_docs_examples.py` re-runs the page to keep it that way. They need the optional extras (`pip install "qbalance[all]"`). Numbers that come out of Qiskit's transpiler were produced with Qiskit 2.5.2, qiskit-aer 0.17.2, mthree 3.0.0, qiskit-addon-cutting 0.10.0 and qiskit-ibm-runtime 0.50.0, and can differ under other versions. `...` in an output stands for text that changes from run to run, such as wall-clock timings.
+Run the examples in order in a single Python session, starting in an empty working directory. Later examples reuse objects and files created earlier. They need the optional extras (`pip install "qbalance[all]"`). The reference outputs use Qiskit 2.6.2, qiskit-aer 0.18.4, mthree 3.0.0, qiskit-addon-cutting 0.10.0, and qiskit-ibm-runtime 0.52.1. Other versions can produce different compilation and simulation results. `...` in an output stands for text that changes from run to run, such as wall-clock timings.
 
 The session starts with two helpers:
 
@@ -45,7 +45,7 @@ The installed distribution's version, read from its metadata; the in-tree `qbala
 ```pycon
 >>> import qbalance
 >>> qbalance.__version__
-'0.2.0'
+'0.2.2'
 >>> qbalance.__all__
 ['__version__', 'CircuitDataset', 'load_dataset', 'save_dataset', 'load_data', 'Objective', 'default_objective', 'load_objective', 'Workload', 'BalancedWorkload', 'load_balanced_workload', 'Strategy', 'StrategySpec', 'coerce_strategy_specs', 'load_strategy_specs']
 ```
@@ -148,7 +148,7 @@ Reads and validates the index: it must be a JSON object with a `records` list, a
 
 `qbalance.load_data(name) -> CircuitDataset`
 
-Loads a built-in dataset. `"tiny"` holds `bell` (2 qubits), `ghz3` (3 qubits), and `qft4` (a 4-qubit QFT built from controlled-phase gates); it is written to the platform's user data directory on first use and reused afterwards. An unknown name raises `KeyError`.
+Loads a built-in dataset. `"tiny"` holds `bell` (2 qubits), `ghz3` (3 qubits), and `qft4` (a 4-qubit QFT using reversed input qubit order); it is written to the platform's user data directory on first use and reused afterwards. An unknown name raises `KeyError`.
 
 ```pycon
 >>> from qbalance import load_data
@@ -190,7 +190,7 @@ Validation (a violation raises pydantic's `ValidationError`, a subclass of `Valu
 - Integer fields reject booleans: `optimization_level`, `num_twirls`, `zne_degree`, `max_subcircuit_qubits`, `resilience_level`, `seed_transpiler`, `seed_suppression`.
 - `num_twirls` $\ge 1$; `seed_transpiler` and `seed_suppression` are non-negative or `None`.
 - `dd_sequence` is `"XY4"`, `"XX"`, or `"YY"`, case-insensitive and stored upper-case.
-- `zne_degree` $\ge 0$. With `zne=True`, `zne_factors` is non-empty, finite, sorted, includes `1.0`, and has every factor $\ge 1$; `zne_degree` is at least 1, below `len(zne_factors)`, and below the number of distinct *realized* fold factors (folding rounds a factor up to an odd integer, so `(1, 2, 3)` realizes only 1 and 3; see [`realized_fold_factor`](#realized_fold_factor)).
+- `zne_degree` $\ge 0$. Every factor must be finite. With `zne=True`, `zne_factors` is non-empty, sorted, includes `1.0`, and has every factor $\ge 1$; `zne_degree` is at least 1, below `len(zne_factors)`, and below the number of distinct *realized* fold factors (folding rounds a factor up to an odd integer, so `(1, 2, 3)` realizes only 1 and 3; see [`realized_fold_factor`](#realized_fold_factor)).
 - `max_subcircuit_qubits` is `None` or $\ge 1$. `cutting=True` requires it and excludes `pauli_twirling`, `measurement_twirling`, `mthree`, and `zne`: a cut circuit yields a reconstructed expectation value, not the count distribution those act on.
 - `resilience_level` is `None`, 0, 1, or 2.
 - Unknown fields are rejected, so a misspelled key fails instead of silently producing a default strategy.
@@ -323,7 +323,7 @@ $$
 S(m) = \sum_{k} w_k \, m_k ,
 $$
 
-summing only the terms whose weight and metric value both convert to finite floats (anything `float()` accepts); other terms are skipped, and a metric set with no usable term scores `0.0`. Lower is better, so a metric to maximize (such as `mitigated_top_prob`) takes a negative weight. `weights` keeps the mapping as given, including entries that scoring skips.
+summing only the terms whose weight and metric value both convert to finite floats (anything `float()` accepts); other terms are skipped, and a metric set with no usable term scores `0.0`. Lower is better, so a metric to maximize (such as `mitigated_top_prob`) takes a negative weight. `weights` is a read-only copy of the supplied mapping, including entries that scoring skips.
 
 ```pycon
 >>> from qbalance import Objective
@@ -332,7 +332,7 @@ summing only the terms whose weight and metric value both convert to finite floa
 16.0
 >>> objective.score({"depth": float("nan"), "two_qubit_ops": "7"})
 14.0
->>> objective.weights
+>>> dict(objective.weights)
 {'depth': 1.0, 'two_qubit_ops': 2.0, 'note': 'skipped'}
 ```
 
@@ -350,7 +350,7 @@ $$
 
 ```pycon
 >>> from qbalance import default_objective
->>> default_objective().weights
+>>> dict(default_objective().weights)
 {'depth': 1.0, 'two_qubit_ops': 2.0, 'estimated_error': 10.0, 'compile_time_s': 0.1, 'sampling_overhead': 1.0}
 ```
 
@@ -363,7 +363,7 @@ Loads weights from a JSON file holding a direct mapping (`{"depth": 1.0}`), `{"w
 ```pycon
 >>> from qbalance import load_objective
 >>> write_json("objective.json", {"weights": {"depth": 1, "estimated_error": 20}})
->>> load_objective("objective.json").weights
+>>> dict(load_objective("objective.json").weights)
 {'depth': 1.0, 'estimated_error': 20.0}
 >>> write_json("bad_objective.json", {"depth": True})
 >>> load_objective("bad_objective.json")
@@ -510,10 +510,10 @@ Methods:
 
 - `summary() -> str`: the baseline against the selection: the backend, the number of circuits, the total and mean candidate evaluations, the means of `depth`, `two_qubit_ops`, `estimated_error`, and `compile_time_s` over their finite values (`nan` when there are none), the EMD, CvM, and KS distances between the baseline and selected distributions of `depth` and `two_qubit_ops` (see [diagnostics](#diagnostics-qbalancediagnostics)), and, when any circuit's delta is comparable, the mean objective delta with the number of circuits that strictly improved and that stayed unchanged.
 - `selection_diagnostics() -> dict`: per circuit, `baseline_objective_score` and `selected_objective_score` (sums of the finite weighted terms; `None` when there is none), `comparable_objective_terms` (the terms both sides report), `objective_delta` (the selected minus the baseline sum over the comparable terms; `None` when there is none), `objective_improved` (`objective_delta <= 0`, so a tie counts as no worse, as for the guard; `None` when not comparable), `objective_terms` (each side's weighted terms), `evaluated_candidates`, and `metric_deltas` for `depth`, `two_qubit_ops`, `estimated_error`, and `compile_time_s`, each with `baseline`, `selected`, `delta` (selected minus baseline), and `relative_delta` (delta over the baseline's absolute value; `None` when the baseline is 0). Missing or non-finite values become `None`.
-- `candidate_rankings() -> dict`: per circuit, the evaluated candidates sorted by the score selection uses (the selected candidate first among equal scores), then by evaluation order. Each row holds `rank`, `original_index`, the serialized `spec`, `objective_score` (recomputed from the finite weighted terms), `selection_score` (the stored `objective_score` when valid; `None` for an infeasible or incomparable candidate, which sorts last), `objective_terms`, and `selected`. When the guard selected a baseline that was not among the candidates, it appears as one extra selected row with `original_index: None`, so exactly one row per circuit is selected. The selection ranks first unless the regression guard or `pareto=True` chose it: the Pareto front is formed on `depth`, `two_qubit_ops`, `estimated_error`, and `sampling_overhead` alone, so a candidate off the front can still score better on the full objective.
+- `candidate_rankings() -> dict`: per circuit, the evaluated candidates sorted by the score selection uses (the selected candidate first among equal scores), then by evaluation order. Each row holds `rank`, `original_index`, the serialized `spec`, `objective_score` (recomputed from the finite weighted terms), `selection_score` (the stored `objective_score` when valid; `None` for an infeasible or incomparable candidate, which sorts last), `objective_terms`, and `selected`. Each circuit has exactly one selected row. A selection absent from the recorded history appears as an extra row with `original_index: None`, including for older artifacts without evaluation history and baselines chosen by the regression guard. The selection ranks first unless the regression guard or `pareto=True` chose it: the Pareto front is formed on `depth`, `two_qubit_ops`, `estimated_error`, and `sampling_overhead` alone, so a candidate off the front can still score better on the full objective.
 - `covars() -> dict`: the EMD, CvM, and KS distances between the baseline and selected distributions of `depth`, `two_qubit_ops`, and `estimated_error` over their finite values; `nan` when a side has none.
 - `save(out_dir, overwrite=False)`: writes `dataset/` (the workload's own records, with an index for exactly them), `results.json`, and `summary.txt` (see [artifacts](artifacts.md#balanced-workload-output)). An existing `out_dir` needs `overwrite=True`; a path that is a file, or a directory containing the workload's own dataset, is refused. The files are written to a sibling directory that then replaces `out_dir`, so a save that fails midway leaves an existing one intact.
-- `to_download(zip_path, overwrite=False) -> Path`: saves into a temporary directory and zips it; the archive is renamed into place only once complete, so a failed export leaves an existing one intact.
+- `to_download(zip_path, overwrite=False) -> Path`: publishes the completed archive at `zip_path`. With `overwrite=False`, an existing destination causes `FileExistsError` even if it appeared while the archive was being written.
 
 ```pycon
 >>> print(balanced.summary())
@@ -570,7 +570,7 @@ True
 
 `qbalance.benchmarking.run_matrix(dataset_dir, backend_specs, strategies, out_json, execute=False, shots=1024, seed=0, profile=False) -> Path`
 
-Evaluates every backend, circuit, and strategy combination and writes the matrix JSON (see [artifacts](artifacts.md#matrix-json)), returning `out_json`. `shots` must be a positive integer and `seed` a non-negative integer, neither a boolean; `backend_specs` must be a non-empty iterable of spec strings, and `strategies` a non-empty iterable of `StrategySpec` objects or mappings (validated as by `coerce_strategy_specs`, but a repeated strategy keeps its rows); `execute` and `profile` must be booleans, and `out_json` must not be a directory. All of this is checked before any trial runs. Every combination is compiled, a cutting strategy through its subexperiments; a strategy the backend cannot compile records `compile_error` instead of metrics (for a cut, together with the cut's description), and a circuit that cannot be cut records `cutting_error`. With `execute=True`, each row also records `counts` (pooled and untwirled over a twirled ensemble's instances, which split the shots) and `shots`; an `mthree` strategy adds `mthree_probs` (or `mthree_error`), a `zne` strategy adds `zne_probs` and `zne_realized_factors` (or `zne_error`, keeping the unmitigated counts), and an executed cut adds `cut_parity_expval` and `cut_shots_total`. `exec_error` records a failure to run the circuit itself. The file is written atomically.
+Evaluates every backend, circuit, and strategy combination and writes the matrix JSON (see [artifacts](artifacts.md#matrix-json)), returning `out_json`. `shots` must be a positive integer and `seed` a non-negative integer, neither a boolean; `backend_specs` must be a non-empty iterable of spec strings, and `strategies` a non-empty iterable of `StrategySpec` objects or mappings (validated as by `coerce_strategy_specs`, but a repeated strategy keeps its rows); `execute` and `profile` must be booleans, and `out_json` must be a file path distinct from the source dataset index and circuit artifacts. All of this is checked before any trial runs. Every combination is compiled, a cutting strategy through its subexperiments; a strategy the backend cannot compile records `compile_error` instead of metrics (for a cut, together with the cut's description), and a circuit that cannot be cut records `cutting_error`. With `execute=True`, each row also records `counts` (pooled and untwirled over a twirled ensemble's instances, which split the shots) and `shots`; an `mthree` strategy adds `mthree_probs` (or `mthree_error`), a `zne` strategy adds `zne_probs` and `zne_realized_factors` (or `zne_error`, keeping the unmitigated counts), and an executed cut adds `cut_parity_expval` and `cut_shots_total`. `exec_error` records a failure to run the circuit itself. The file is written atomically.
 
 ```pycon
 >>> from qbalance.benchmarking import run_matrix
@@ -703,7 +703,7 @@ Compiles `circuit` once with Qiskit's preset pass manager, which honors `optimiz
 The metrics describe the whole ensemble:
 
 - `depth`, `size`, `width`, `two_qubit_ops`, `estimated_error`: the maxima over the instances. `depth` and `size` count operations only (see [utilities](#utilities-qbalanceutils)); `two_qubit_ops` counts instructions on exactly two qubits other than `barrier` and `delay`; `estimated_error` is [`estimate_circuit_error`](#estimate_circuit_error). Each counts what one shot executes: a control-flow instruction contributes what its blocks run, a `for_loop`'s body once per index, the costliest branch of an `if_else` or `switch_case`, and a `while_loop`'s or `box`'s body once (a while loop's iteration count is known only at run time).
-- `compile_time_s`: the wall-clock seconds the transpilation took.
+- `compile_time_s` measures elapsed seconds for layout selection, pass manager construction, transpilation, and the requested suppression passes across all instances.
 - `twirl_instances`; `measurement_flip_maps`, one classical-bit flip map per instance, and `measurement_flip_map`, the first of them.
 - `dd_applied` (every instance was padded) and, when it was, `dd_sequence_applied`.
 - `sampling_overhead`: [`zne_sampling_overhead`](#zne_sampling_overhead) of the strategy's factors and degree for a ZNE strategy, otherwise 1.0.
@@ -815,7 +815,7 @@ True
 
 `qbalance.transpile.apply_pauli_twirling(circuit, num_twirls=1, seed=None, target=None) -> list[QuantumCircuit]`
 
-Wraps Qiskit's `pauli_twirl_2q_gates`: returns `num_twirls` circuits in which every two-qubit gate is conjugated by a random Pauli pair that leaves the circuit's unitary unchanged; with `target`, the inserted Paulis are synthesized into its native gates.
+Wraps Qiskit's `pauli_twirl_2q_gates` and returns `num_twirls` circuits. It applies random Pauli gates around each CX, CZ, ECR, and iSWAP while preserving the circuit's unitary. With `target`, the inserted Paulis are synthesized into native gates.
 
 ```pycon
 >>> from qiskit.quantum_info import Operator
@@ -995,7 +995,7 @@ Runs a compiled ensemble the way `Workload.adjust` and `run_matrix` do. The shot
 
 `qbalance.mitigation.apply_mthree_mitigation(backend, raw_counts, measured_qubits, shots=None, calibration_shots=10000, clbits=None) -> dict[str, float]`
 
-M3 readout mitigation of one counts mapping: calibrates the readout of `measured_qubits` on the backend with `calibration_shots` shots, corrects the counts, and returns the nearest probability distribution. `measured_qubits` lists the physical qubit feeding each measured classical bit, ordered by classical bit, and `clbits` the classical bit each of them writes; `measured_qubits_by_clbit` and `measured_clbits` (see [utilities](#utilities-qbalanceutils)) derive both from a compiled circuit. Count keys are projected onto the measured bits for the correction and expanded back afterwards, so register separators are kept and a classical bit no measurement writes stays `0`; with `clbits=None`, every bit of the keys must be measured. Pass counts exactly as measured, before any untwirling. `shots` is accepted for call-site symmetry and unused. mthree needs `backend.configuration()`, which `GenericBackendV2` (`fake:generic`) lacks, so for those backends the calibration runs on `AerSimulator.from_backend(backend)`, the noisy simulator `GenericBackendV2` itself executes on; every other backend is calibrated on itself. Requires the `mitigation` extra.
+M3 readout mitigation of one counts mapping: calibrates the readout of `measured_qubits` on the backend with `calibration_shots` shots, corrects the counts, and returns the nearest probability distribution. `measured_qubits` lists the physical qubit feeding each measured classical bit, ordered by classical bit, and `clbits` the classical bit each of them writes; `measured_qubits_by_clbit` and `measured_clbits` (see [utilities](#utilities-qbalanceutils)) derive both from a compiled circuit. M3 projects count keys onto the measured bits for correction, then restores register separators and the observed values of the other bits. Each bit outside the measurement map must have a fixed value across outcomes with positive counts. Either 0 or 1 is valid. With `clbits=None`, every bit of the keys must be measured. Pass counts exactly as measured, before any untwirling. `shots` is accepted for call-site symmetry and unused. mthree needs `backend.configuration()`, which `GenericBackendV2` (`fake:generic`) lacks, so for those backends the calibration runs on `AerSimulator.from_backend(backend)`, the noisy simulator `GenericBackendV2` itself executes on; every other backend is calibrated on itself. Requires the `mitigation` extra.
 
 ```pycon
 >>> from qbalance.mitigation import apply_mthree_mitigation
@@ -1133,7 +1133,7 @@ $$
 P_{\mathrm{even}} = \min\!\left(1, \max\!\left(0, \frac{1 + \hat y_0}{2}\right)\right), \qquad P_{\mathrm{odd}} = 1 - P_{\mathrm{even}},
 $$
 
-keeping the shape within each class (a class that was never sampled gets one synthetic key, and a class without mass is spread evenly), so the result's parity is $\hat y_0$ clipped to $[-1, 1]$. Pass the realized factors. `factors` must be finite, at least 1, as many as the count mappings, and hold at least $d + 1$ distinct values; counts must be non-negative integers over binary keys.
+keeping the shape within each class (a class absent from the reference uses its observed shape at the lowest factor that sampled it, and a reference class containing only zero counts is weighted evenly), so the result's parity is $\hat y_0$ clipped to $[-1, 1]$. Pass the realized factors. `factors` must be finite, at least 1, as many as the count mappings, and hold at least $d + 1$ distinct values; counts must be non-negative integers over binary keys.
 
 ```pycon
 >>> from qbalance.mitigation import zne_extrapolate_counts
@@ -1211,12 +1211,12 @@ Candidate metrics for a cut strategy. Every subexperiment runs as a circuit of i
 
 `qbalance.cutting.run_cutting_experiment(experiment, compiled, backend, shots, seed=None) -> float`
 
-Runs the compiled subexperiments (per label, in the experiment's order) through `BackendSamplerV2` with `shots` shots each and reconstructs the original circuit's $\langle Z^{\otimes m}\rangle$. `seed` goes to backends whose `run` accepts `seed_simulator`. A circuit that measured nothing raises `ValueError`. A GHZ state on an even number of qubits has parity exactly $+1$; the noisy backend here gives:
+Runs the compiled subexperiments (per label, in the experiment's order) through `BackendSamplerV2` with `shots` shots each and reconstructs the original circuit's $\langle Z^{\otimes m}\rangle$. When the backend accepts `seed_simulator`, partition $i$ uses `seed + i` (starting at $i=0$) so partitions use separate simulator streams. A circuit that measured nothing raises `ValueError`. A GHZ state on an even number of qubits has parity exactly $+1$; the noisy backend here gives:
 
 ```pycon
 >>> from qbalance.cutting import run_cutting_experiment
 >>> round(run_cutting_experiment(experiment, compiled_subexperiments, backend, shots=4000, seed=1), 4)
-0.9561
+0.9547
 ```
 
 ### `evaluate_cutting_experiment`
@@ -1230,7 +1230,7 @@ How `Workload.adjust` and `run_matrix` evaluate a cut candidate. `compile_subexp
 >>> sabre = StrategySpec(optimization_level=1, routing_method="sabre")
 >>> cut_run = evaluate_cutting_experiment(experiment, backend, lambda sub: compile_ensemble(sub, backend, sabre), execute=True, shots=4000, seed=1)
 >>> round(cut_run["cut_parity_expval"], 4), cut_run["cut_shots_total"], cut_run["depth"]
-(0.9561, 48000, 9)
+(0.9547, 48000, 9)
 >>> def too_wide(circuit):
 ...     raise ValueError("subcircuit is wider than the device")
 >>> evaluate_cutting_experiment(experiment, backend, too_wide, execute=True, shots=4000)
@@ -1362,12 +1362,12 @@ Render `report.md` or `report.html` into `out_dir` (created when missing) from a
 ...     {"circuit": "bell", "backend": "fake:generic:5", "strategy": {"optimization_level": 3, "mthree": True},
 ...      "metrics": {"depth": 3, "two_qubit_ops": 1, "estimated_error": 0.01, "compile_time_s": 0.05, "mthree_error": "calibration failed"}},
 ... ]})
->>> print(render_markdown("tiny_matrix.json", "report").read_text())
+>>> print(render_markdown("tiny_matrix.json", "report").read_text(), end="")
 # qbalance report
 <BLANKLINE>
 Matrix: `tiny_matrix.json`
 <BLANKLINE>
-## Backend: fake:generic:5
+## Backend: `fake:generic:5`
 <BLANKLINE>
 | Strategy | mean depth | mean 2q ops | mean est error | mean compile time (s) | failed trials |
 |---|---:|---:|---:|---:|---:|
@@ -1403,14 +1403,14 @@ Matrix: `tiny_matrix.json`
 
 ## Compile cache (`qbalance.cache`)
 
-`Workload.adjust` caches every compiled ensemble on disk. The key is a SHA-256 digest of the cache format version, the Qiskit version, the backend spec with a digest of its calibration data, the backend name, a digest of the circuit's QPY serialization, the strategy's JSON, and the profile flag, so a changed input, toolchain, or calibration never serves a stale entry. An unreadable entry is ignored and recompiled, and a failed write never fails a run.
+`Workload.adjust` caches compiled ensembles on disk. The cache key includes the cache format and Qiskit versions, backend spec and name, reported calibration and timing data, the circuit's QPY fingerprint, the strategy JSON, and the profile flag. Backends that expose no calibration data use their spec and name for identification. If calibration lookup or circuit fingerprinting fails, the workflow bypasses the cache. It recompiles unreadable entries and logs a failed cache write while keeping the compiled result.
 
 - `CacheEntry(key, dir)`: where one entry lives.
 - `cache_dir(root=None) -> Path`: `<root>/cache`, with `root` defaulting to the platform cache directory (`qbalance.utils.default_cache_dir()`).
 - `get_entry(key, root=None) -> CacheEntry`: the entry at `<cache_dir>/<key[:2]>/<key>`.
 - `fingerprint_circuit(circuit) -> str`: the SHA-256 hex digest of the circuit's QPY serialization.
-- `save_compiled(entry, circuit, meta)`: writes a circuit, or a list of circuits, to `compiled.qpy` (atomically), then `meta.json`.
-- `load_compiled_ensemble(entry) -> (circuits, meta) | None`: every cached circuit and the metadata (flip-map keys restored to integers); `None` when the entry is incomplete.
+- `save_compiled(entry, circuit, meta)`: serializes the circuits and metadata before writing either file. It writes `compiled.qpy` and `meta.json` atomically and records a digest of the QPY bytes in the metadata.
+- `load_compiled_ensemble(entry) -> (circuits, meta) | None`: returns every cached circuit and the metadata, with flip-map keys restored to integers. A missing file or mismatched QPY digest is a cache miss, which can happen after an interrupted write or during concurrent writes. Older entries without a digest also load.
 - `load_compiled(entry) -> (circuit, meta) | None`: the first circuit only.
 
 ```pycon
@@ -1443,7 +1443,7 @@ True
 - `backend_display_name(backend) -> str`: a backend's name, whether `name` is an attribute or a method, falling back to its class name.
 - `stable_hash_bytes(data) -> str` and `stable_hash_str(s) -> str`: SHA-256 hex digests, stable across processes (unlike `hash()`).
 - `atomic_write_bytes(path, data)`: writes through a temporary file in the same directory that is renamed into place, so readers never see a partial file, and the file gets the permissions the umask gives any new file; `dump_json(path, obj)` writes sorted, indented JSON that way, and `load_json(path)` reads JSON.
-- `replacing_directory(target)`: a context manager yielding an empty staging directory beside `target`. When the block completes, whatever is at `target` is moved aside, the staging directory renamed into its place, and the old entry deleted (it is restored should that rename fail); when the block raises, `target` is left untouched and the staging directory removed. The new directory gets the permissions the umask gives any new directory. `save_dataset`, `BalancedWorkload.save`, and `qbalance compile` write through it.
+- `replacing_directory(target, *, overwrite=True)` yields an empty staging directory beside `target`. With `overwrite=False`, an existing destination causes `FileExistsError`, including when it appears during staging. When the block completes, whatever is at `target` is moved aside, the staging directory renamed into its place, and the old entry deleted (it is restored should that rename fail); when the block raises, `target` is left untouched and the staging directory removed. The new directory gets the permissions the umask gives any new directory. `save_dataset`, `BalancedWorkload.save`, and `qbalance compile` write through it.
 - `default_cache_dir(app="qbalance") -> Path`: the platform user cache directory for `app`.
 
 ```pycon

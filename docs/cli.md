@@ -21,7 +21,7 @@ Currently, `examples` is the supported dataset action.
 
 ## `adjust`
 
-Select one strategy per circuit for a target backend. The example shows every option; `--strategies` and `--objective` are optional files, described in [getting started](getting-started.md) and [strategies](strategies.md) (an objective file is a mapping such as `{"depth": 1.0, "two_qubit_ops": 2.0}`).
+Select one strategy per circuit for a target backend. The example uses custom strategies and objective weights. The optional `--strategies` and `--objective` files are described in [getting started](getting-started.md) and [strategies](strategies.md) (an objective file is a mapping such as `{"depth": 1.0, "two_qubit_ops": 2.0}`).
 
 ```bash
 python -m qbalance adjust ./circuits \
@@ -79,7 +79,7 @@ python -m qbalance matrix ./circuits \
 Options:
 
 - `--backend, -b TEXT`: repeatable backend spec.
-- `--out, -o PATH`: output matrix JSON path; an existing file is replaced (atomically, once every trial has run).
+- `--out, -o PATH`: output matrix JSON path. The command can replace an existing output file after all trials finish. It rejects paths belonging to the source dataset index or circuit artifacts.
 - `--strategies PATH`: strategy JSON file. If omitted, the matrix runs five built-in strategies: optimization level 1 with SABRE routing, and at optimization level 2 with SABRE routing the noise-aware layout, Pauli twirling (8 instances), dynamical decoupling (`XY4`), and measurement twirling (8 instances).
 - `--execute`: execute compiled circuits and include counts/shot data.
 - `--shots INTEGER`: execution shots; must be a positive integer.
@@ -134,7 +134,7 @@ Options:
 - `--optimization-level INTEGER`: Qiskit optimization level, `0`-`3` (default `1`).
 - `--routing-method TEXT`: routing method (default `sabre`).
 - `--layout-method TEXT`: layout method, for example `sabre` or `qbalance_noise_aware` (default: Qiskit's choice).
-- `--pauli-twirling`: twirl the compiled two-qubit gates.
+- `--pauli-twirling`: apply Pauli twirling to compiled CX, CZ, ECR, and iSWAP gates.
 - `--num-twirls INTEGER`: number of twirl instances (default `1`).
 - `--dd`: pad idle windows with dynamical decoupling (`XY4`, or `XX` when the target has no `y` gate).
 - `--meas-twirl`: twirl the terminal measurements.

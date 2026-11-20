@@ -9,11 +9,13 @@ from __future__ import annotations
 import copy
 import json
 import math
+import os
 import shutil
 import tempfile
 import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from statistics import mean
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
@@ -32,19 +34,20 @@ from qbalance.cutting.addon_cutting import (
 )
 from qbalance.dataset import DATASET_INDEX, CircuitDataset
 from qbalance.dataset import CircuitRecord as DatasetCircuitRecord
-from qbalance.dataset import load_dataset
+from qbalance.dataset import check_dataset_output_file, load_dataset
 from qbalance.diagnostics.distribution import cvm_1d, emd_1d, ks_1d
-from qbalance.errors import QBalanceError
+from qbalance.errors import QBalanceError, error_message
 from qbalance.execution.ensemble import run_ensemble
 from qbalance.logging import get_logger
 from qbalance.mitigation.zne import parity_expectation_value
-from qbalance.objectives import Objective, default_objective
+from qbalance.objectives import Objective, _sum_finite_terms, default_objective
 from qbalance.search import BanditSearcher, default_candidate_strategies, pareto_front
 from qbalance.strategies import Strategy, StrategySpec, coerce_strategy_specs
 from qbalance.transpile.pipeline import compile_ensemble
 from qbalance.utils import (
     backend_display_name,
     dump_json,
+    finite_float_or_none,
     replacing_directory,
     stable_hash_str,
     strict_json_value,
@@ -109,10 +112,10 @@ class BalancedWorkload:
             for k in keys:
                 vals: List[float] = []
                 for m in ms:
-                    value = _finite_float_or_none(m.get(k))
+                    value = finite_float_or_none(m.get(k))
                     if value is not None:
                         vals.append(value)
-                out[k] = float(np.mean(vals)) if vals else float("nan")
+                out[k] = mean(vals) if vals else float("nan")
             return out
 
         sel_ms = [s.metrics for s in self.selections.values()]
@@ -159,7 +162,7 @@ class BalancedWorkload:
         if objective_deltas:
             lines.append(
                 "  objective deltas: "
-                f"mean={float(np.mean(objective_deltas)):.4g} "
+                f"mean={mean(objective_deltas):.4g} "
                 f"improved={improved}/{len(comparable)} "
                 f"unchanged={unchanged}/{len(comparable)}"
             )
@@ -196,17 +199,18 @@ class BalancedWorkload:
 
             metric_deltas: Dict[str, Dict[str, Optional[float]]] = {}
             for key in metric_keys:
-                base_value = _finite_float_or_none(baseline.get(key))
-                selected_value = _finite_float_or_none(selected_metrics.get(key))
+                base_value = finite_float_or_none(baseline.get(key))
+                selected_value = finite_float_or_none(selected_metrics.get(key))
                 delta = (
-                    selected_value - base_value
+                    finite_float_or_none(selected_value - base_value)
                     if base_value is not None and selected_value is not None
                     else None
                 )
-                if delta is not None and base_value is not None and base_value != 0.0:
-                    relative_delta = delta / abs(base_value)
-                else:
-                    relative_delta = None
+                relative_delta = (
+                    _relative_delta(selected_value, base_value)
+                    if selected_value is not None and base_value is not None
+                    else None
+                )
                 metric_deltas[key] = {
                     "baseline": base_value,
                     "selected": selected_value,
@@ -224,12 +228,14 @@ class BalancedWorkload:
                 for key, _ in self.objective._valid_weights
                 if key in baseline_terms and key in selected_terms
             ]
+            shared_scores = (
+                _shared_term_scores(self.objective, baseline, selected_metrics)
+                if baseline_score is not None and selected_score is not None
+                else None
+            )
             score_delta = (
-                sum(selected_terms[key] for key in comparable_terms)
-                - sum(baseline_terms[key] for key in comparable_terms)
-                if comparable_terms
-                and baseline_score is not None
-                and selected_score is not None
+                finite_float_or_none(shared_scores[1] - shared_scores[0])
+                if shared_scores is not None
                 else None
             )
             diagnostics[name] = {
@@ -238,7 +244,9 @@ class BalancedWorkload:
                 "objective_delta": score_delta,
                 "comparable_objective_terms": comparable_terms,
                 "objective_improved": (
-                    score_delta <= 0.0 if score_delta is not None else None
+                    shared_scores[1] <= shared_scores[0]
+                    if shared_scores is not None
+                    else None
                 ),
                 "objective_terms": {
                     "baseline": baseline_terms,
@@ -262,28 +270,31 @@ class BalancedWorkload:
         """
 
         rankings: Dict[str, List[Dict[str, Any]]] = {}
-        for name, strategies in self.evaluation_history.items():
+        for name in dict.fromkeys((*self.evaluation_history, *self.selections)):
+            strategies = self.evaluation_history.get(name, [])
             selected = self.selections.get(name)
             rows: List[Dict[str, Any]] = []
+            matched = False
             for original_index, strategy in enumerate(strategies):
+                is_selected = (
+                    not matched
+                    and selected is not None
+                    and strategy.spec == selected.spec
+                    and strategy.metrics == _without_guard_metadata(selected.metrics)
+                )
                 rows.append(
                     _candidate_ranking_row(
                         strategy,
                         self.objective,
                         original_index=original_index,
-                        selected=selected is not None
-                        and strategy.spec == selected.spec
-                        and strategy.metrics
-                        == _without_guard_metadata(selected.metrics),
+                        selected=is_selected,
                     )
                 )
+                matched = matched or is_selected
 
-            # A guarded no-regression selection can intentionally choose the
-            # baseline strategy, which is not part of the evaluated candidate
-            # history when users provide an explicit strategy list.  Include it
-            # in the audit leaderboard so saved rankings always identify the
-            # final selection exactly once.
-            if selected is not None and not any(row["selected"] for row in rows):
+            # The guard may select a baseline outside the candidate pool, and
+            # older saved workloads can omit the circuit's history entirely.
+            if selected is not None and not matched:
                 rows.append(
                     _candidate_ranking_row(
                         selected,
@@ -378,7 +389,7 @@ class BalancedWorkload:
 
         # Written beside out_dir and swapped in at the end, so a save that
         # fails midway leaves an existing one intact rather than deleted.
-        with replacing_directory(out_dir) as staging:
+        with replacing_directory(out_dir, overwrite=overwrite) as staging:
             self._write_to(staging)
 
     def _write_to(self, out_dir: Path) -> None:
@@ -401,7 +412,7 @@ class BalancedWorkload:
         # Save results
         results = {
             "backend_spec": self.backend_spec,
-            "objective": self.objective.weights,
+            "objective": dict(self.objective.weights),
             "selections": {
                 name: {"spec": s.spec.model_dump(), "metrics": s.metrics}
                 for name, s in self.selections.items()
@@ -438,10 +449,13 @@ class BalancedWorkload:
 
         Raises:
             FileExistsError: If ``zip_path`` exists and ``overwrite`` is false.
+            ValueError: If the destination is a file in the source dataset.
         """
         zip_path = Path(zip_path)
         if (zip_path.exists() or zip_path.is_symlink()) and not overwrite:
             raise FileExistsError(f"{zip_path} exists (use overwrite=True)")
+        if overwrite:
+            check_dataset_output_file(self.dataset, zip_path)
         zip_path.parent.mkdir(parents=True, exist_ok=True)
         # A unique staging directory avoids clobbering unrelated user paths
         # that happen to match a predictable name next to the zip file.
@@ -456,7 +470,15 @@ class BalancedWorkload:
                         z.write(p, p.relative_to(content))
             # Moved into place only once complete, so a failed export leaves
             # an existing archive intact rather than truncated.
-            archive.replace(zip_path)
+            if overwrite:
+                archive.replace(zip_path)
+            elif os.name == "nt":
+                # Windows rename already refuses an existing destination.
+                archive.rename(zip_path)
+            else:
+                # POSIX rename replaces an archive another writer published
+                # during staging. A hard link atomically creates only a new name.
+                os.link(archive, zip_path)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         return zip_path
@@ -803,7 +825,12 @@ class Workload:
         backend = resolve_backend(self.backend_spec)
         # Calibrations change under an unchanged name and spec (daily, on
         # hardware), and layouts and error estimates derive from them.
-        backend_key = f"{self.backend_spec}|cal={_calibration_fingerprint(backend)}"
+        calibration = _calibration_fingerprint(backend)
+        backend_key = (
+            None
+            if calibration == "unknown"
+            else f"{self.backend_spec}|cal={calibration}"
+        )
         rng = np.random.default_rng(seed)
         cache_root = Path(cache_root) if cache_root is not None else None
 
@@ -891,8 +918,14 @@ class Workload:
             else:
                 baseline_score = _objective_score(baseline_metrics[rec.name], obj)
 
-                def _observe(spec: StrategySpec, metrics: Dict[str, Any]) -> None:
-                    target = _bandit_target(metrics["objective_score"], baseline_score)
+                def _observe(
+                    spec: StrategySpec,
+                    metrics: Dict[str, Any],
+                    reference_score: float = baseline_score,
+                ) -> None:
+                    target = _bandit_target(
+                        _objective_score(metrics, obj), reference_score
+                    )
                     if target is not None:
                         bandit.observe(spec, target)
 
@@ -975,6 +1008,9 @@ def _warn_about_unused_objective_terms(
     reported: set[str] = set()
     for metrics in evaluated:
         reported.update(metrics)
+    if not reported:
+        # A valid empty dataset or split has no trials to check for typos.
+        return
     unused = [key for key, _ in objective._valid_weights if key not in reported]
     if unused:
         log.warning(
@@ -995,13 +1031,23 @@ def _bandit_target(score: Any, baseline_score: float) -> Optional[float]:
     the scale, so strategy effects learned on one circuit carry over to the
     next.  Candidates or baselines without a finite score are not observed.
     """
-    if not _is_finite_number(score) or not math.isfinite(baseline_score):
+    score_f = finite_float_or_none(score)
+    reference = finite_float_or_none(baseline_score)
+    if score_f is None or reference is None:
         return None
-    score_f = float(score)
-    scale = abs(baseline_score)
-    if scale == 0.0:
-        return score_f - baseline_score
-    return (score_f - baseline_score) / scale
+    return score_f if reference == 0.0 else _relative_delta(score_f, reference)
+
+
+def _relative_delta(value: float, baseline: float) -> Optional[float]:
+    """Return a change relative to the baseline magnitude when representable."""
+    if baseline == 0.0:
+        return None
+    scale = abs(baseline)
+    relative = (value - baseline) / scale
+    if not math.isfinite(relative):
+        # Opposite signs can overflow the subtraction even for a small ratio.
+        relative = value / scale - baseline / scale
+    return relative if math.isfinite(relative) else None
 
 
 # Metadata the regression guard adds to the metrics it selects.
@@ -1081,22 +1127,14 @@ def _shared_term_scores(
 
     Returns ``None`` when no weighted term is finite on both sides.
     """
-    first_total = 0.0
-    second_total = 0.0
-    shared = False
-    for key, weight in objective._valid_weights:
-        first_value = _finite_float_or_none(first.get(key))
-        second_value = _finite_float_or_none(second.get(key))
-        if first_value is None or second_value is None:
-            continue
-        first_term = weight * first_value
-        second_term = weight * second_value
-        if not (math.isfinite(first_term) and math.isfinite(second_term)):
-            continue
-        first_total += first_term
-        second_total += second_term
-        shared = True
-    if not shared or not (math.isfinite(first_total) and math.isfinite(second_total)):
+    first_terms = dict(objective._terms(first))
+    second_terms = dict(objective._terms(second))
+    shared = first_terms.keys() & second_terms.keys()
+    if not shared:
+        return None
+    first_total = _sum_finite_terms([first_terms[key] for key in shared])
+    second_total = _sum_finite_terms([second_terms[key] for key in shared])
+    if not (math.isfinite(first_total) and math.isfinite(second_total)):
         return None
     return first_total, second_total
 
@@ -1112,7 +1150,7 @@ def _evaluate_candidate(
     seed: int,
     profile: bool,
     cache_root: Optional[Path],
-    backend_key: Optional[str] = None,
+    backend_key: Optional[str] = "",
 ) -> Dict[str, Any]:
     """Compile and optionally execute one candidate strategy for one circuit.
 
@@ -1138,7 +1176,10 @@ def _evaluate_candidate(
                 e,
             )
             return _score_candidate(
-                {"cutting_error": str(e)}, spec, objective=objective, execute=execute
+                {"cutting_error": error_message(e)},
+                spec,
+                objective=objective,
+                execute=execute,
             )
         if experiment is not None:
             return _evaluate_cut_experiment(
@@ -1169,7 +1210,10 @@ def _evaluate_candidate(
         # reason to abandon every other circuit and candidate of the run.
         log.warning("Candidate could not be compiled for this backend: %s", e)
         return _score_candidate(
-            {"compile_error": str(e)}, spec, objective=objective, execute=execute
+            {"compile_error": error_message(e)},
+            spec,
+            objective=objective,
+            execute=execute,
         )
     if spec.cutting:
         # The circuit already fits the subcircuit width, so it runs uncut.
@@ -1192,7 +1236,7 @@ def _evaluate_candidate(
             m["raw_top_prob"] = _top_prob(run.counts)
             m["raw_parity_expval"] = parity_expectation_value(run.counts)
         except Exception as e:
-            m["exec_error"] = str(e)
+            m["exec_error"] = error_message(e)
         else:
             if run.mthree_error is not None:
                 m["mthree_error"] = run.mthree_error
@@ -1219,7 +1263,7 @@ def _evaluate_cut_experiment(
     seed: int,
     profile: bool,
     cache_root: Optional[Path],
-    backend_key: Optional[str] = None,
+    backend_key: Optional[str] = "",
 ) -> Dict[str, Any]:
     """Compile (and optionally run) every subexperiment of a cut candidate.
 
@@ -1263,7 +1307,7 @@ def _summarize_mitigated(
         m[f"{prefix}_top_prob"] = float(max(probs.values()) if probs else 0.0)
         m[f"{prefix}_parity_expval"] = parity_expectation_value(probs)
     except Exception as e:
-        m[error_key] = str(e)
+        m[error_key] = error_message(e)
 
 
 def _score_candidate(
@@ -1308,19 +1352,7 @@ def _strategy_failure_reason(
 
 def _is_finite_number(value: Any) -> bool:
     """Return True when *value* can be safely used as a finite float."""
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError, OverflowError):
-        return False
-
-
-def _finite_float_or_none(value: Any) -> Optional[float]:
-    """Return a finite float for diagnostics, otherwise ``None``."""
-    try:
-        value_f = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return value_f if math.isfinite(value_f) else None
+    return finite_float_or_none(value) is not None
 
 
 def _finite_samples(metrics: Iterable[Mapping[str, Any]], key: str) -> List[float]:
@@ -1332,7 +1364,7 @@ def _finite_samples(metrics: Iterable[Mapping[str, Any]], key: str) -> List[floa
     """
     samples: List[float] = []
     for m in metrics:
-        value = _finite_float_or_none(m.get(key))
+        value = finite_float_or_none(m.get(key))
         if value is not None:
             samples.append(value)
     return samples
@@ -1348,18 +1380,8 @@ def _diagnostic_objective_score(
     diagnostics: missing or malformed metrics should be reported as
     incomparable rather than as an accidental score of zero.
     """
-    terms: Dict[str, float] = {}
-    total = 0.0
-    for key, weight in objective._valid_weights:
-        value = _finite_float_or_none(metrics.get(key))
-        if value is None:
-            continue
-        term = weight * value
-        if not math.isfinite(term):
-            continue
-        terms[key] = term
-        total += term
-
+    terms = dict(objective._terms(metrics))
+    total = _sum_finite_terms(terms.values())
     if not terms or not math.isfinite(total):
         return None, terms
     return total, terms
@@ -1367,33 +1389,10 @@ def _diagnostic_objective_score(
 
 def _derived_objective_score(metrics: Mapping[str, Any], objective: Objective) -> float:
     """Compute a finite-safe score from metrics and objective weights."""
-    derived = 0.0
-    contributed = False
-    has_objective_key = False
-    for key, weight in objective._valid_weights:
-        if key not in metrics:
-            continue
-        has_objective_key = True
-        raw_value = metrics.get(key)
-        if raw_value is None:
-            continue
-        try:
-            value_f = float(raw_value)
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if not np.isfinite(value_f):
-            continue
-        term = weight * value_f
-        if not np.isfinite(term):
-            continue
-        derived += term
-        contributed = True
-
-    if not contributed and has_objective_key:
-        return float("inf")
-    if not contributed:
+    derived, terms = _diagnostic_objective_score(objective, metrics)
+    if not terms and not any(key in metrics for key, _ in objective._valid_weights):
         return float("nan")
-    return derived if np.isfinite(derived) else float("inf")
+    return derived if derived is not None else float("inf")
 
 
 def _is_infeasible_metrics(metrics: Mapping[str, Any] | None) -> bool:
@@ -1407,17 +1406,10 @@ def _objective_score(metrics: Mapping[str, Any] | None, objective: Objective) ->
         return float("inf")
     assert isinstance(metrics, Mapping)
 
-    try:
-        score = float(metrics.get("objective_score", float("inf")))
-    except (TypeError, ValueError, OverflowError):
-        score = float("inf")
+    score = finite_float_or_none(metrics.get("objective_score"))
     derived = _derived_objective_score(metrics, objective)
-    if np.isfinite(score) and np.isfinite(derived):
-        return score
-    if np.isfinite(score) and np.isnan(derived):
-        return score
-    if np.isfinite(score):
-        return float("inf")
+    if score is not None:
+        return float("inf") if math.isinf(derived) else score
 
     # Fallback: compute objective only if at least one objective-relevant
     # metric contributes a finite weighted term. This prevents malformed
@@ -1428,7 +1420,7 @@ def _objective_score(metrics: Mapping[str, Any] | None, objective: Objective) ->
 
 # Bump whenever compile_ensemble's output for unchanged inputs changes, so
 # entries written by the previous pipeline are no longer served.
-_COMPILE_CACHE_VERSION = 9
+_COMPILE_CACHE_VERSION = 11
 
 
 def _calibration_fingerprint(backend: Any) -> str:
@@ -1445,7 +1437,15 @@ def _calibration_fingerprint(backend: Any) -> str:
     try:
         target = getattr(backend, "target", None)
         if target is not None:
-            items.append(("dt", getattr(target, "dt", None)))
+            for attr in (
+                "num_qubits",
+                "dt",
+                "granularity",
+                "min_length",
+                "pulse_alignment",
+                "acquire_alignment",
+            ):
+                items.append((attr, getattr(target, attr, None)))
             for name in sorted(str(n) for n in target.operation_names):
                 for qargs, props in sorted(
                     target[name].items(), key=lambda item: repr(item[0])
@@ -1473,7 +1473,8 @@ def _calibration_fingerprint(backend: Any) -> str:
                     ("updated", str(getattr(calibration, "last_update_date", "")))
                 )
     except Exception:
-        # A backend that cannot describe itself is keyed by name and spec only.
+        # A failed lookup is different from a backend with no calibration
+        # data. The caller cannot identify the calibration for this run.
         return "unknown"
     return stable_hash_str(repr(items)) if items else "none"
 
@@ -1494,7 +1495,7 @@ def _compile_cached(
     spec: StrategySpec,
     profile: bool,
     cache_root: Optional[Path],
-    backend_key: Optional[str] = None,
+    backend_key: Optional[str] = "",
 ) -> Tuple[List[Any], Dict[str, Any]]:
     """Compile ``circuit`` into its instance ensemble, reusing the compile cache.
 
@@ -1509,8 +1510,9 @@ def _compile_cached(
         spec: Strategy to compile with.
         profile: Whether pass-level transpiler profiling is enabled.
         cache_root: Compile-cache directory; the platform cache when ``None``.
-        backend_key (default: None): Backend spec string that resolved to
+        backend_key (default: ""): Backend spec string that resolved to
             ``backend`` (``adjust`` appends its calibration fingerprint).
+            Pass ``None`` to bypass the cache when calibration lookup failed.
             Backend display names are not unique -- every
             ``fake:generic:N:SEED`` shares one name while carrying different
             calibration data, and a device keeps its name across
@@ -1524,14 +1526,15 @@ def _compile_cached(
         Exception: Whatever :func:`compile_ensemble` raises on a cache miss.
     """
     try:
-        fpr = fingerprint_circuit(circuit)
+        fpr = fingerprint_circuit(circuit) if backend_key is not None else None
     except Exception:
-        # builtins.hash of a str is salted per process (PYTHONHASHSEED), so it
-        # would give the same circuit a different key on every run and the
-        # cache could never hit across processes.
-        fpr = stable_hash_str(str(circuit))
+        # A drawing can hide gate definitions and round angle parameters.
+        fpr = None
+    if fpr is None:
+        # Both circuit and backend must be identifiable for safe cache reuse.
+        return compile_ensemble(circuit, backend=backend, spec=spec, profile=profile)
     backend_name = backend_display_name(backend)
-    backend_id = f"{backend_key if backend_key is not None else ''}|{backend_name}"
+    backend_id = f"{backend_key}|{backend_name}"
     # The toolchain is part of the key: a different qiskit transpiles the same
     # inputs differently, and a qbalance compile-pipeline change alters what
     # compile_ensemble returns.  Without it a stale entry keeps being served --

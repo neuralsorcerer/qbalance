@@ -6,9 +6,10 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
-from typing import Any, List, Tuple
+from typing import List, Tuple
+
+from qbalance.utils import finite_float_or_none
 
 
 def _metric_value(metrics: Mapping[str, object] | None, key: str) -> float:
@@ -17,14 +18,10 @@ def _metric_value(metrics: Mapping[str, object] | None, key: str) -> float:
     A missing, non-numeric or non-finite value, and a ``None`` mapping,
     count as ``inf``: the worst possible value when minimizing.
     """
-    if metrics is None:
+    if not isinstance(metrics, Mapping):
         return float("inf")
-    try:
-        raw: Any = metrics.get(key, float("inf"))
-        value = float(raw)
-    except (AttributeError, TypeError, ValueError):
-        return float("inf")
-    return value if math.isfinite(value) else float("inf")
+    value = finite_float_or_none(metrics.get(key))
+    return value if value is not None else float("inf")
 
 
 def pareto_front(

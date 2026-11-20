@@ -18,6 +18,7 @@ from qbalance.reports.common import (
     matrix_results,
     sort_value,
     strategy_key,
+    write_report,
 )
 
 
@@ -49,7 +50,6 @@ def render_html(matrix_json: Path, out_dir: Path) -> Path:
     # empty report directory behind.
     results = matrix_results(load_matrix(matrix_json))
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
 
     grouped: Dict[str, Dict[str, List[Dict[str, Any]]]] = defaultdict(
         lambda: defaultdict(list)
@@ -130,6 +130,4 @@ code { background: #f3f3f3; padding: 1px 4px; border-radius: 4px; }
         autoescape=True,
     )
     html = tpl.render(model=model, matrix_name=Path(matrix_json).name)
-    out = out_dir / "report.html"
-    out.write_text(html, encoding="utf-8")
-    return out
+    return write_report(matrix_json, out_dir / "report.html", html)

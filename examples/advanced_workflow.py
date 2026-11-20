@@ -14,14 +14,11 @@ This script demonstrates:
 
 from __future__ import annotations
 
-import logging
-
 from qbalance import Workload, load_data
 from qbalance.objectives import Objective
 
 
 def main() -> None:
-    logging.disable(logging.ERROR)
     ds = load_data("tiny")
     wl = Workload.from_dataset(ds).set_target("fake:generic:5")
     objective = Objective(

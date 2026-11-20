@@ -58,7 +58,11 @@ print(reloaded.summary())
 
 ## CLI quickstart
 
+The matrix uses Aer for noisy simulation, and the HTML report uses the report extra.
+
 ```bash
+pip install "qbalance[aer,report]"
+
 python -m qbalance dataset examples --out ./circuits --overwrite
 
 python -m qbalance adjust ./circuits \

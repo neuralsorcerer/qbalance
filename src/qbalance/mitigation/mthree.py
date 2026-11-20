@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from qbalance.errors import OptionalDependencyError
 from qbalance.logging import get_logger
-from qbalance.utils import backend_display_name
+from qbalance.utils import backend_display_name, validate_integral
 
 log = get_logger(__name__)
 
@@ -144,29 +145,39 @@ class _KeyLayout:
     A count key has one character per classical bit, classical bit 0
     rightmost, with a space between registers.  M3 needs exactly one character
     per measured qubit, so keys are projected onto the measured bits for the
-    correction and expanded back afterwards: separators return, and a
-    classical bit no measurement writes -- always ``0`` -- is restored as ``0``.
+    correction and expanded back afterwards. Bits outside the measurement
+    map must have a fixed value, which can be nonzero after a classical store.
     """
 
     def __init__(self, counts: Mapping[str, Any], clbits: Optional[Sequence[int]]):
-        template = next(iter(counts), "")
+        template = next((key for key, count in counts.items() if count > 0), "")
         self.template = _register_separators(counts)
-        self.width = len(template.replace(" ", ""))
-        self.clbits = None if clbits is None else [int(c) for c in clbits]
+        self.reference = template.replace(" ", "")
+        self.width = len(self.reference)
+        self.clbits = (
+            None if clbits is None else [validate_integral("clbit", c) for c in clbits]
+        )
         if self.clbits is not None and any(
             c < 0 or c >= self.width for c in self.clbits
         ):
             raise ValueError(
                 f"clbits {self.clbits} do not fit count keys of {self.width} bits"
             )
+        if self.clbits is not None and len(set(self.clbits)) != len(self.clbits):
+            raise ValueError("clbits must identify distinct classical bits")
 
     def project(self, counts: Mapping[str, Any]) -> Dict[str, Any]:
         """Return ``counts`` keyed by the measured bits only, in M3's order."""
         if self.clbits is None:
             return _without_separators(counts)
         projected: Dict[str, Any] = {}
+        fixed = set(range(self.width)).difference(self.clbits)
         for key, value in counts.items():
             bits = key.replace(" ", "")
+            if len(bits) != self.width:
+                raise ValueError("count keys must all have the same width")
+            if value and any(bits[-1 - c] != self.reference[-1 - c] for c in fixed):
+                raise ValueError("classical bits outside the measurement map vary")
             reduced = "".join(bits[len(bits) - 1 - c] for c in reversed(self.clbits))
             projected[reduced] = projected.get(reduced, 0) + value
         return projected
@@ -175,10 +186,20 @@ class _KeyLayout:
         """Return the full count key for a key over the measured bits."""
         if self.clbits is None:
             return _with_separators(reduced, self.template)
-        chars = ["0"] * self.width
+        chars = list(self.reference)
         for index, clbit in enumerate(self.clbits):
             chars[self.width - 1 - clbit] = reduced[len(reduced) - 1 - index]
         return _with_separators("".join(chars), self.template)
+
+
+def _normalize_probabilities(probs: Mapping[str, float]) -> Dict[str, float]:
+    """Ensure the returned M3 probabilities have unit mass."""
+    # M3's solve and projection can retain single-precision roundoff. Entropy
+    # and maximum-probability metrics consume this mapping directly.
+    total = math.fsum(probs.values())
+    if not math.isfinite(total) or total <= 0.0:
+        raise ValueError("M3 returned an invalid probability normalization")
+    return {key: value / total for key, value in probs.items()}
 
 
 def apply_mthree_mitigation(
@@ -214,13 +235,13 @@ def apply_mthree_mitigation(
             means every bit of the keys is measured, in order.
 
     Returns:
-        Mitigated probabilities keyed like ``raw_counts``: register
-        separators are kept, and a classical bit no measurement writes stays
-        ``0``.
+        Mitigated probabilities keyed like ``raw_counts``. Register separators
+        and the fixed values of bits outside the measurement map are preserved.
 
     Raises:
         OptionalDependencyError: If mthree is not installed.
-        ValueError: If ``clbits`` names a bit outside the count keys.
+        ValueError: If ``clbits`` names a bit outside the count keys, repeats a
+            bit, or leaves out a bit whose value varies between outcomes.
         Exception: Whatever mthree raises when it cannot calibrate the
             backend (``GenericBackendV2`` without qiskit-aer, for one).
     """
@@ -231,13 +252,16 @@ def apply_mthree_mitigation(
             "mthree is required (install qbalance[mitigation])"
         ) from e
 
+    layout = _KeyLayout(raw_counts, clbits)
+    projected = layout.project(raw_counts)
     mit = mthree.M3Mitigation(_calibration_system(backend))
     mit.cals_from_system(measured_qubits, calibration_shots)
-    layout = _KeyLayout(raw_counts, clbits)
-    quasi = mit.apply_correction(layout.project(raw_counts), measured_qubits)
+    quasi = mit.apply_correction(projected, measured_qubits)
     probs = quasi.nearest_probability_distribution()  # best-effort true probs
     # Convert to python dict, keyed like the counts that came in.
-    return {layout.expand(k): float(v) for k, v in probs.items()}
+    return _normalize_probabilities(
+        {layout.expand(key): float(value) for key, value in probs.items()}
+    )
 
 
 def mitigate_twirled_counts(
@@ -313,4 +337,4 @@ def mitigate_twirled_counts(
         for key, value in untwirled.items():
             combined[key] = combined.get(key, 0.0) + weight * value
     probs = QuasiDistribution(combined, shots=total).nearest_probability_distribution()
-    return {key: float(value) for key, value in probs.items()}
+    return _normalize_probabilities({key: float(value) for key, value in probs.items()})

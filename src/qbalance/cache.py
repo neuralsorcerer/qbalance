@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import io
+import json
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,10 +18,11 @@ from qbalance.transpile.suppression import normalize_measurement_flip_map
 from qbalance.utils import (
     atomic_write_bytes,
     default_cache_dir,
-    dump_json,
-    load_json,
     stable_hash_bytes,
 )
+
+# Only publication is serialized. Circuit serialization can run concurrently.
+_CACHE_WRITE_LOCK = threading.Lock()
 
 
 @dataclass
@@ -66,8 +69,18 @@ def cache_dir(root: Optional[Path] = None) -> Path:
 def get_entry(key: str, root: Optional[Path] = None) -> CacheEntry:
     """Return the cache entry for ``key``, stored at ``cache_dir(root)/key[:2]/key``.
 
-    Nothing is created on disk.
+    Nothing is created on disk. A key or shard that would escape the cache
+    hierarchy raises ``ValueError``.
     """
+    if (
+        not isinstance(key, str)
+        or key in ("", ".")
+        or key.startswith("..")
+        or any(char in key for char in "/\\:\0")
+    ):
+        raise ValueError(
+            "cache key and its two-character prefix must be plain path components"
+        )
     d = cache_dir(root) / key[:2] / key
     return CacheEntry(key=key, dir=d)
 
@@ -112,9 +125,25 @@ def load_compiled_ensemble(entry: CacheEntry) -> Optional[Tuple[List[Any], Dict]
         from qiskit import qpy
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required for cache load") from e
-    m = _normalize_cached_meta(load_json(meta))
-    with qpy_path.open("rb") as f:
-        circuits = list(qpy.load(f))
+    # Writers publish metadata first. Read the circuit first so that even a
+    # legacy entry (a plain metrics object without a digest) is consistent
+    # during its first update to the new format.
+    try:
+        payload = qpy_path.read_bytes()
+        stored = json.loads(meta.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+
+    if isinstance(stored, list):
+        if len(stored) != 2 or not isinstance(stored[1], dict):
+            raise ValueError(f"Invalid cache metadata in {meta}")
+        digest, stored = stored
+        if digest != stable_hash_bytes(payload):
+            return None
+    elif not isinstance(stored, dict):
+        raise ValueError(f"Invalid cache metadata in {meta}")
+    m = _normalize_cached_meta(stored)
+    circuits = list(qpy.load(io.BytesIO(payload)))
     if not circuits:
         raise ValueError(f"Cache entry {entry.dir} holds no circuit")
     return circuits, m
@@ -142,9 +171,9 @@ def load_compiled(entry: CacheEntry) -> Optional[Tuple[Any, Dict]]:
 def save_compiled(entry: CacheEntry, circuit: Any, meta: Dict) -> None:
     """Persist a compiled circuit, or a list of them, with its metadata.
 
-    ``compiled.qpy`` and then ``meta.json`` are each written atomically, so
-    an interrupted save leaves an entry that reads as a miss rather than a
-    corrupt one.
+    Both files are serialized before publication. The metadata records the
+    digest of the circuit bytes, so a reader that observes an interrupted or
+    overlapping update treats the entry as a miss.
 
     Args:
         entry: Where to store the circuits.
@@ -162,13 +191,11 @@ def save_compiled(entry: CacheEntry, circuit: Any, meta: Dict) -> None:
     except Exception as e:  # pragma: no cover
         raise OptionalDependencyError("qiskit is required for cache save") from e
 
-    # Serialize before touching disk: a circuit QPY cannot represent then fails
-    # here, leaving no partial artifact behind.
     buffer = io.BytesIO()
     qpy.dump(circuit, buffer)
+    payload = buffer.getvalue()
+    metadata = json.dumps([stable_hash_bytes(payload), meta], indent=2, sort_keys=True)
 
-    entry.dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_bytes(entry.dir / "compiled.qpy", buffer.getvalue())
-    # meta.json is written last: load_compiled requires both files, so a run
-    # interrupted between them leaves an entry that simply reads as a miss.
-    dump_json(entry.dir / "meta.json", meta)
+    with _CACHE_WRITE_LOCK:
+        atomic_write_bytes(entry.dir / "meta.json", metadata.encode("utf-8"))
+        atomic_write_bytes(entry.dir / "compiled.qpy", payload)

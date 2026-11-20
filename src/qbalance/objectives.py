@@ -8,8 +8,24 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from fractions import Fraction
 from pathlib import Path
-from typing import Any, Mapping, Tuple
+from types import MappingProxyType
+from typing import Any, Collection, Iterator, Mapping, Tuple
+
+from qbalance.utils import finite_float_or_none
+
+
+def _sum_finite_terms(terms: Collection[float]) -> float:
+    """Add finite terms without allowing intermediate overflow to erase cancellation."""
+    try:
+        return math.fsum(terms)
+    except OverflowError:
+        total = sum((Fraction(term) for term in terms), Fraction())
+        try:
+            return float(total)
+        except OverflowError:
+            return math.inf if total > 0 else -math.inf
 
 
 @dataclass(frozen=True)
@@ -28,18 +44,20 @@ class Objective:
         ignored by :meth:`score`.
         """
         copied_weights = dict(self.weights)
-        object.__setattr__(self, "weights", copied_weights)
+        object.__setattr__(self, "weights", MappingProxyType(copied_weights))
 
         valid_weights: list[tuple[str, float]] = []
         for key, weight in copied_weights.items():
-            try:
-                weight_f = float(weight)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not math.isfinite(weight_f):
+            weight_f = finite_float_or_none(weight)
+            if weight_f is None:
                 continue
             valid_weights.append((key, weight_f))
         object.__setattr__(self, "_valid_weights", tuple(valid_weights))
+
+    def __reduce__(self) -> tuple[type[Objective], tuple[dict[str, float]]]:
+        # A read-only mapping proxy cannot itself be pickled. Reconstruct the
+        # objective from its public weights when copying or sending it to a worker.
+        return type(self), (dict(self.weights),)
 
     def score(self, metrics: Mapping[str, Any]) -> float:
         """Return the weighted sum of ``metrics`` (lower is better).
@@ -54,23 +72,17 @@ class Objective:
         Returns:
             The score; 0 when no term applies.
         """
-        score = 0.0
-        for key, weight in self._valid_weights:
-            value = metrics.get(key)
-            if value is None:
-                continue
+        return _sum_finite_terms([term for _, term in self._terms(metrics)])
 
-            try:
-                value_f = float(value)
-            except (TypeError, ValueError, OverflowError):
-                continue
-            if not math.isfinite(value_f):
+    def _terms(self, metrics: Mapping[str, Any]) -> Iterator[tuple[str, float]]:
+        """Yield the finite weighted terms contributed by these metrics."""
+        for key, weight in self._valid_weights:
+            value_f = finite_float_or_none(metrics.get(key))
+            if value_f is None:
                 continue
             term = weight * value_f
-            if not math.isfinite(term):
-                continue
-            score += term
-        return score
+            if math.isfinite(term):
+                yield key, term
 
 
 def load_objective(path: Path | str) -> Objective:
@@ -146,13 +158,8 @@ def _normalize_objective_weights(weights: Mapping[str, Any]) -> dict[str, float]
             raise ValueError("Objective metric names must be non-empty strings")
         if isinstance(value, bool):
             raise ValueError(f"Objective weight for {key!r} must not be a boolean")
-        try:
-            value_f = float(value)
-        except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                f"Objective weight for {key!r} must be numeric and finite"
-            ) from exc
-        if not math.isfinite(value_f):
+        value_f = finite_float_or_none(value)
+        if value_f is None:
             raise ValueError(f"Objective weight for {key!r} must be numeric and finite")
         normalized[key] = value_f
 

@@ -135,7 +135,7 @@ def resolve(spec: str) -> Any:
             qiskit-ibm-runtime installed.
     """
     parts = [part.strip() for part in spec.split(":")]
-    if len(parts) < 3 or any(part == "" for part in parts[:3]):
+    if len(parts) < 3 or parts[0] != "fake" or not all(parts):
         raise QBalanceError(f"Invalid fake backend spec: {spec!r}")
 
     mode = parts[1]

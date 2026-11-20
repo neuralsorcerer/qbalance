@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "qbalance"
-version = "0.2.1"
+version = "0.2.2"
 description = "Balancing workflow library for quantum compilation/mitigation benchmarking with Qiskit."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -82,6 +82,16 @@ qbalance = "qbalance.cli:main"
 "markdown" = "qbalance.reports.markdown:render_markdown"
 "html" = "qbalance.reports.html:render_html"
 
+[tool.black]
+target-version = ["py310"]
+
+[tool.ruff.lint]
+# Black and isort handle formatting. Check Python errors and common logic bugs.
+select = ["E4", "E7", "E9", "F", "B0", "PLE"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
@@ -91,3 +101,4 @@ no_site_packages = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["error"]

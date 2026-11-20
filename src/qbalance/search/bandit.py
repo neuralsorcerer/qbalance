@@ -13,6 +13,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from qbalance.strategies import StrategySpec
+from qbalance.utils import finite_float_or_none
 
 
 def _featurize(spec: StrategySpec) -> np.ndarray:
@@ -79,12 +80,15 @@ class BanditSearcher:
             ValueError: If ``alpha`` is not finite and positive, or ``sigma2``
                 is neither ``None`` nor finite and positive.
         """
-        if not math.isfinite(self.alpha) or self.alpha <= 0.0:
+        alpha = finite_float_or_none(self.alpha)
+        if alpha is None or alpha <= 0.0:
             raise ValueError("alpha must be a finite positive value")
-        if self.sigma2 is not None and (
-            not math.isfinite(self.sigma2) or self.sigma2 <= 0.0
-        ):
-            raise ValueError("sigma2 must be a finite positive value or None")
+        self.alpha = alpha
+        if self.sigma2 is not None:
+            sigma2 = finite_float_or_none(self.sigma2)
+            if sigma2 is None or sigma2 <= 0.0:
+                raise ValueError("sigma2 must be a finite positive value or None")
+            self.sigma2 = sigma2
 
         self._feature_dim = len(_featurize(StrategySpec()))
         self._X: List[np.ndarray] = []
@@ -100,8 +104,8 @@ class BanditSearcher:
         Raises:
             ValueError: If ``score`` is not finite.
         """
-        score_value = float(score)
-        if not math.isfinite(score_value):
+        score_value = finite_float_or_none(score)
+        if score_value is None:
             raise ValueError("score must be finite")
 
         self._X.append(_featurize(spec))
@@ -121,20 +125,43 @@ class BanditSearcher:
 
         X = np.vstack(self._X)
         y = np.asarray(self._y)
-        sigma2 = self._noise_variance()
-        # Ridge posterior precision (inverse covariance).
-        precision = self.alpha * np.eye(X.shape[1]) + (X.T @ X) / sigma2
-        rhs = (X.T @ y) / sigma2
-        mean = np.linalg.solve(precision, rhs)
+        inverse_std = self._inverse_noise_std()
+        weighted_X = X * inverse_std
+        precision = self.alpha * np.eye(X.shape[1]) + weighted_X.T @ weighted_X
+
+        # Normalize the observations for the solve. Even a finite posterior
+        # mean can have an unrepresentable unscaled X.T @ y.
+        score_scale = float(np.max(np.abs(y))) or 1.0
+        rhs = X.T @ (y / score_scale)
+        if inverse_std > 1.0:
+            # Factor the noise precision out of both sides of the solve.
+            mean = np.linalg.solve(precision / inverse_std / inverse_std, rhs)
+            mean *= score_scale
+        else:
+            mean = np.linalg.solve(precision, rhs)
+            mean *= (score_scale * inverse_std) * inverse_std
         return mean, precision
+
+    def _inverse_noise_std(self) -> float:
+        """Compute reciprocal noise dispersion without squaring large scores."""
+        if self.sigma2 is not None:
+            return 1.0 / math.sqrt(self.sigma2)
+        if len(self._y) < 2:
+            return 1.0 / math.sqrt(_PRIOR_NOISE_VARIANCE)
+        scores = np.asarray(self._y)
+        scale = float(np.max(np.abs(scores))) or 1.0
+        relative_std = float(np.std(scores / scale, ddof=1))
+        max_precision_sqrt = 1.0 / math.sqrt(_MIN_NOISE_VARIANCE)
+        if relative_std == 0.0:
+            return max_precision_sqrt
+        return min((1.0 / relative_std) / scale, max_precision_sqrt)
 
     def _noise_variance(self) -> float:
         """Return the observation-noise variance the posterior assumes."""
         if self.sigma2 is not None:
             return float(self.sigma2)
-        if len(self._y) < 2:
-            return _PRIOR_NOISE_VARIANCE
-        return max(float(np.var(self._y, ddof=1)), _MIN_NOISE_VARIANCE)
+        std = 1.0 / self._inverse_noise_std()
+        return std * std
 
     def propose(
         self, candidates: Sequence[StrategySpec], rng: np.random.Generator
@@ -162,6 +189,6 @@ class BanditSearcher:
         w = mean + np.linalg.solve(chol.T, z)
 
         features = np.vstack([_featurize(c) for c in candidates])
-        scores = features @ w
+        scores = features @ (w / (float(np.max(np.abs(w))) or 1.0))
         best_idx = int(np.argmin(scores))
         return candidates[best_idx]

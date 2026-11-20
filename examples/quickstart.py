@@ -6,13 +6,10 @@
 
 from __future__ import annotations
 
-import logging
-
 from qbalance import Workload, load_data
 
 
 def main() -> None:
-    logging.disable(logging.ERROR)
     ds = load_data("tiny")
     wl = Workload.from_dataset(ds).set_target("fake:generic:5")
     bw = wl.adjust(

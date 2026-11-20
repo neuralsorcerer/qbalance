@@ -149,6 +149,7 @@ def test_cutting_and_workload_and_matrix_and_cli(monkeypatch, tmp_path):
     monkeypatch.setattr(
         wl, "load_compiled_ensemble", lambda entry: ([qc], {"depth": 1})
     )
+    monkeypatch.setattr(wl, "fingerprint_circuit", lambda circuit: "test-circuit")
     hit_c, hit_m = wl._compile_cached(qc, object(), StrategySpec(), False, tmp_path)
     assert hit_c == [qc]
     assert hit_m["depth"] == 1
